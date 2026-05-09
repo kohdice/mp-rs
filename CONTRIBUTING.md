@@ -44,7 +44,8 @@ cargo fmt --check            # Check formatting (rustfmt with rustfmt.toml)
 cargo lint                   # Alias for `clippy --workspace --all-targets -- -D warnings` (see .cargo/config.toml)
 ```
 
-A CI pipeline is not yet wired up in this repository, so make sure all of the commands above pass locally before pushing.
+CI runs formatting, linting, build, and test checks for pushes and pull requests targeting `main` and `develop`.
+Make sure all of the commands above pass locally before pushing.
 
 ### Benchmarking
 
