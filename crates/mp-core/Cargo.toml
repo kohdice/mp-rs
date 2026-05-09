@@ -1,5 +1,5 @@
 [package]
-name = "mp"
+name = "mp-core"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -8,7 +8,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-mp-core.workspace = true
 
 [lints]
 workspace = true
