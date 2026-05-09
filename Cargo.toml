@@ -11,6 +11,7 @@ license = "MIT"
 repository = "https://github.com/kohdice/mp-rs"
 
 [workspace.dependencies]
+mp-core = { path = "crates/mp-core" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
