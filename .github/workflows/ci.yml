@@ -1,0 +1,87 @@
+name: CI
+permissions:
+  contents: read
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+jobs:
+  static-analysis:
+    name: Static Analysis (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Nix
+        uses: NixOS/nix-installer-action@0dd8719406e061e029989ec91b93d677d9e2bd63 # main 2026-02-15
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: "4G"
+          gc-max-store-size-macos: "4G"
+      - name: Cache Cargo registry, git db, and clippy target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-static-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-static-
+            cargo-${{ runner.os }}-
+      - name: Check Rust formatting
+        run: nix develop -c cargo fmt --all --check
+      - name: Run clippy (cargo lint)
+        run: nix develop -c cargo lint
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    needs: static-analysis
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Nix
+        uses: NixOS/nix-installer-action@0dd8719406e061e029989ec91b93d677d9e2bd63 # main 2026-02-15
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+      - name: Cache Nix store
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'rust-toolchain.toml') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: "4G"
+          gc-max-store-size-macos: "4G"
+      - name: Cache Cargo registry, git db, and build target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-test-
+            cargo-${{ runner.os }}-
+      - name: Build & run tests
+        run: nix develop -c cargo test --workspace --all-targets --locked
