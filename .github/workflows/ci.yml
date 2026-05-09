@@ -1,6 +1,7 @@
 name: CI
 permissions:
   contents: read
+  id-token: write
 on:
   push:
     branches: [main, develop]
@@ -25,13 +26,10 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
-      - name: Cache Nix store
-        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+      - name: Set up Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'rust-toolchain.toml') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
-          gc-max-store-size-linux: "4G"
-          gc-max-store-size-macos: "4G"
+          use-flakehub: false
       - name: Cache Cargo registry, git db, and clippy target
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -64,13 +62,10 @@ jobs:
         with:
           extra-conf: |
             experimental-features = nix-command flakes
-      - name: Cache Nix store
-        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
+      - name: Set up Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@565684385bcd71bad329742eefe8d12f2e765b39 # v13
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'rust-toolchain.toml') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
-          gc-max-store-size-linux: "4G"
-          gc-max-store-size-macos: "4G"
+          use-flakehub: false
       - name: Cache Cargo registry, git db, and build target
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
