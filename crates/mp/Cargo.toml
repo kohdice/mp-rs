@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-mp-core.workspace = true
+clap.workspace = true
+mp-parser.workspace = true
+mp-renderer.workspace = true
 
 [lints]
 workspace = true
