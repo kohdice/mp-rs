@@ -1,5 +1,5 @@
 [package]
-name = "mp"
+name = "mp-ast"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
@@ -8,9 +8,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-clap.workspace = true
-mp-parser.workspace = true
-mp-renderer.workspace = true
 
 [lints]
 workspace = true
