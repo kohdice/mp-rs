@@ -280,12 +280,30 @@ impl Renderer {
         self.write_style_end(writer)?;
         if !code_block.text.is_empty() {
             writer.write_all(b"\n")?;
-            self.write_styled_text(writer, code_style, &code_block.text)?;
+            self.render_code_body(writer, code_block, code_style)?;
         }
         if !code_block.text.ends_with('\n') {
             writer.write_all(b"\n")?;
         }
         self.write_styled_text(writer, fence_style, "```")
+    }
+
+    fn render_code_body(
+        &self,
+        writer: &mut dyn Write,
+        code_block: &CodeBlock<'_>,
+        fallback_style: TextStyle,
+    ) -> io::Result<()> {
+        if self.options.ansi {
+            let info = code_block.info.as_ref().map(|info| info.as_str());
+            if let Some(ranges) = crate::syntax::highlighted_ranges(info, &code_block.text) {
+                for range in ranges {
+                    self.write_styled_text(writer, range.style, range.text)?;
+                }
+                return Ok(());
+            }
+        }
+        self.write_styled_text(writer, fallback_style, &code_block.text)
     }
 
     fn render_table(&self, writer: &mut dyn Write, table: &Table<'_>) -> io::Result<()> {
@@ -641,6 +659,7 @@ fn utf8(bytes: Vec<u8>) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::io::{self, Write};
 
     use mp_ast::{
@@ -793,6 +812,102 @@ mod tests {
     }
 
     #[test]
+    fn ansi_disabled_keeps_fenced_code_blocks_plain() -> io::Result<()> {
+        let document = rust_code_document("rust", "fn main() {}\n");
+
+        assert_eq!(render_plain(&document)?, "```rust\nfn main() {}\n```");
+        Ok(())
+    }
+
+    #[test]
+    fn highlights_rust_code_without_rewriting_source_text() -> io::Result<()> {
+        let document = rust_code_document("rust", "fn main() {}\n");
+        let output = render_ansi(&document)?;
+
+        assert_eq!(strip_ansi(&output), "```rust\nfn main() {}\n```");
+        assert_code_body_has_distinct_syntax_colors(&output)?;
+        Ok(())
+    }
+
+    #[test]
+    fn highlights_rust_code_from_rs_language_alias() -> io::Result<()> {
+        let document = rust_code_document("rs", "fn main() {}\n");
+        let output = render_ansi(&document)?;
+
+        assert_eq!(strip_ansi(&output), "```rs\nfn main() {}\n```");
+        assert_code_body_has_distinct_syntax_colors(&output)?;
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_languages_fall_back_to_single_style_code_body() -> io::Result<()> {
+        let document = rust_code_document("not-a-language", "fn main() {}\n");
+
+        assert_eq!(
+            render_ansi(&document)?,
+            "\u{1b}[2;38;2;88;110;117m```not-a-language\u{1b}[0m\n\
+             \u{1b}[38;2;42;161;152mfn main() {}\n\u{1b}[0m\
+             \u{1b}[2;38;2;88;110;117m```\u{1b}[0m",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_code_blocks_fall_back_to_single_style_code_body() -> io::Result<()> {
+        let oversized = "x".repeat(512 * 1024 + 1);
+        let document = Document {
+            blocks: vec![Block::CodeBlock(CodeBlock {
+                info: Some(Text::borrowed("rust")),
+                text: Text::owned(oversized.clone()),
+            })],
+            has_trailing_newline: false,
+        };
+        let output = render_ansi(&document)?;
+
+        assert!(output.contains(&format!(
+            "\u{1b}[38;2;42;161;152m{oversized}\u{1b}[0m\n\
+             \u{1b}[2;38;2;88;110;117m```"
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn highlighting_errors_fall_back_to_plain_code_body() -> io::Result<()> {
+        let document = rust_code_document("rust", "fn main() {}\n");
+        crate::syntax::force_next_highlight_error_for_test();
+
+        assert_eq!(
+            render_ansi(&document)?,
+            "\u{1b}[2;38;2;88;110;117m```rust\u{1b}[0m\n\
+             \u{1b}[38;2;42;161;152mfn main() {}\n\u{1b}[0m\
+             \u{1b}[2;38;2;88;110;117m```\u{1b}[0m",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_code_blocks_keep_blockquote_prefixes_while_highlighting() -> io::Result<()> {
+        let document = Document {
+            blocks: vec![Block::BlockQuote(BlockQuote {
+                kind: None,
+                blocks: vec![Block::CodeBlock(CodeBlock {
+                    info: Some(Text::borrowed("rust")),
+                    text: Text::borrowed("fn main() {}\n"),
+                })],
+            })],
+            has_trailing_newline: true,
+        };
+        let output = render_ansi(&document)?;
+        crate::syntax::force_next_highlight_error_for_test();
+        let fallback = render_ansi(&document)?;
+
+        assert_eq!(strip_ansi(&output), "│ ```rust\n│ fn main() {}\n│ ```\n");
+        assert_ne!(output, fallback);
+        assert_code_body_has_distinct_syntax_colors(&output)?;
+        Ok(())
+    }
+
+    #[test]
     fn renders_synthetic_closing_fence_for_code_blocks() -> io::Result<()> {
         let document = Document {
             blocks: vec![Block::CodeBlock(CodeBlock { info: None, text: Text::borrowed("abc\n") })],
@@ -886,6 +1001,78 @@ mod tests {
         let mut output = Vec::new();
         Renderer::new(RenderOptions { ansi: false }).render(&mut output, document)?;
         utf8(output)
+    }
+
+    fn render_ansi(document: &Document<'_>) -> io::Result<String> {
+        let mut output = Vec::new();
+        Renderer::new(RenderOptions { ansi: true }).render(&mut output, document)?;
+        utf8(output)
+    }
+
+    fn rust_code_document(info: &'static str, text: &'static str) -> Document<'static> {
+        Document {
+            blocks: vec![Block::CodeBlock(CodeBlock {
+                info: Some(Text::borrowed(info)),
+                text: Text::borrowed(text),
+            })],
+            has_trailing_newline: false,
+        }
+    }
+
+    fn assert_code_body_has_distinct_syntax_colors(output: &str) -> io::Result<()> {
+        let body_line = output
+            .split('\n')
+            .nth(1)
+            .ok_or_else(|| io::Error::other("rendered code block did not contain a body line"))?;
+        let colors = ansi_rgb_colors(body_line);
+
+        assert!(
+            colors.len() > 1,
+            "expected more than one syntax color in code body, got {colors:?}",
+        );
+        Ok(())
+    }
+
+    fn ansi_rgb_colors(text: &str) -> BTreeSet<String> {
+        let mut colors = BTreeSet::new();
+        for sequence in text.split("\u{1b}[").skip(1) {
+            if let Some((parameters, _text)) = sequence.split_once('m')
+                && let Some(color) = rgb_color_parameter(parameters)
+            {
+                colors.insert(color);
+            }
+        }
+        colors
+    }
+
+    fn rgb_color_parameter(parameters: &str) -> Option<String> {
+        let mut parts = parameters.split(';');
+        while let Some(part) = parts.next() {
+            if part == "38" && parts.next() == Some("2") {
+                let red = parts.next()?;
+                let green = parts.next()?;
+                let blue = parts.next()?;
+                return Some(format!("{red};{green};{blue}"));
+            }
+        }
+        None
+    }
+
+    fn strip_ansi(text: &str) -> String {
+        let mut output = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+                for parameter in chars.by_ref() {
+                    if parameter.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                output.push(ch);
+            }
+        }
+        output
     }
 
     fn list_item(task: Option<TaskState>, text: &'static str) -> ListItem<'static> {
