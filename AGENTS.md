@@ -8,9 +8,15 @@ mp-rs (markdown-preview) is a command-line tool to preview Markdown.
 
 - Rust toolchain: `1.95.0` (`channel` in `rust-toolchain.toml`)
 - Edition: `2024` (`edition` in workspace `Cargo.toml`; MSRV `rust-version = "1.95"`)
-- Workspace layout: a Cargo workspace (`resolver = "3"`) with members under `crates/*` (currently `crates/mp`, the binary entry point)
+- Workspace layout: a Cargo workspace (`resolver = "3"`) with members under `crates/*`:
+  - `crates/mp` — CLI binary: argument parsing, terminal detection, error-to-exit-code mapping.
+  - `crates/mp-preview` — use-case layer: composes parsing and rendering (`preview` / `preview_file`); the only crate `mp` depends on directly.
+  - `crates/mp-parser` — Markdown-to-block parsing (streaming `blocks` iterator).
+  - `crates/mp-renderer` — block-to-terminal rendering; guarantees non-empty output ends with exactly one trailing newline.
+  - `crates/mp-ast` — shared AST data types.
 - Workspace lints (defined in root `Cargo.toml` `[workspace.lints]`):
   - `rust.unsafe_code = "forbid"` — `unsafe` blocks are not allowed.
+  - `rust.missing_docs = "warn"` — every public item and each crate root needs a doc comment (`cargo lint` escalates the warning to an error); private items are documented only when behavior is not obvious.
   - `clippy.unwrap_used = "deny"` and `clippy.expect_used = "deny"` — propagate errors via `Result` and `?` instead of panicking.
 
 ## CORE PRINCIPLES
