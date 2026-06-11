@@ -9,21 +9,29 @@ use crate::list::{ListMarkerDisplay, list_marker, marker_width, task_marker, wri
 use crate::style::{TextStyle, heading_style};
 use crate::table::{BorderKind, table_layout, write_border_line, write_table_row};
 use crate::theme::{Palette, solarized};
+use crate::tokens::{IMAGE_OPEN, LINK_TEXT_CLOSE, TITLE_SEPARATOR, URL_CLOSE, URL_OPEN};
 use crate::writer::{LinePrefixWriter, write_repeated_str, write_spaces};
 
 const THEMATIC_BREAK_WIDTH: usize = 32;
 
+/// Configuration for a [`Renderer`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderOptions {
+    /// Whether to emit ANSI escape sequences for colors and text styles.
     pub ansi: bool,
 }
 
+/// Streaming render state threaded through [`Renderer::render_block`] calls.
+///
+/// Tracks whether any bytes have been written and whether the output currently ends
+/// with a newline, so block separators and the final newline are emitted correctly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderState {
-    rendered_blocks: usize,
+    has_rendered: bool,
     ended_with_newline: bool,
 }
 
+/// Renders [`Block`]s as terminal output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Renderer {
     options: RenderOptions,
@@ -31,23 +39,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// Creates a renderer with the given options.
     #[must_use]
     pub fn new(options: RenderOptions) -> Self {
         Self { options, palette: solarized::DARK_PALETTE }
-    }
-
-    /// Renders a complete Markdown AST to a writer.
-    ///
-    /// # Errors
-    ///
-    /// Returns any I/O error reported by the writer.
-    pub fn render<W>(&self, writer: &mut W, document: &mp_ast::Document<'_>) -> io::Result<()>
-    where
-        W: Write + ?Sized,
-    {
-        let mut state = RenderState::default();
-        self.render_blocks(writer, &document.blocks, 0, &mut state)?;
-        self.finish(writer, &state, document.has_trailing_newline)
     }
 
     /// Renders one top-level block and updates the streaming render state.
@@ -67,21 +62,19 @@ impl Renderer {
         self.render_block_with_state(writer, block, 0, state)
     }
 
-    /// Completes streaming rendering by writing any required trailing newline.
+    /// Completes streaming rendering by terminating the output with a newline.
+    ///
+    /// Output that wrote any bytes ends with exactly one trailing newline; if nothing
+    /// was written, `finish` writes nothing.
     ///
     /// # Errors
     ///
     /// Returns any I/O error reported by the writer.
-    pub fn finish<W>(
-        &self,
-        writer: &mut W,
-        state: &RenderState,
-        has_trailing_newline: bool,
-    ) -> io::Result<()>
+    pub fn finish<W>(&self, writer: &mut W, state: &RenderState) -> io::Result<()>
     where
         W: Write + ?Sized,
     {
-        if has_trailing_newline && !state.ended_with_newline {
+        if state.has_rendered && !state.ended_with_newline {
             writer.write_all(b"\n")?;
         }
         Ok(())
@@ -114,11 +107,11 @@ impl Renderer {
         W: Write + ?Sized,
     {
         let mut writer = NewlineTrackingWriter::new(writer, state.ended_with_newline);
-        if state.rendered_blocks > 0 {
+        if state.has_rendered {
             writer.write_all(b"\n")?;
         }
         self.render_block_at_depth(&mut writer, depth, block)?;
-        state.rendered_blocks += 1;
+        state.has_rendered |= writer.wrote_bytes();
         state.ended_with_newline = writer.ended_with_newline();
         Ok(())
     }
@@ -183,7 +176,7 @@ impl Renderer {
                 TextStyle::default().fg(self.palette.list_marker).bold(),
                 blockquote_kind_label(kind),
             )?;
-            state.rendered_blocks = 1;
+            state.has_rendered = true;
         }
         self.render_blocks(&mut prefixed, &blockquote.blocks, depth, &mut state)?;
         prefixed.finish()
@@ -368,21 +361,33 @@ impl Renderer {
                 Inline::Text(text) => writer.write_all(text.as_bytes())?,
                 Inline::Emphasis(children) => {
                     let child_style = current_style.italic();
-                    self.write_style_start(writer, child_style)?;
-                    self.render_inlines_inner(writer, children, child_style, break_prefix)?;
-                    self.restore_style(writer, current_style)?;
+                    self.render_wrapped_inlines(
+                        writer,
+                        children,
+                        current_style,
+                        child_style,
+                        break_prefix,
+                    )?;
                 }
                 Inline::Strong(children) => {
                     let child_style = current_style.bold();
-                    self.write_style_start(writer, child_style)?;
-                    self.render_inlines_inner(writer, children, child_style, break_prefix)?;
-                    self.restore_style(writer, current_style)?;
+                    self.render_wrapped_inlines(
+                        writer,
+                        children,
+                        current_style,
+                        child_style,
+                        break_prefix,
+                    )?;
                 }
                 Inline::Strikethrough(children) => {
                     let child_style = current_style.strikethrough();
-                    self.write_style_start(writer, child_style)?;
-                    self.render_inlines_inner(writer, children, child_style, break_prefix)?;
-                    self.restore_style(writer, current_style)?;
+                    self.render_wrapped_inlines(
+                        writer,
+                        children,
+                        current_style,
+                        child_style,
+                        break_prefix,
+                    )?;
                 }
                 Inline::Code(text) => {
                     let style = TextStyle::default().fg(self.palette.inline_code);
@@ -394,9 +399,13 @@ impl Renderer {
                 }
                 Inline::Link { destination, title, kind, children } => {
                     let child_style = current_style.fg(self.palette.link).underline();
-                    self.write_style_start(writer, child_style)?;
-                    self.render_inlines_inner(writer, children, child_style, break_prefix)?;
-                    self.restore_style(writer, current_style)?;
+                    self.render_wrapped_inlines(
+                        writer,
+                        children,
+                        current_style,
+                        child_style,
+                        break_prefix,
+                    )?;
                     if *kind == LinkKind::Regular {
                         self.write_url_display(writer, destination, title, current_style)?;
                     }
@@ -404,9 +413,9 @@ impl Renderer {
                 Inline::Image { destination, title, alt } => {
                     let image_style = TextStyle::default().fg(self.palette.muted).italic();
                     self.write_style_start(writer, image_style)?;
-                    writer.write_all(b"[img: ")?;
+                    writer.write_all(IMAGE_OPEN.as_bytes())?;
                     self.render_inlines_inner(writer, alt, image_style, break_prefix)?;
-                    writer.write_all(b"]")?;
+                    writer.write_all(LINK_TEXT_CLOSE.as_bytes())?;
                     self.restore_style(writer, current_style)?;
                     self.write_url_display(writer, destination, title, current_style)?;
                 }
@@ -419,6 +428,19 @@ impl Renderer {
             }
         }
         Ok(())
+    }
+
+    fn render_wrapped_inlines(
+        &self,
+        writer: &mut dyn Write,
+        children: &[Inline<'_>],
+        current_style: TextStyle,
+        child_style: TextStyle,
+        break_prefix: Option<usize>,
+    ) -> io::Result<()> {
+        self.write_style_start(writer, child_style)?;
+        self.render_inlines_inner(writer, children, child_style, break_prefix)?;
+        self.restore_style(writer, current_style)
     }
 
     fn write_table_border(
@@ -454,13 +476,13 @@ impl Renderer {
     ) -> io::Result<()> {
         let muted_dim = TextStyle::default().fg(self.palette.muted).dim();
         self.write_style_start(writer, muted_dim)?;
-        writer.write_all(b"(")?;
+        writer.write_all(URL_OPEN.as_bytes())?;
         writer.write_all(destination.as_bytes())?;
-        writer.write_all(b")")?;
+        writer.write_all(URL_CLOSE.as_bytes())?;
         if !title.is_empty() {
             let title_style = TextStyle::default().fg(self.palette.muted).dim().italic();
             self.write_style_start(writer, title_style)?;
-            writer.write_all(" — ".as_bytes())?;
+            writer.write_all(TITLE_SEPARATOR.as_bytes())?;
             writer.write_all(title.as_bytes())?;
         }
         self.restore_style(writer, restore_style)?;
@@ -518,6 +540,7 @@ where
 {
     inner: &'a mut W,
     ended_with_newline: bool,
+    wrote_bytes: bool,
 }
 
 impl<'a, W> NewlineTrackingWriter<'a, W>
@@ -525,16 +548,21 @@ where
     W: Write + ?Sized,
 {
     fn new(inner: &'a mut W, ended_with_newline: bool) -> Self {
-        Self { inner, ended_with_newline }
+        Self { inner, ended_with_newline, wrote_bytes: false }
     }
 
     fn ended_with_newline(&self) -> bool {
         self.ended_with_newline
     }
 
+    fn wrote_bytes(&self) -> bool {
+        self.wrote_bytes
+    }
+
     fn track_bytes(&mut self, bytes: &[u8]) {
         if let Some(last) = bytes.last() {
             self.ended_with_newline = *last == b'\n';
+            self.wrote_bytes = true;
         }
     }
 }
@@ -582,6 +610,9 @@ where
     W: Write + ?Sized,
 {
     if options.ansi {
+        // Worst case is all five attributes plus a truecolor foreground:
+        // "\x1b[" (2) + "1;2;3;4;9" (9) + ";38;2;255;255;255" (17) + "m" (1) = 29 bytes.
+        // 48 leaves comfortable headroom while staying allocation-free on the stack.
         let mut buffer = [0; 48];
         let mut length = 0;
         push_sgr_param(&mut buffer, &mut length, b"1", style.is_bold());
@@ -663,135 +694,117 @@ mod tests {
     use std::io::{self, Write};
 
     use mp_ast::{
-        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Document, Heading, Inline,
-        LinkKind, List, ListItem, ListKind, Table, TaskState, Text,
+        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, Inline, LinkKind, List,
+        ListItem, ListKind, Table, TaskState, Text,
     };
 
     use super::*;
 
     #[test]
     fn renders_reference_style_block_spacing_and_markers() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![
-                Block::Heading(Heading {
-                    level: 1,
-                    children: vec![Inline::Text(Text::borrowed("Title"))],
-                }),
-                Block::BlankLine,
-                Block::List(List {
-                    kind: ListKind::Unordered,
-                    items: vec![list_item(None, "item")],
-                }),
-                Block::BlockQuote(BlockQuote {
-                    kind: None,
-                    blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("quoted"))])],
-                }),
-            ],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![
+            Block::Heading(Heading {
+                level: 1,
+                children: vec![Inline::Text(Text::borrowed("Title"))],
+            }),
+            Block::BlankLine,
+            Block::List(List { kind: ListKind::Unordered, items: vec![list_item(None, "item")] }),
+            Block::BlockQuote(BlockQuote {
+                kind: None,
+                blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("quoted"))])],
+            }),
+        ];
 
-        assert_eq!(render_plain(&document)?, "Title\n\n• item\n│ quoted\n");
+        assert_eq!(render_plain(&blocks)?, "Title\n\n• item\n│ quoted\n");
         Ok(())
     }
 
     #[test]
     fn renders_task_lists_with_checkbox_glyphs() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::List(List {
-                kind: ListKind::Unordered,
-                items: vec![
-                    list_item(Some(TaskState::Checked), "done"),
-                    list_item(Some(TaskState::Unchecked), "todo"),
-                ],
-            })],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![
+                list_item(Some(TaskState::Checked), "done"),
+                list_item(Some(TaskState::Unchecked), "todo"),
+            ],
+        })];
 
-        assert_eq!(render_plain(&document)?, "• ☑ done\n• ☐ todo\n");
+        assert_eq!(render_plain(&blocks)?, "• ☑ done\n• ☐ todo\n");
         Ok(())
     }
 
     #[test]
     fn indents_nested_lists_to_the_parent_content_column() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::List(List {
-                kind: ListKind::Ordered { start: 9 },
-                items: vec![
-                    ListItem {
-                        task: None,
-                        blocks: vec![
-                            Block::Paragraph(vec![Inline::Text(Text::borrowed("item"))]),
-                            Block::List(List {
-                                kind: ListKind::Ordered { start: 1 },
-                                items: vec![list_item(None, "child")],
-                            }),
-                        ],
-                    },
-                    ListItem {
-                        task: Some(TaskState::Checked),
-                        blocks: vec![
-                            Block::Paragraph(vec![Inline::Text(Text::borrowed("next"))]),
-                            Block::List(List {
-                                kind: ListKind::Unordered,
-                                items: vec![list_item(None, "child")],
-                            }),
-                        ],
-                    },
-                ],
-            })],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Ordered { start: 9 },
+            items: vec![
+                ListItem {
+                    task: None,
+                    blocks: vec![
+                        Block::Paragraph(vec![Inline::Text(Text::borrowed("item"))]),
+                        Block::List(List {
+                            kind: ListKind::Ordered { start: 1 },
+                            items: vec![list_item(None, "child")],
+                        }),
+                    ],
+                },
+                ListItem {
+                    task: Some(TaskState::Checked),
+                    blocks: vec![
+                        Block::Paragraph(vec![Inline::Text(Text::borrowed("next"))]),
+                        Block::List(List {
+                            kind: ListKind::Unordered,
+                            items: vec![list_item(None, "child")],
+                        }),
+                    ],
+                },
+            ],
+        })];
 
-        assert_eq!(render_plain(&document)?, "9. item\n   1. child\n10. ☑ next\n      ◦ child\n",);
+        assert_eq!(render_plain(&blocks)?, "9. item\n   1. child\n10. ☑ next\n      ◦ child\n",);
         Ok(())
     }
 
     #[test]
     fn renders_links_images_and_titles_like_markdown_preview() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::Paragraph(vec![
-                Inline::Link {
-                    destination: Text::borrowed("https://example.com"),
-                    title: Text::borrowed("Example"),
-                    kind: LinkKind::Regular,
-                    children: vec![Inline::Text(Text::borrowed("link"))],
-                },
-                Inline::Text(Text::borrowed(" ")),
-                Inline::Image {
-                    destination: Text::borrowed("image.png"),
-                    title: Text::borrowed("Logo"),
-                    alt: vec![Inline::Text(Text::borrowed("alt"))],
-                },
-            ])],
-            has_trailing_newline: false,
-        };
+        let blocks = vec![Block::Paragraph(vec![
+            Inline::Link {
+                destination: Text::borrowed("https://example.com"),
+                title: Text::borrowed("Example"),
+                kind: LinkKind::Regular,
+                children: vec![Inline::Text(Text::borrowed("link"))],
+            },
+            Inline::Text(Text::borrowed(" ")),
+            Inline::Image {
+                destination: Text::borrowed("image.png"),
+                title: Text::borrowed("Logo"),
+                alt: vec![Inline::Text(Text::borrowed("alt"))],
+            },
+        ])];
 
         assert_eq!(
-            render_plain(&document)?,
-            "link(https://example.com) — Example [img: alt](image.png) — Logo",
+            render_plain(&blocks)?,
+            "link(https://example.com) — Example [img: alt](image.png) — Logo\n",
         );
         Ok(())
     }
 
     #[test]
     fn renders_tables_with_box_drawing_borders() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::Table(Table {
-                header: vec![
-                    vec![Inline::Text(Text::borrowed("A"))],
-                    vec![Inline::Text(Text::borrowed("B"))],
-                ],
-                alignments: vec![Alignment::Left, Alignment::Left],
-                rows: vec![vec![
-                    vec![Inline::Text(Text::borrowed("1"))],
-                    vec![Inline::Text(Text::borrowed("2"))],
-                ]],
-            })],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![Block::Table(Table {
+            header: vec![
+                vec![Inline::Text(Text::borrowed("A"))],
+                vec![Inline::Text(Text::borrowed("B"))],
+            ],
+            alignments: vec![Alignment::Left, Alignment::Left],
+            rows: vec![vec![
+                vec![Inline::Text(Text::borrowed("1"))],
+                vec![Inline::Text(Text::borrowed("2"))],
+            ]],
+        })];
 
         assert_eq!(
-            render_plain(&document)?,
+            render_plain(&blocks)?,
             "┌─────┬─────┐\n│ A   │ B   │\n├─────┼─────┤\n│ 1   │ 2   │\n└─────┴─────┘\n",
         );
         Ok(())
@@ -799,55 +812,52 @@ mod tests {
 
     #[test]
     fn renders_fenced_code_blocks_with_fences() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::CodeBlock(CodeBlock {
-                info: Some(Text::borrowed("rust")),
-                text: Text::borrowed("fn main() {}\n"),
-            })],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![Block::CodeBlock(CodeBlock {
+            info: Some(Text::borrowed("rust")),
+            text: Text::borrowed("fn main() {}\n"),
+        })];
 
-        assert_eq!(render_plain(&document)?, "```rust\nfn main() {}\n```\n");
+        assert_eq!(render_plain(&blocks)?, "```rust\nfn main() {}\n```\n");
         Ok(())
     }
 
     #[test]
     fn ansi_disabled_keeps_fenced_code_blocks_plain() -> io::Result<()> {
-        let document = rust_code_document("rust", "fn main() {}\n");
+        let blocks = rust_code_blocks("rust", "fn main() {}\n");
 
-        assert_eq!(render_plain(&document)?, "```rust\nfn main() {}\n```");
+        assert_eq!(render_plain(&blocks)?, "```rust\nfn main() {}\n```\n");
         Ok(())
     }
 
     #[test]
     fn highlights_rust_code_without_rewriting_source_text() -> io::Result<()> {
-        let document = rust_code_document("rust", "fn main() {}\n");
-        let output = render_ansi(&document)?;
+        let blocks = rust_code_blocks("rust", "fn main() {}\n");
+        let output = render_ansi(&blocks)?;
 
-        assert_eq!(strip_ansi(&output), "```rust\nfn main() {}\n```");
+        assert_eq!(strip_ansi(&output), "```rust\nfn main() {}\n```\n");
         assert_code_body_has_distinct_syntax_colors(&output)?;
         Ok(())
     }
 
     #[test]
     fn highlights_rust_code_from_rs_language_alias() -> io::Result<()> {
-        let document = rust_code_document("rs", "fn main() {}\n");
-        let output = render_ansi(&document)?;
+        let blocks = rust_code_blocks("rs", "fn main() {}\n");
+        let output = render_ansi(&blocks)?;
 
-        assert_eq!(strip_ansi(&output), "```rs\nfn main() {}\n```");
+        assert_eq!(strip_ansi(&output), "```rs\nfn main() {}\n```\n");
         assert_code_body_has_distinct_syntax_colors(&output)?;
         Ok(())
     }
 
     #[test]
     fn unsupported_languages_fall_back_to_single_style_code_body() -> io::Result<()> {
-        let document = rust_code_document("not-a-language", "fn main() {}\n");
+        let blocks = rust_code_blocks("not-a-language", "fn main() {}\n");
 
         assert_eq!(
-            render_ansi(&document)?,
+            render_ansi(&blocks)?,
             "\u{1b}[2;38;2;88;110;117m```not-a-language\u{1b}[0m\n\
              \u{1b}[38;2;42;161;152mfn main() {}\n\u{1b}[0m\
-             \u{1b}[2;38;2;88;110;117m```\u{1b}[0m",
+             \u{1b}[2;38;2;88;110;117m```\u{1b}[0m\n",
         );
         Ok(())
     }
@@ -855,14 +865,11 @@ mod tests {
     #[test]
     fn oversized_code_blocks_fall_back_to_single_style_code_body() -> io::Result<()> {
         let oversized = "x".repeat(512 * 1024 + 1);
-        let document = Document {
-            blocks: vec![Block::CodeBlock(CodeBlock {
-                info: Some(Text::borrowed("rust")),
-                text: Text::owned(oversized.clone()),
-            })],
-            has_trailing_newline: false,
-        };
-        let output = render_ansi(&document)?;
+        let blocks = vec![Block::CodeBlock(CodeBlock {
+            info: Some(Text::borrowed("rust")),
+            text: Text::owned(oversized.clone()),
+        })];
+        let output = render_ansi(&blocks)?;
 
         assert!(output.contains(&format!(
             "\u{1b}[38;2;42;161;152m{oversized}\u{1b}[0m\n\
@@ -873,33 +880,30 @@ mod tests {
 
     #[test]
     fn highlighting_errors_fall_back_to_plain_code_body() -> io::Result<()> {
-        let document = rust_code_document("rust", "fn main() {}\n");
+        let blocks = rust_code_blocks("rust", "fn main() {}\n");
         crate::syntax::force_next_highlight_error_for_test();
 
         assert_eq!(
-            render_ansi(&document)?,
+            render_ansi(&blocks)?,
             "\u{1b}[2;38;2;88;110;117m```rust\u{1b}[0m\n\
              \u{1b}[38;2;42;161;152mfn main() {}\n\u{1b}[0m\
-             \u{1b}[2;38;2;88;110;117m```\u{1b}[0m",
+             \u{1b}[2;38;2;88;110;117m```\u{1b}[0m\n",
         );
         Ok(())
     }
 
     #[test]
     fn nested_code_blocks_keep_blockquote_prefixes_while_highlighting() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::BlockQuote(BlockQuote {
-                kind: None,
-                blocks: vec![Block::CodeBlock(CodeBlock {
-                    info: Some(Text::borrowed("rust")),
-                    text: Text::borrowed("fn main() {}\n"),
-                })],
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: None,
+            blocks: vec![Block::CodeBlock(CodeBlock {
+                info: Some(Text::borrowed("rust")),
+                text: Text::borrowed("fn main() {}\n"),
             })],
-            has_trailing_newline: true,
-        };
-        let output = render_ansi(&document)?;
+        })];
+        let output = render_ansi(&blocks)?;
         crate::syntax::force_next_highlight_error_for_test();
-        let fallback = render_ansi(&document)?;
+        let fallback = render_ansi(&blocks)?;
 
         assert_eq!(strip_ansi(&output), "│ ```rust\n│ fn main() {}\n│ ```\n");
         assert_ne!(output, fallback);
@@ -909,87 +913,86 @@ mod tests {
 
     #[test]
     fn renders_synthetic_closing_fence_for_code_blocks() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::CodeBlock(CodeBlock { info: None, text: Text::borrowed("abc\n") })],
-            has_trailing_newline: true,
-        };
+        let blocks =
+            vec![Block::CodeBlock(CodeBlock { info: None, text: Text::borrowed("abc\n") })];
 
-        assert_eq!(render_plain(&document)?, "```\nabc\n```\n");
+        assert_eq!(render_plain(&blocks)?, "```\nabc\n```\n");
         Ok(())
     }
 
     #[test]
     fn renders_html_blocks_without_dropping_raw_content() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::HtmlBlock(Text::borrowed("<div>\nhello\n</div>\n"))],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![Block::HtmlBlock(Text::borrowed("<div>\nhello\n</div>\n"))];
 
-        assert_eq!(render_plain(&document)?, "<div>\nhello\n</div>\n");
+        assert_eq!(render_plain(&blocks)?, "<div>\nhello\n</div>\n");
         Ok(())
     }
 
     #[test]
     fn renders_gfm_blockquote_kind_as_a_visible_label() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::BlockQuote(BlockQuote {
-                kind: Some(BlockQuoteKind::Note),
-                blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("Read this"))])],
-            })],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: Some(BlockQuoteKind::Note),
+            blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("Read this"))])],
+        })];
 
-        assert_eq!(render_plain(&document)?, "│ NOTE\n│ Read this\n");
+        assert_eq!(render_plain(&blocks)?, "│ NOTE\n│ Read this\n");
         Ok(())
     }
 
     #[test]
     fn emits_ansi_styling_when_enabled() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::Heading(Heading {
-                level: 1,
-                children: vec![Inline::Text(Text::borrowed("Title"))],
-            })],
-            has_trailing_newline: false,
-        };
+        let blocks = vec![Block::Heading(Heading {
+            level: 1,
+            children: vec![Inline::Text(Text::borrowed("Title"))],
+        })];
 
-        let mut output = Vec::new();
-        Renderer::new(RenderOptions { ansi: true }).render(&mut output, &document)?;
-
-        assert_eq!(utf8(output)?, "\u{1b}[1;4;38;2;181;137;0mTitle\u{1b}[0m",);
+        assert_eq!(render_ansi(&blocks)?, "\u{1b}[1;4;38;2;181;137;0mTitle\u{1b}[0m\n",);
         Ok(())
     }
 
     #[test]
     fn resets_ansi_style_before_restoring_parent_inline_style() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::Paragraph(vec![
-                Inline::Text(Text::borrowed("a ")),
-                Inline::Strong(vec![Inline::Text(Text::borrowed("b"))]),
-                Inline::Text(Text::borrowed(" c")),
-            ])],
-            has_trailing_newline: false,
-        };
-        let mut output = Vec::new();
-
-        Renderer::new(RenderOptions { ansi: true }).render(&mut output, &document)?;
+        let blocks = vec![Block::Paragraph(vec![
+            Inline::Text(Text::borrowed("a ")),
+            Inline::Strong(vec![Inline::Text(Text::borrowed("b"))]),
+            Inline::Text(Text::borrowed(" c")),
+        ])];
 
         assert_eq!(
-            utf8(output)?,
-            "\u{1b}[38;2;131;148;150ma \u{1b}[1;38;2;131;148;150mb\u{1b}[0m\u{1b}[38;2;131;148;150m c\u{1b}[0m",
+            render_ansi(&blocks)?,
+            "\u{1b}[38;2;131;148;150ma \u{1b}[1;38;2;131;148;150mb\u{1b}[0m\u{1b}[38;2;131;148;150m c\u{1b}[0m\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_inline_styles_restore_outer_style_after_a_wrapped_child_closes() -> io::Result<()> {
+        let blocks = vec![Block::Paragraph(vec![Inline::Emphasis(vec![
+            Inline::Text(Text::borrowed("outer ")),
+            Inline::Strong(vec![Inline::Text(Text::borrowed("inner"))]),
+            Inline::Text(Text::borrowed(" outer")),
+        ])])];
+
+        assert_eq!(
+            render_ansi(&blocks)?,
+            "\u{1b}[38;2;131;148;150m\u{1b}[3;38;2;131;148;150mouter \
+             \u{1b}[1;3;38;2;131;148;150minner\u{1b}[0m\u{1b}[3;38;2;131;148;150m outer\
+             \u{1b}[0m\u{1b}[38;2;131;148;150m\u{1b}[0m\n",
         );
         Ok(())
     }
 
     #[test]
     fn writes_to_the_provided_writer() -> io::Result<()> {
-        let document = Document {
-            blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("stream"))])],
-            has_trailing_newline: true,
-        };
+        let blocks = vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("stream"))])];
         let mut writer = CountingWriter::default();
 
-        Renderer::new(RenderOptions { ansi: false }).render(&mut writer, &document)?;
+        let renderer = Renderer::new(RenderOptions { ansi: false });
+        let mut state = RenderState::default();
+        for block in &blocks {
+            renderer.render_block(&mut writer, block, &mut state)?;
+        }
+        renderer.finish(&mut writer, &state)?;
 
         assert!(writer.write_count > 0);
         assert_eq!(writer.flush_count, 0);
@@ -997,26 +1000,82 @@ mod tests {
         Ok(())
     }
 
-    fn render_plain(document: &Document<'_>) -> io::Result<String> {
-        let mut output = Vec::new();
-        Renderer::new(RenderOptions { ansi: false }).render(&mut output, document)?;
-        utf8(output)
+    #[test]
+    fn finish_appends_a_newline_when_nonempty_output_lacks_one() -> io::Result<()> {
+        let blocks = vec![Block::Heading(Heading {
+            level: 1,
+            children: vec![Inline::Text(Text::borrowed("Title"))],
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "Title\n");
+        Ok(())
     }
 
-    fn render_ansi(document: &Document<'_>) -> io::Result<String> {
-        let mut output = Vec::new();
-        Renderer::new(RenderOptions { ansi: true }).render(&mut output, document)?;
-        utf8(output)
+    #[test]
+    fn finish_writes_nothing_for_an_empty_document() -> io::Result<()> {
+        assert_eq!(render_plain(&[])?, "");
+        Ok(())
     }
 
-    fn rust_code_document(info: &'static str, text: &'static str) -> Document<'static> {
-        Document {
-            blocks: vec![Block::CodeBlock(CodeBlock {
-                info: Some(Text::borrowed(info)),
-                text: Text::borrowed(text),
-            })],
-            has_trailing_newline: false,
+    #[test]
+    fn rendering_only_a_blank_line_produces_no_output() -> io::Result<()> {
+        assert_eq!(render_plain(&[Block::BlankLine])?, "");
+        Ok(())
+    }
+
+    #[test]
+    fn leading_blank_line_does_not_emit_a_separator() -> io::Result<()> {
+        assert_eq!(render_plain(&[Block::BlankLine, paragraph("a")])?, "a\n");
+        Ok(())
+    }
+
+    #[test]
+    fn trailing_blank_line_keeps_exactly_one_trailing_newline() -> io::Result<()> {
+        assert_eq!(render_plain(&[paragraph("a"), Block::BlankLine])?, "a\n");
+        Ok(())
+    }
+
+    #[test]
+    fn blank_line_between_paragraphs_still_renders_a_blank_separator_line() -> io::Result<()> {
+        assert_eq!(render_plain(&[paragraph("a"), Block::BlankLine, paragraph("b")])?, "a\n\nb\n",);
+        Ok(())
+    }
+
+    #[test]
+    fn finish_does_not_duplicate_an_existing_trailing_newline() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![list_item(None, "item")],
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "• item\n");
+        Ok(())
+    }
+
+    fn render_plain(blocks: &[Block<'_>]) -> io::Result<String> {
+        render_to_string(blocks, RenderOptions { ansi: false })
+    }
+
+    fn render_ansi(blocks: &[Block<'_>]) -> io::Result<String> {
+        render_to_string(blocks, RenderOptions { ansi: true })
+    }
+
+    fn render_to_string(blocks: &[Block<'_>], options: RenderOptions) -> io::Result<String> {
+        let renderer = Renderer::new(options);
+        let mut output = Vec::new();
+        let mut state = RenderState::default();
+        for block in blocks {
+            renderer.render_block(&mut output, block, &mut state)?;
         }
+        renderer.finish(&mut output, &state)?;
+        utf8(output)
+    }
+
+    fn rust_code_blocks(info: &'static str, text: &'static str) -> Vec<Block<'static>> {
+        vec![Block::CodeBlock(CodeBlock {
+            info: Some(Text::borrowed(info)),
+            text: Text::borrowed(text),
+        })]
     }
 
     fn assert_code_body_has_distinct_syntax_colors(output: &str) -> io::Result<()> {
@@ -1073,6 +1132,10 @@ mod tests {
             }
         }
         output
+    }
+
+    fn paragraph(text: &'static str) -> Block<'static> {
+        Block::Paragraph(vec![Inline::Text(Text::borrowed(text))])
     }
 
     fn list_item(task: Option<TaskState>, text: &'static str) -> ListItem<'static> {

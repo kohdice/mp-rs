@@ -1,11 +1,15 @@
 use std::fmt;
-use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser as ClapParser, ValueEnum};
+use mp_preview::{ParseError, PreviewError, RenderOptions};
 
+/// Runs the CLI: renders the requested file to `stdout` and maps failures to exit codes.
+///
+/// Errors are reported on `stderr` with an `mp:` prefix; a broken pipe on `stdout` is
+/// treated as success so piping into `head` and friends stays quiet.
 pub fn run<W, E>(cli: &Cli, stdout: &mut W, stderr: &mut E, stdout_is_terminal: bool) -> ExitCode
 where
     W: Write,
@@ -25,6 +29,7 @@ where
     }
 }
 
+/// Command-line arguments of the `mp` binary.
 #[derive(Debug, ClapParser)]
 #[command(
     name = "mp",
@@ -47,7 +52,7 @@ enum ColorPolicy {
 #[derive(Debug)]
 enum CliError {
     Read { path: PathBuf, source: io::Error },
-    Parse { path: PathBuf, source: mp_parser::ParseError },
+    Parse { path: PathBuf, source: ParseError },
     WriteStdout(io::Error),
 }
 
@@ -74,18 +79,12 @@ fn render_file<W>(
 where
     W: Write,
 {
-    let markdown = fs::read_to_string(path)
-        .map_err(|source| CliError::Read { path: path.to_path_buf(), source })?;
-
-    let renderer = mp_renderer::Renderer::new(mp_renderer::RenderOptions {
-        ansi: resolve_color_policy(color_policy, stdout_is_terminal),
-    });
-    let mut state = mp_renderer::RenderState::default();
-    for block in mp_parser::blocks(&markdown) {
-        let block = block.map_err(|source| CliError::Parse { path: path.to_path_buf(), source })?;
-        renderer.render_block(stdout, &block, &mut state).map_err(CliError::WriteStdout)?;
-    }
-    renderer.finish(stdout, &state, markdown.ends_with('\n')).map_err(CliError::WriteStdout)
+    let options = RenderOptions { ansi: resolve_color_policy(color_policy, stdout_is_terminal) };
+    mp_preview::preview_file(path, options, stdout).map_err(|error| match error {
+        PreviewError::Read(source) => CliError::Read { path: path.to_path_buf(), source },
+        PreviewError::Parse(source) => CliError::Parse { path: path.to_path_buf(), source },
+        PreviewError::Write(source) => CliError::WriteStdout(source),
+    })
 }
 
 const fn resolve_color_policy(color_policy: ColorPolicy, stdout_is_terminal: bool) -> bool {
@@ -108,16 +107,14 @@ mod tests {
     static TEMP_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
-    fn reads_parses_renders_and_writes_a_markdown_file_to_stdout() -> io::Result<()> {
-        let file = write_temp_markdown("# Title\n\nHello, **world**!\n")?;
+    fn render_file_terminates_output_with_a_newline_when_the_source_lacks_one() -> io::Result<()> {
+        let file = write_temp_markdown("Hello")?;
         let mut output = Vec::new();
         render_file(&file, ColorPolicy::Never, plain_terminal(), &mut output)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let output = utf8(output)?;
 
-        assert!(output.contains("Title"));
-        assert!(output.contains("Hello, "));
-        assert!(!output.contains("# Title"));
+        assert!(output.ends_with('\n'), "expected trailing newline, got {output:?}");
         fs::remove_file(file)?;
         Ok(())
     }

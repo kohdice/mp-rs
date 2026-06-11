@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use mp_ast::{
-    Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Document, Heading, Inline, LinkKind,
-    List, ListItem, ListKind, Table, TaskState, Text,
+    Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, Inline, LinkKind, List,
+    ListItem, ListKind, Table, TaskState, Text,
 };
 use pulldown_cmark::{
     Alignment as MarkdownAlignment, BlockQuoteKind as MarkdownBlockQuoteKind, CodeBlockKind,
@@ -51,7 +51,7 @@ impl<'a> AstBuilder<'a> {
         }
     }
 
-    pub(crate) fn finish(mut self) -> Result<Document<'a>, ParseError> {
+    pub(crate) fn finish(mut self) -> Result<Vec<Block<'a>>, ParseError> {
         if self.frames.len() != 1 {
             return Err(ParseError::new("markdown parser ended with unclosed nodes"));
         }
@@ -59,7 +59,7 @@ impl<'a> AstBuilder<'a> {
         let Frame::Document { blocks, last_end: _, seen_block: _ } = frame else {
             return Err(ParseError::new("markdown parser ended without a document"));
         };
-        Ok(Document { blocks, has_trailing_newline: self.source.ends_with('\n') })
+        Ok(blocks)
     }
 
     pub(crate) fn drain_document_blocks(
@@ -309,39 +309,45 @@ impl<'a> AstBuilder<'a> {
     }
 
     fn append_block(&mut self, block: Block<'a>, range: Range<usize>) -> Result<(), ParseError> {
+        let source = self.source;
         match self.frames.last_mut() {
             Some(Frame::Document { blocks, last_end, seen_block }) => {
-                if *seen_block
-                    && range.start >= *last_end
-                    && gap_has_blank_line(&self.source[*last_end..range.start])
-                {
-                    blocks.push(Block::BlankLine);
-                }
-                blocks.push(block);
+                push_block_with_blank_gap(
+                    source,
+                    blocks,
+                    block,
+                    last_end,
+                    range,
+                    *seen_block,
+                    gap_has_blank_line,
+                );
                 *seen_block = true;
-                *last_end = trim_trailing_blank_gap_end(self.source, &range);
                 Ok(())
             }
             Some(Frame::Item { blocks, last_end, .. }) => {
-                if !blocks.is_empty()
-                    && range.start >= *last_end
-                    && gap_has_blank_line(&self.source[*last_end..range.start])
-                {
-                    blocks.push(Block::BlankLine);
-                }
-                blocks.push(block);
-                *last_end = trim_trailing_blank_gap_end(self.source, &range);
+                let has_prior = !blocks.is_empty();
+                push_block_with_blank_gap(
+                    source,
+                    blocks,
+                    block,
+                    last_end,
+                    range,
+                    has_prior,
+                    gap_has_blank_line,
+                );
                 Ok(())
             }
             Some(Frame::BlockQuote { blocks, last_end, .. }) => {
-                if !blocks.is_empty()
-                    && range.start >= *last_end
-                    && gap_has_blockquote_blank_line(&self.source[*last_end..range.start])
-                {
-                    blocks.push(Block::BlankLine);
-                }
-                blocks.push(block);
-                *last_end = trim_trailing_blank_gap_end(self.source, &range);
+                let has_prior = !blocks.is_empty();
+                push_block_with_blank_gap(
+                    source,
+                    blocks,
+                    block,
+                    last_end,
+                    range,
+                    has_prior,
+                    gap_has_blockquote_blank_line,
+                );
                 Ok(())
             }
             Some(Frame::Ignored) => Ok(()),
@@ -586,4 +592,20 @@ fn append_inline_to_blocks<'a>(blocks: &mut Vec<Block<'a>>, inline: Inline<'a>) 
         Some(Block::Paragraph(inlines)) => inlines.push(inline),
         _ => blocks.push(Block::Paragraph(vec![inline])),
     }
+}
+
+fn push_block_with_blank_gap<'a>(
+    source: &str,
+    blocks: &mut Vec<Block<'a>>,
+    block: Block<'a>,
+    last_end: &mut usize,
+    range: Range<usize>,
+    has_prior: bool,
+    gap_has_blank: fn(&str) -> bool,
+) {
+    if has_prior && range.start >= *last_end && gap_has_blank(&source[*last_end..range.start]) {
+        blocks.push(Block::BlankLine);
+    }
+    blocks.push(block);
+    *last_end = trim_trailing_blank_gap_end(source, &range);
 }

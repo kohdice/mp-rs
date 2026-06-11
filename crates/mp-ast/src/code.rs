@@ -1,8 +1,11 @@
 use crate::Text;
 
+/// A fenced or indented code block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeBlock<'a> {
+    /// Info string after the opening fence, typically a language tag.
     pub info: Option<Text<'a>>,
+    /// Literal code content with newlines preserved.
     pub text: Text<'a>,
 }
 

@@ -1,3 +1,5 @@
+//! Binary entry point: wires standard streams and terminal detection into [`mp::run`].
+
 use clap::Parser;
 use std::io::{BufWriter, IsTerminal};
 

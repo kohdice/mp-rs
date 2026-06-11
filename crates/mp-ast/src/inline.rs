@@ -1,21 +1,50 @@
 use crate::Text;
 
+/// An inline (span-level) Markdown node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inline<'a> {
+    /// Plain text.
     Text(Text<'a>),
+    /// Emphasized (italic) children.
     Emphasis(Vec<Inline<'a>>),
+    /// Strongly emphasized (bold) children.
     Strong(Vec<Inline<'a>>),
+    /// Struck-through children (GFM).
     Strikethrough(Vec<Inline<'a>>),
+    /// An inline code span.
     Code(Text<'a>),
-    Link { destination: Text<'a>, title: Text<'a>, kind: LinkKind, children: Vec<Inline<'a>> },
-    Image { destination: Text<'a>, title: Text<'a>, alt: Vec<Inline<'a>> },
+    /// A hyperlink.
+    Link {
+        /// Link destination URL.
+        destination: Text<'a>,
+        /// Link title; empty when the source declares none.
+        title: Text<'a>,
+        /// How the link was written in the source.
+        kind: LinkKind,
+        /// Visible link text.
+        children: Vec<Inline<'a>>,
+    },
+    /// An image reference.
+    Image {
+        /// Image destination URL.
+        destination: Text<'a>,
+        /// Image title; empty when the source declares none.
+        title: Text<'a>,
+        /// Alt text shown as the visible placeholder.
+        alt: Vec<Inline<'a>>,
+    },
+    /// A hard line break (trailing backslash or two trailing spaces).
     HardBreak,
+    /// A soft line break (a single newline in the source).
     SoftBreak,
 }
 
+/// How a link was written in the Markdown source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {
+    /// An inline or reference link with explicit link text.
     Regular,
+    /// An autolink like `<https://example.com>`, whose text is the URL itself.
     Autolink,
 }
 

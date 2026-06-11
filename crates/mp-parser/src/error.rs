@@ -1,5 +1,9 @@
 use std::borrow::Cow;
 
+/// An inconsistency detected in the underlying Markdown event stream.
+///
+/// Every constructor site is defensive: well-formed input never produces this error, so
+/// it surfaces only if pulldown-cmark yields a structurally invalid event sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     message: Cow<'static, str>,

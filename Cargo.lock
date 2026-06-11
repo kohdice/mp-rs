@@ -209,8 +209,7 @@ name = "mp"
 version = "0.1.0"
 dependencies = [
  "clap",
- "mp-parser",
- "mp-renderer",
+ "mp-preview",
 ]
 
 [[package]]
@@ -223,6 +222,15 @@ version = "0.1.0"
 dependencies = [
  "mp-ast",
  "pulldown-cmark",
+]
+
+[[package]]
+name = "mp-preview"
+version = "0.1.0"
+dependencies = [
+ "mp-ast",
+ "mp-parser",
+ "mp-renderer",
 ]
 
 [[package]]
