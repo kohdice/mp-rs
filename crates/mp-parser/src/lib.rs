@@ -177,6 +177,40 @@ mod tests {
     }
 
     #[test]
+    fn marks_a_list_with_a_blank_line_between_items_as_loose() -> Result<(), ParseError> {
+        let blocks = blocks("- a\n\n- b\n").collect::<Result<Vec<_>, _>>()?;
+
+        let Block::List(list) = &blocks[0] else {
+            panic!("expected list");
+        };
+        assert!(list.loose);
+        Ok(())
+    }
+
+    #[test]
+    fn marks_a_list_without_blank_separation_as_tight() -> Result<(), ParseError> {
+        let blocks = blocks("- a\n- b\n").collect::<Result<Vec<_>, _>>()?;
+
+        let Block::List(list) = &blocks[0] else {
+            panic!("expected list");
+        };
+        assert!(!list.loose);
+        Ok(())
+    }
+
+    #[test]
+    fn marks_a_list_with_a_blank_gap_between_blocks_inside_an_item_as_loose()
+    -> Result<(), ParseError> {
+        let blocks = blocks("- a\n\n  b\n- c\n").collect::<Result<Vec<_>, _>>()?;
+
+        let Block::List(list) = &blocks[0] else {
+            panic!("expected list");
+        };
+        assert!(list.loose);
+        Ok(())
+    }
+
+    #[test]
     fn converts_blockquotes_into_nested_block_ast_nodes() -> Result<(), ParseError> {
         let blocks = blocks("> quoted\n>\n> - item\n").collect::<Result<Vec<_>, _>>()?;
 
@@ -210,6 +244,21 @@ mod tests {
             panic!("expected blockquote");
         };
         assert_eq!(blockquote.blocks, top_level);
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_blank_line_before_an_indented_paragraph_continuation() -> Result<(), ParseError> {
+        let blocks = blocks("a\n\n  b\n").collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Paragraph(vec![Inline::Text(Text::borrowed("a"))]),
+                Block::BlankLine,
+                Block::Paragraph(vec![Inline::Text(Text::borrowed("b"))]),
+            ],
+        );
         Ok(())
     }
 

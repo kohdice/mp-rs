@@ -108,6 +108,7 @@ mod tests {
                     task: None,
                     blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("item"))])],
                 }],
+                loose: false,
             }),
             Block::BlockQuote(BlockQuote {
                 kind: None,

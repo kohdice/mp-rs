@@ -10,7 +10,7 @@ use crate::style::{TextStyle, heading_style};
 use crate::table::{BorderKind, table_layout, write_border_line, write_table_row};
 use crate::theme::Palette;
 use crate::tokens::{IMAGE_OPEN, LINK_TEXT_CLOSE, TITLE_SEPARATOR, URL_CLOSE, URL_OPEN};
-use crate::writer::{LinePrefixWriter, write_repeated_str, write_spaces};
+use crate::writer::{LinePrefixWriter, WidthMeasuringWriter, write_repeated_str, write_spaces};
 
 const THEMATIC_BREAK_WIDTH: usize = 32;
 
@@ -21,6 +21,8 @@ pub struct RenderOptions {
     pub color: ColorMode,
     /// Colors used for each kind of content; solarized dark by default.
     pub palette: Palette,
+    /// Syntax-highlighting theme for fenced code blocks; solarized dark by default.
+    pub code_theme: CodeTheme,
 }
 
 /// How colors and text styles are written to the output.
@@ -33,6 +35,16 @@ pub enum ColorMode {
     Plain,
 }
 
+/// Syntax-highlighting theme used for fenced code blocks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodeTheme {
+    /// Solarized Dark (the default).
+    #[default]
+    SolarizedDark,
+    /// Solarized Light.
+    SolarizedLight,
+}
+
 /// Streaming render state threaded through [`Renderer::render_block`] calls.
 ///
 /// Tracks whether any bytes have been written and whether the output currently ends
@@ -41,6 +53,15 @@ pub enum ColorMode {
 pub struct RenderState {
     has_rendered: bool,
     ended_with_newline: bool,
+}
+
+/// How a soft or hard line break inside inline content is emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineBreak {
+    /// Emit a newline, then indent the next line by the given number of spaces.
+    Newline(Option<usize>),
+    /// Emit a single space so the content stays on one line (table cells).
+    Space,
 }
 
 /// Renders [`Block`]s as terminal output.
@@ -123,12 +144,16 @@ impl Renderer {
                 writer,
                 &heading.children,
                 heading_style(heading.level, self.options.palette),
-                None,
+                LineBreak::Newline(None),
             ),
             Block::BlockQuote(blockquote) => self.render_blockquote(writer, blockquote, depth),
             Block::List(list) => self.render_list(writer, list, depth, 0),
             Block::CodeBlock(code_block) => self.render_code_block(writer, code_block),
-            Block::HtmlBlock(text) => writer.write_all(text.as_bytes()),
+            // Normalize to the no-trailing-newline shape every other block uses, so the
+            // streaming separator and `finish` logic stay correct.
+            Block::HtmlBlock(text) => {
+                writer.write_all(text.as_bytes().strip_suffix(b"\n").unwrap_or(text.as_bytes()))
+            }
             Block::Table(table) => self.render_table(writer, table),
             Block::ThematicBreak => {
                 self.write_style_start(
@@ -152,7 +177,7 @@ impl Renderer {
             writer,
             inlines,
             TextStyle::default().fg(self.options.palette.body),
-            break_prefix,
+            LineBreak::Newline(break_prefix),
         )
     }
 
@@ -164,9 +189,19 @@ impl Renderer {
     ) -> io::Result<()> {
         let options = self.options;
         let palette = self.options.palette;
-        let mut prefixed = LinePrefixWriter::new(&mut *writer, move |writer| {
-            write_styled_text(writer, options, TextStyle::default().fg(palette.muted).dim(), "│ ")
-        });
+        let mut prefixed = LinePrefixWriter::new(
+            &mut *writer,
+            move |writer, blank_line| {
+                let bar = if blank_line { "│" } else { "│ " };
+                write_styled_text(
+                    writer,
+                    options,
+                    TextStyle::default().fg(palette.muted).dim(),
+                    bar,
+                )
+            },
+            false,
+        );
         let mut state = RenderState::default();
         if let Some(kind) = blockquote.kind {
             self.write_styled_text(
@@ -199,9 +234,9 @@ impl Renderer {
     ) -> io::Result<()> {
         for (index, item) in list.items.iter().enumerate() {
             if index > 0 {
-                writer.write_all(b"\n")?;
+                writer.write_all(if list.loose { b"\n\n" } else { b"\n" })?;
             }
-            let marker = list_marker(list, index, depth)?;
+            let marker = list_marker(list, index, depth);
             self.render_list_item(writer, marker, item, depth, indent)?;
         }
         Ok(())
@@ -222,13 +257,16 @@ impl Renderer {
         )?;
         write_list_marker(writer, marker)?;
         self.write_style_end(writer)?;
-        writer.write_all(b" ")?;
-        self.write_task_marker(writer, item.task)?;
 
+        if item.task.is_some() {
+            writer.write_all(b" ")?;
+            self.write_task_marker(writer, item.task)?;
+        }
         let content_width = indent + marker_width(marker, item.task);
         if item.blocks.is_empty() {
             return Ok(());
         }
+        writer.write_all(b" ")?;
 
         for (index, block) in item.blocks.iter().enumerate() {
             if index > 0 {
@@ -241,14 +279,11 @@ impl Renderer {
                     }
                     self.render_paragraph(writer, inlines, Some(content_width))?;
                 }
-                Block::List(list) => self.render_list(writer, list, depth + 1, content_width)?,
                 Block::BlankLine => {}
+                // The first block shares the marker's line, so it hangs: its first line
+                // sits after the marker and only later lines indent to the content column.
                 child => {
-                    if index == 0 {
-                        self.render_block_at_depth(writer, depth + 1, child)?;
-                    } else {
-                        self.render_indented_block(writer, child, content_width, depth + 1)?;
-                    }
+                    self.render_indented_block(writer, child, content_width, depth + 1, index == 0)?
                 }
             }
         }
@@ -261,9 +296,15 @@ impl Renderer {
         block: &Block<'_>,
         indent: usize,
         depth: usize,
+        hanging: bool,
     ) -> io::Result<()> {
-        let mut prefixed =
-            LinePrefixWriter::new(writer, move |writer| write_spaces(writer, indent));
+        let mut prefixed = LinePrefixWriter::new(
+            writer,
+            move |writer, blank_line| {
+                if blank_line { Ok(()) } else { write_spaces(writer, indent) }
+            },
+            hanging,
+        );
         self.render_block_at_depth(&mut prefixed, depth, block)
     }
 
@@ -298,7 +339,9 @@ impl Renderer {
     ) -> io::Result<()> {
         if self.options.color == ColorMode::Ansi {
             let info = code_block.info.as_ref().map(|info| info.as_str());
-            if let Some(ranges) = crate::syntax::highlighted_ranges(info, &code_block.text) {
+            if let Some(ranges) =
+                crate::syntax::highlighted_ranges(info, &code_block.text, self.options.code_theme)
+            {
                 for range in ranges {
                     self.write_styled_text(writer, range.style, range.text)?;
                 }
@@ -309,7 +352,7 @@ impl Renderer {
     }
 
     fn render_table(&self, writer: &mut dyn Write, table: &Table<'_>) -> io::Result<()> {
-        let layout = table_layout(table);
+        let layout = table_layout(table, &|cell| self.measure_cell(cell));
         if layout.widths.is_empty() {
             return Ok(());
         }
@@ -351,10 +394,10 @@ impl Renderer {
         writer: &mut dyn Write,
         inlines: &[Inline<'_>],
         current_style: TextStyle,
-        break_prefix: Option<usize>,
+        line_break: LineBreak,
     ) -> io::Result<()> {
         self.write_style_start(writer, current_style)?;
-        self.render_inlines_inner(writer, inlines, current_style, break_prefix)?;
+        self.render_inlines_inner(writer, inlines, current_style, line_break)?;
         self.write_style_end(writer)
     }
 
@@ -363,7 +406,7 @@ impl Renderer {
         writer: &mut dyn Write,
         inlines: &[Inline<'_>],
         current_style: TextStyle,
-        break_prefix: Option<usize>,
+        line_break: LineBreak,
     ) -> io::Result<()> {
         for inline in inlines {
             match inline {
@@ -375,7 +418,7 @@ impl Renderer {
                         children,
                         current_style,
                         child_style,
-                        break_prefix,
+                        line_break,
                     )?;
                 }
                 Inline::Strong(children) => {
@@ -385,7 +428,7 @@ impl Renderer {
                         children,
                         current_style,
                         child_style,
-                        break_prefix,
+                        line_break,
                     )?;
                 }
                 Inline::Strikethrough(children) => {
@@ -395,7 +438,7 @@ impl Renderer {
                         children,
                         current_style,
                         child_style,
-                        break_prefix,
+                        line_break,
                     )?;
                 }
                 Inline::Code(text) => {
@@ -413,7 +456,7 @@ impl Renderer {
                         children,
                         current_style,
                         child_style,
-                        break_prefix,
+                        line_break,
                     )?;
                     if *kind == LinkKind::Regular {
                         self.write_url_display(
@@ -428,17 +471,20 @@ impl Renderer {
                     let image_style = TextStyle::default().fg(self.options.palette.muted).italic();
                     self.write_style_start(writer, image_style)?;
                     writer.write_all(IMAGE_OPEN.as_bytes())?;
-                    self.render_inlines_inner(writer, alt, image_style, break_prefix)?;
+                    self.render_inlines_inner(writer, alt, image_style, line_break)?;
                     writer.write_all(LINK_TEXT_CLOSE.as_bytes())?;
                     self.restore_style(writer, current_style)?;
                     self.write_url_display(writer, destination, title.as_deref(), current_style)?;
                 }
-                Inline::HardBreak | Inline::SoftBreak => {
-                    writer.write_all(b"\n")?;
-                    if let Some(prefix) = break_prefix {
-                        write_spaces(writer, prefix)?;
+                Inline::HardBreak | Inline::SoftBreak => match line_break {
+                    LineBreak::Newline(prefix) => {
+                        writer.write_all(b"\n")?;
+                        if let Some(prefix) = prefix {
+                            write_spaces(writer, prefix)?;
+                        }
                     }
-                }
+                    LineBreak::Space => writer.write_all(b" ")?,
+                },
             }
         }
         Ok(())
@@ -450,10 +496,10 @@ impl Renderer {
         children: &[Inline<'_>],
         current_style: TextStyle,
         child_style: TextStyle,
-        break_prefix: Option<usize>,
+        line_break: LineBreak,
     ) -> io::Result<()> {
         self.write_style_start(writer, child_style)?;
-        self.render_inlines_inner(writer, children, child_style, break_prefix)?;
+        self.render_inlines_inner(writer, children, child_style, line_break)?;
         self.restore_style(writer, current_style)
     }
 
@@ -479,9 +525,32 @@ impl Renderer {
         let body_style = TextStyle::default().fg(self.options.palette.body);
         self.write_style_start(writer, body_style)?;
         write_table_row(writer, row, row_layout, widths, alignments, &|writer, cell| {
-            self.render_inlines_inner(writer, cell, body_style, None)
+            self.write_cell_inlines(writer, cell, body_style)
         })?;
         self.write_style_end(writer)
+    }
+
+    fn write_cell_inlines(
+        &self,
+        writer: &mut dyn Write,
+        cell: &[Inline<'_>],
+        body_style: TextStyle,
+    ) -> io::Result<()> {
+        self.render_inlines_inner(writer, cell, body_style, LineBreak::Space)
+    }
+
+    /// Measures a table cell's display width by rendering it through a width-counting
+    /// writer on the same code path as emission, so width and output cannot drift. The
+    /// render runs in plain mode so only the visible text reaches the counter; the ANSI
+    /// escapes a styled render would add are zero-width and must not be counted.
+    fn measure_cell(&self, cell: &[Inline<'_>]) -> usize {
+        let plain = Renderer::new(RenderOptions { color: ColorMode::Plain, ..self.options });
+        let body_style = TextStyle::default().fg(plain.options.palette.body);
+        let mut counter = WidthMeasuringWriter::default();
+        match plain.write_cell_inlines(&mut counter, cell, body_style) {
+            Ok(()) => counter.width(),
+            Err(_) => 0,
+        }
     }
 
     fn write_url_display(
@@ -730,7 +799,11 @@ mod tests {
                 children: vec![Inline::Text(Text::borrowed("Title"))],
             }),
             Block::BlankLine,
-            Block::List(List { kind: ListKind::Unordered, items: vec![list_item(None, "item")] }),
+            Block::List(List {
+                kind: ListKind::Unordered,
+                items: vec![list_item(None, "item")],
+                loose: false,
+            }),
             Block::BlockQuote(BlockQuote {
                 kind: None,
                 blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("quoted"))])],
@@ -742,6 +815,36 @@ mod tests {
     }
 
     #[test]
+    fn loose_lists_separate_items_with_a_blank_line() -> io::Result<()> {
+        let loose = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![list_item(None, "a"), list_item(None, "b")],
+            loose: true,
+        })];
+        let tight = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![list_item(None, "a"), list_item(None, "b")],
+            loose: false,
+        })];
+
+        assert_eq!(render_plain(&loose)?, "• a\n\n• b\n");
+        assert_eq!(render_plain(&tight)?, "• a\n• b\n");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_list_item_renders_its_marker_without_a_trailing_space() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![ListItem { task: None, blocks: vec![] }, list_item(None, "b")],
+            loose: false,
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "•\n• b\n");
+        Ok(())
+    }
+
+    #[test]
     fn renders_task_lists_with_checkbox_glyphs() -> io::Result<()> {
         let blocks = vec![Block::List(List {
             kind: ListKind::Unordered,
@@ -749,9 +852,92 @@ mod tests {
                 list_item(Some(TaskState::Checked), "done"),
                 list_item(Some(TaskState::Unchecked), "todo"),
             ],
+            loose: false,
         })];
 
         assert_eq!(render_plain(&blocks)?, "• ☑ done\n• ☐ todo\n");
+        Ok(())
+    }
+
+    #[test]
+    fn empty_task_list_item_keeps_its_checkbox_without_a_trailing_space() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![
+                ListItem { task: Some(TaskState::Unchecked), blocks: vec![] },
+                list_item(Some(TaskState::Checked), "done"),
+            ],
+            loose: false,
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "• ☐\n• ☑ done\n");
+        Ok(())
+    }
+
+    #[test]
+    fn fenced_code_block_as_only_item_block_indents_continuation_lines() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![ListItem {
+                task: None,
+                blocks: vec![Block::CodeBlock(CodeBlock {
+                    info: Some(Text::borrowed("rust")),
+                    text: Text::borrowed("fn main() {}\n"),
+                })],
+            }],
+            loose: false,
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "• ```rust\n  fn main() {}\n  ```\n");
+        Ok(())
+    }
+
+    #[test]
+    fn blockquote_as_first_item_block_keeps_its_bar_at_the_content_column() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![ListItem {
+                task: None,
+                blocks: vec![Block::BlockQuote(BlockQuote {
+                    kind: None,
+                    blocks: vec![paragraph("a"), paragraph("b")],
+                })],
+            }],
+            loose: false,
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "• │ a\n  │ b\n");
+        Ok(())
+    }
+
+    #[test]
+    fn nested_list_as_first_item_block_aligns_its_first_item_with_siblings() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![ListItem {
+                task: None,
+                blocks: vec![Block::List(List {
+                    kind: ListKind::Unordered,
+                    items: vec![list_item(None, "a"), list_item(None, "b")],
+                    loose: false,
+                })],
+            }],
+            loose: false,
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "• ◦ a\n  ◦ b\n");
+        Ok(())
+    }
+
+    #[test]
+    fn ordered_list_markers_saturate_at_u64_max_instead_of_failing() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Ordered { start: u64::MAX },
+            items: vec![list_item(None, "a"), list_item(None, "b")],
+            loose: false,
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "18446744073709551615. a\n18446744073709551615. b\n",);
         Ok(())
     }
 
@@ -767,6 +953,7 @@ mod tests {
                         Block::List(List {
                             kind: ListKind::Ordered { start: 1 },
                             items: vec![list_item(None, "child")],
+                            loose: false,
                         }),
                     ],
                 },
@@ -777,10 +964,12 @@ mod tests {
                         Block::List(List {
                             kind: ListKind::Unordered,
                             items: vec![list_item(None, "child")],
+                            loose: false,
                         }),
                     ],
                 },
             ],
+            loose: false,
         })];
 
         assert_eq!(render_plain(&blocks)?, "9. item\n   1. child\n10. ☑ next\n      ◦ child\n",);
@@ -808,6 +997,41 @@ mod tests {
             render_plain(&blocks)?,
             "link(https://example.com) — Example [img: alt](image.png) — Logo\n",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn table_cell_line_breaks_render_as_a_single_space_keeping_borders_aligned() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![
+                Inline::Text(Text::borrowed("a")),
+                Inline::SoftBreak,
+                Inline::Text(Text::borrowed("b")),
+            ]]],
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "┌─────┐\n│ H   │\n├─────┤\n│ a b │\n└─────┘\n",);
+        Ok(())
+    }
+
+    #[test]
+    fn table_cell_width_matches_rendered_plain_text_for_a_titled_link() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Link {
+                destination: Text::borrowed("https://example.com"),
+                title: Some(Text::borrowed("Example")),
+                kind: LinkKind::Regular,
+                children: vec![Inline::Text(Text::borrowed("link"))],
+            }]]],
+        })];
+        let output = render_plain(&blocks)?;
+        let widths: BTreeSet<usize> = output.lines().map(crate::list::str_width).collect();
+
+        assert_eq!(widths.len(), 1, "every table line shares one display width: {output:?}");
         Ok(())
     }
 
@@ -1028,6 +1252,47 @@ mod tests {
     }
 
     #[test]
+    fn default_code_theme_matches_explicit_solarized_dark() -> io::Result<()> {
+        let blocks = rust_code_blocks("rust", "fn main() {}\n");
+        let default = render_ansi(&blocks)?;
+        let explicit = render_to_string(
+            &blocks,
+            RenderOptions {
+                color: ColorMode::Ansi,
+                code_theme: CodeTheme::SolarizedDark,
+                ..Default::default()
+            },
+        )?;
+
+        assert_eq!(default, explicit, "the default code theme must stay Solarized Dark");
+        Ok(())
+    }
+
+    #[test]
+    fn different_code_themes_highlight_the_same_block_differently() -> io::Result<()> {
+        let blocks = rust_code_blocks("rust", "fn main() {}\n");
+        let dark = render_to_string(
+            &blocks,
+            RenderOptions {
+                color: ColorMode::Ansi,
+                code_theme: CodeTheme::SolarizedDark,
+                ..Default::default()
+            },
+        )?;
+        let light = render_to_string(
+            &blocks,
+            RenderOptions {
+                color: ColorMode::Ansi,
+                code_theme: CodeTheme::SolarizedLight,
+                ..Default::default()
+            },
+        )?;
+
+        assert_ne!(dark, light, "distinct code themes must produce distinct ANSI output");
+        Ok(())
+    }
+
+    #[test]
     fn highlights_rust_code_without_rewriting_source_text() -> io::Result<()> {
         let blocks = rust_code_blocks("rust", "fn main() {}\n");
         let output = render_ansi(&blocks)?;
@@ -1123,6 +1388,22 @@ mod tests {
         let blocks = vec![Block::HtmlBlock(Text::borrowed("<div>\nhello\n</div>\n"))];
 
         assert_eq!(render_plain(&blocks)?, "<div>\nhello\n</div>\n");
+        Ok(())
+    }
+
+    #[test]
+    fn html_block_followed_by_a_paragraph_emits_no_blank_separator() -> io::Result<()> {
+        let blocks = vec![Block::HtmlBlock(Text::borrowed("<div>\n")), paragraph("after")];
+
+        assert_eq!(render_plain(&blocks)?, "<div>\nafter\n");
+        Ok(())
+    }
+
+    #[test]
+    fn html_block_then_blank_line_keeps_exactly_one_trailing_newline() -> io::Result<()> {
+        let blocks = vec![Block::HtmlBlock(Text::borrowed("x\n")), Block::BlankLine];
+
+        assert_eq!(render_plain(&blocks)?, "x\n");
         Ok(())
     }
 
@@ -1244,9 +1525,22 @@ mod tests {
         let blocks = vec![Block::List(List {
             kind: ListKind::Unordered,
             items: vec![list_item(None, "item")],
+            loose: false,
         })];
 
         assert_eq!(render_plain(&blocks)?, "• item\n");
+        Ok(())
+    }
+
+    #[test]
+    fn blank_line_inside_a_blockquote_renders_a_bare_bar_without_trailing_space() -> io::Result<()>
+    {
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: None,
+            blocks: vec![paragraph("a"), Block::BlankLine, paragraph("b")],
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "│ a\n│\n│ b\n");
         Ok(())
     }
 
@@ -1280,6 +1574,7 @@ mod tests {
                     Block::CodeBlock(CodeBlock { info: None, text: Text::borrowed("code\n") }),
                 ],
             }],
+            loose: false,
         })];
 
         let output = render_plain(&blocks)?;
@@ -1306,7 +1601,10 @@ mod tests {
             children: vec![Inline::Text(Text::borrowed("Title"))],
         })];
 
-        let output = render_to_string(&blocks, RenderOptions { color: ColorMode::Ansi, palette })?;
+        let output = render_to_string(
+            &blocks,
+            RenderOptions { color: ColorMode::Ansi, palette, ..Default::default() },
+        )?;
 
         assert!(
             output.contains("38;2;1;2;3"),

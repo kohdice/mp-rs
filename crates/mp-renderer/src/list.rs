@@ -13,17 +13,15 @@ pub(crate) fn list_marker<'a>(
     list: &List<'_>,
     index: usize,
     depth: usize,
-) -> io::Result<ListMarkerDisplay<'a>> {
+) -> ListMarkerDisplay<'a> {
     match list.kind {
         ListKind::Ordered { start } => {
-            let offset = u64::try_from(index)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let value = start.checked_add(offset).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "ordered list marker overflow")
-            })?;
-            Ok(ListMarkerDisplay::OrderedGenerated(value))
+            // CommonMark caps ordered-list starts at 9 digits, so this saturation is
+            // unobservable in practice; it only replaces a misclassified overflow error.
+            let offset = u64::try_from(index).unwrap_or(u64::MAX);
+            ListMarkerDisplay::OrderedGenerated(start.saturating_add(offset))
         }
-        ListKind::Unordered => Ok(ListMarkerDisplay::Text(unordered_marker(depth))),
+        ListKind::Unordered => ListMarkerDisplay::Text(unordered_marker(depth)),
     }
 }
 
@@ -39,8 +37,8 @@ where
 
 pub(crate) fn task_marker(task: Option<TaskState>) -> Option<&'static str> {
     match task {
-        Some(TaskState::Checked) => Some("☑ "),
-        Some(TaskState::Unchecked) => Some("☐ "),
+        Some(TaskState::Checked) => Some("☑"),
+        Some(TaskState::Unchecked) => Some("☐"),
         None => None,
     }
 }
@@ -54,7 +52,8 @@ fn unordered_marker(depth: usize) -> &'static str {
 }
 
 pub(crate) fn marker_width(marker: ListMarkerDisplay<'_>, task: Option<TaskState>) -> usize {
-    let task_width = task_marker(task).map_or(0, str_width);
+    // Each present part is followed by one separating space before the content column.
+    let task_width = task_marker(task).map_or(0, |glyph| str_width(glyph) + 1);
     marker_text_width(marker) + 1 + task_width
 }
 
@@ -75,7 +74,7 @@ pub(crate) fn str_width(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::str_width;
+    use super::{ListMarkerDisplay, marker_text_width, str_width, write_list_marker};
 
     #[test]
     fn measures_fullwidth_and_combining_text_widths() {
@@ -83,5 +82,19 @@ mod tests {
         assert_eq!(str_width("日本語"), 6);
         assert_eq!(str_width("e\u{301}"), 1);
         assert_eq!(str_width("👩\u{200d}💻"), 2);
+    }
+
+    #[test]
+    fn ordered_marker_text_width_matches_the_written_marker() -> std::io::Result<()> {
+        for value in [1, 9, 10, 999, u64::MAX] {
+            let marker = ListMarkerDisplay::OrderedGenerated(value);
+            let mut buffer = Vec::new();
+            write_list_marker(&mut buffer, marker)?;
+            let written = String::from_utf8(buffer)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
+            assert_eq!(str_width(&written), marker_text_width(marker), "value {value}");
+        }
+        Ok(())
     }
 }

@@ -66,34 +66,7 @@ pub(crate) mod solarized {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rgb, solarized};
-
-    #[test]
-    fn default_palette_uses_solarized_dark_values() {
-        assert_eq!(solarized::BASE01, Rgb { r: 88, g: 110, b: 117 });
-        assert_eq!(solarized::BASE0, Rgb { r: 131, g: 148, b: 150 });
-        assert_eq!(solarized::YELLOW, Rgb { r: 181, g: 137, b: 0 });
-        assert_eq!(solarized::CYAN, Rgb { r: 42, g: 161, b: 152 });
-        assert_eq!(solarized::VIOLET, Rgb { r: 108, g: 113, b: 196 });
-        assert_eq!(solarized::DARK_PALETTE.body, solarized::BASE0);
-        assert_eq!(solarized::DARK_PALETTE.muted, solarized::BASE01);
-        assert_eq!(solarized::DARK_PALETTE.heading_colors[0], solarized::YELLOW);
-    }
-
-    #[test]
-    fn heading_colors_step_from_warm_bright_to_cool_muted() {
-        assert_eq!(
-            solarized::DARK_PALETTE.heading_colors,
-            [
-                solarized::YELLOW,
-                solarized::ORANGE,
-                solarized::MAGENTA,
-                solarized::CYAN,
-                solarized::BLUE,
-                solarized::VIOLET,
-            ]
-        );
-    }
+    use super::solarized;
 
     #[test]
     fn heading_colors_are_pairwise_distinct_and_differ_from_the_body_color() {

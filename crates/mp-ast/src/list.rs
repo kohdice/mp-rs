@@ -7,6 +7,10 @@ pub struct List<'a> {
     pub kind: ListKind,
     /// List items in source order.
     pub items: Vec<ListItem<'a>>,
+    /// Whether the list is loose: any blank line between its items, or between
+    /// blocks inside an item, makes a CommonMark list loose so it renders with
+    /// blank-line separation between items.
+    pub loose: bool,
 }
 
 /// The flavor of a list.

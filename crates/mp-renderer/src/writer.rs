@@ -1,33 +1,102 @@
 use std::io::{self, Write};
 
+use unicode_width::UnicodeWidthStr;
+
+/// A [`Write`] sink that discards its bytes and accumulates the unicode display width of
+/// the UTF-8 text written through it. Measuring a cell by rendering it through this
+/// adapter keeps width measurement and emission on one code path, so they cannot drift.
+#[derive(Debug, Default)]
+pub(crate) struct WidthMeasuringWriter {
+    width: usize,
+    carry: Vec<u8>,
+}
+
+impl WidthMeasuringWriter {
+    pub(crate) fn width(&self) -> usize {
+        self.width
+    }
+}
+
+impl Write for WidthMeasuringWriter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if self.carry.is_empty() {
+            // Common case: measure straight from the caller's buffer and stash only a
+            // trailing incomplete sequence (at most 3 bytes), avoiding a full copy.
+            let (valid_up_to, width) = utf8_prefix_width(buffer);
+            self.width += width;
+            self.carry.extend_from_slice(&buffer[valid_up_to..]);
+        } else {
+            self.carry.extend_from_slice(buffer);
+            let (valid_up_to, width) = utf8_prefix_width(&self.carry);
+            self.width += width;
+            self.carry.drain(..valid_up_to);
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Returns the length of the longest UTF-8-complete prefix of `bytes` and its unicode
+/// display width; any trailing incomplete scalar sequence is excluded from both.
+fn utf8_prefix_width(bytes: &[u8]) -> (usize, usize) {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => (bytes.len(), text.width()),
+        Err(error) => {
+            let valid_up_to = error.valid_up_to();
+            let width =
+                std::str::from_utf8(&bytes[..valid_up_to]).map_or(0, UnicodeWidthStr::width);
+            (valid_up_to, width)
+        }
+    }
+}
+
 pub(crate) struct LinePrefixWriter<'a, W, P>
 where
     W: Write + ?Sized,
-    P: FnMut(&mut W) -> io::Result<()>,
+    P: FnMut(&mut W, bool) -> io::Result<()>,
 {
     inner: &'a mut W,
     prefix: P,
     at_line_start: bool,
     wrote_anything: bool,
+    skip_next_prefix: bool,
 }
 
 impl<'a, W, P> LinePrefixWriter<'a, W, P>
 where
     W: Write + ?Sized,
-    P: FnMut(&mut W) -> io::Result<()>,
+    P: FnMut(&mut W, bool) -> io::Result<()>,
 {
-    pub(crate) fn new(inner: &'a mut W, prefix: P) -> Self {
-        Self { inner, prefix, at_line_start: true, wrote_anything: false }
+    /// Creates a writer that emits `prefix` at the start of every line. The prefix
+    /// closure receives `true` when the line's only content is its terminating newline,
+    /// so callers can drop trailing whitespace (e.g. a bare `│` for blank quote lines).
+    /// With `hanging`, the first line is not prefixed, so the caller can place that
+    /// line's leading content itself (a hanging indent).
+    pub(crate) fn new(inner: &'a mut W, prefix: P, hanging: bool) -> Self {
+        Self {
+            inner,
+            prefix,
+            at_line_start: true,
+            wrote_anything: false,
+            skip_next_prefix: hanging,
+        }
     }
 
     pub(crate) fn wrote_anything(&self) -> bool {
         self.wrote_anything
     }
 
-    fn write_prefix(&mut self) -> io::Result<()> {
-        (self.prefix)(self.inner)?;
+    fn write_prefix(&mut self, blank_line: bool) -> io::Result<()> {
+        if self.skip_next_prefix {
+            self.skip_next_prefix = false;
+        } else {
+            (self.prefix)(self.inner, blank_line)?;
+            self.wrote_anything = true;
+        }
         self.at_line_start = false;
-        self.wrote_anything = true;
         Ok(())
     }
 }
@@ -35,7 +104,7 @@ where
 impl<W, P> Write for LinePrefixWriter<'_, W, P>
 where
     W: Write + ?Sized,
-    P: FnMut(&mut W) -> io::Result<()>,
+    P: FnMut(&mut W, bool) -> io::Result<()>,
 {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         if buffer.is_empty() {
@@ -43,7 +112,7 @@ where
         }
 
         if self.at_line_start {
-            self.write_prefix()?;
+            self.write_prefix(buffer[0] == b'\n')?;
         }
 
         let end =
@@ -124,12 +193,36 @@ where
 mod tests {
     use std::io::{self, Write};
 
-    use super::{LinePrefixWriter, write_repeated_str};
+    use super::{LinePrefixWriter, WidthMeasuringWriter, write_repeated_str};
+
+    #[test]
+    fn width_measuring_writer_measures_ascii_and_fullwidth_text() -> io::Result<()> {
+        let mut counter = WidthMeasuringWriter::default();
+
+        counter.write_all("a日b".as_bytes())?;
+
+        assert_eq!(counter.width(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn width_measuring_writer_handles_utf8_split_across_writes() -> io::Result<()> {
+        let mut counter = WidthMeasuringWriter::default();
+        let bytes = "日本語".as_bytes();
+
+        // Split mid-scalar: the first write ends inside the second character.
+        counter.write_all(&bytes[..4])?;
+        counter.write_all(&bytes[4..])?;
+
+        assert_eq!(counter.width(), 6);
+        Ok(())
+    }
 
     #[test]
     fn line_prefix_writer_reports_partial_input_writes() -> io::Result<()> {
         let mut output = ShortWriter::new(2);
-        let mut prefixed = LinePrefixWriter::new(&mut output, |writer| writer.write_all(b"> "));
+        let mut prefixed =
+            LinePrefixWriter::new(&mut output, |writer, _blank| writer.write_all(b"> "), false);
 
         let written = prefixed.write(b"abcdef")?;
 
@@ -141,7 +234,8 @@ mod tests {
     #[test]
     fn line_prefix_writer_prefixes_all_lines_with_write_all() -> io::Result<()> {
         let mut output = Vec::new();
-        let mut prefixed = LinePrefixWriter::new(&mut output, |writer| writer.write_all(b"> "));
+        let mut prefixed =
+            LinePrefixWriter::new(&mut output, |writer, _blank| writer.write_all(b"> "), false);
 
         prefixed.write_all(b"a\nb")?;
 
@@ -152,7 +246,8 @@ mod tests {
     #[test]
     fn appends_no_prefix_after_a_trailing_newline() -> io::Result<()> {
         let mut output = Vec::new();
-        let mut prefixed = LinePrefixWriter::new(&mut output, |writer| writer.write_all(b"> "));
+        let mut prefixed =
+            LinePrefixWriter::new(&mut output, |writer, _blank| writer.write_all(b"> "), false);
 
         prefixed.write_all(b"a\n")?;
 
@@ -161,9 +256,22 @@ mod tests {
     }
 
     #[test]
+    fn hanging_writer_skips_the_prefix_on_the_first_line_only() -> io::Result<()> {
+        let mut output = Vec::new();
+        let mut prefixed =
+            LinePrefixWriter::new(&mut output, |writer, _blank| writer.write_all(b"  "), true);
+
+        prefixed.write_all(b"a\nb\nc")?;
+
+        assert_eq!(String::from_utf8_lossy(&output), "a\n  b\n  c");
+        Ok(())
+    }
+
+    #[test]
     fn writes_nothing_when_unused() {
         let mut output = Vec::new();
-        let _prefixed = LinePrefixWriter::new(&mut output, |writer| writer.write_all(b"> "));
+        let _prefixed =
+            LinePrefixWriter::new(&mut output, |writer, _blank| writer.write_all(b"> "), false);
 
         assert!(output.is_empty(), "an unused writer must not emit an orphaned prefix");
     }

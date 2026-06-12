@@ -2,14 +2,14 @@ use std::io::{self, Write};
 
 use mp_ast::{Alignment, Inline, Table};
 
-use crate::plain::plain_inlines_width;
 use crate::writer::{write_repeated_str, write_spaces};
 
 /// Writes a cell's inline content to the row writer.
 ///
-/// The width passed to [`write_table_row`] is measured from the plain text, so a writer
-/// must emit exactly that visible text; styling is only allowed through zero-width ANSI
-/// sequences, which keeps padding and borders aligned.
+/// The width passed to [`write_table_row`] is measured by rendering the same cell through
+/// a width-counting writer (see [`table_layout`]), so a writer must emit exactly that
+/// visible text; styling is only allowed through zero-width ANSI sequences, which keeps
+/// padding and borders aligned.
 pub(crate) type CellWriter<'a> = dyn Fn(&mut dyn Write, &[Inline<'_>]) -> io::Result<()> + 'a;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,13 +24,16 @@ pub(crate) struct RowLayout {
     cell_widths: Vec<usize>,
 }
 
-pub(crate) fn table_layout(table: &Table<'_>) -> TableLayout {
+pub(crate) fn table_layout(
+    table: &Table<'_>,
+    measure_cell: &dyn Fn(&[Inline<'_>]) -> usize,
+) -> TableLayout {
     // Parser-produced tables are already normalized to the header width (GFM), so the
     // header decides the column count; cells beyond it in hand-built rows are ignored.
     let column_count = table.alignments.len().max(table.header.len());
 
-    let header = row_layout(&table.header);
-    let rows: Vec<_> = table.rows.iter().map(Vec::as_slice).map(row_layout).collect();
+    let header = row_layout(&table.header, measure_cell);
+    let rows: Vec<_> = table.rows.iter().map(|row| row_layout(row, measure_cell)).collect();
 
     let mut widths = vec![3; column_count];
     update_widths(&mut widths, &header);
@@ -42,8 +45,8 @@ pub(crate) fn table_layout(table: &Table<'_>) -> TableLayout {
     TableLayout { widths, header, rows }
 }
 
-pub(crate) fn row_layout(row: &[Vec<Inline<'_>>]) -> RowLayout {
-    RowLayout { cell_widths: row.iter().map(Vec::as_slice).map(plain_inlines_width).collect() }
+fn row_layout(row: &[Vec<Inline<'_>>], measure_cell: &dyn Fn(&[Inline<'_>]) -> usize) -> RowLayout {
+    RowLayout { cell_widths: row.iter().map(|cell| measure_cell(cell)).collect() }
 }
 
 fn update_widths(widths: &mut [usize], row: &RowLayout) {
@@ -143,6 +146,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::list::str_width;
     use mp_ast::Text;
 
     #[test]
@@ -153,7 +157,7 @@ mod tests {
             rows: vec![vec![cell("a"), cell("ignored extra cell")]],
         };
 
-        let layout = table_layout(&table);
+        let layout = table_layout(&table, &measure_text);
 
         assert_eq!(layout.widths.len(), 1, "column count follows the header, not ragged rows");
     }
@@ -166,9 +170,18 @@ mod tests {
             rows: vec![vec![cell("日本語")], vec![cell("e\u{301}")], vec![cell("👩\u{200d}💻")]],
         };
 
-        let layout = table_layout(&table);
+        let layout = table_layout(&table, &measure_text);
 
         assert_eq!(layout.widths, vec![6]);
+    }
+
+    fn measure_text(cell: &[Inline<'_>]) -> usize {
+        cell.iter()
+            .map(|inline| match inline {
+                Inline::Text(text) => str_width(text),
+                _ => 0,
+            })
+            .sum()
     }
 
     fn cell(text: &'static str) -> Vec<Inline<'static>> {

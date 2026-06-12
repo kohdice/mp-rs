@@ -5,7 +5,6 @@
 //! [`Renderer::finish`]).
 
 mod list;
-mod plain;
 mod renderer;
 mod style;
 mod syntax;
@@ -14,5 +13,5 @@ mod theme;
 mod tokens;
 mod writer;
 
-pub use renderer::{ColorMode, RenderOptions, RenderState, Renderer};
+pub use renderer::{CodeTheme, ColorMode, RenderOptions, RenderState, Renderer};
 pub use theme::{HEADING_LEVEL_COUNT, Palette, Rgb};

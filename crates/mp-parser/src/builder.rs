@@ -101,6 +101,7 @@ impl<'a> AstBuilder<'a> {
                 },
                 items: Vec::new(),
                 last_item_end: None,
+                loose: false,
             }),
             Tag::Item => {
                 self.frames.push(Frame::Item {
@@ -182,10 +183,12 @@ impl<'a> AstBuilder<'a> {
                 self.append_block(Block::HtmlBlock(text), range)
             }
             TagEnd::List(_) => {
-                let Frame::List { kind, items, last_item_end: _ } = self.pop_frame("list")? else {
+                let Frame::List { kind, items, last_item_end: _, loose } =
+                    self.pop_frame("list")?
+                else {
                     return Err(ParseError::new("markdown list ended out of order"));
                 };
-                self.append_block(Block::List(List { kind, items }), range)
+                self.append_block(Block::List(List { kind, items, loose }), range)
             }
             TagEnd::Item => {
                 let Frame::Item { task, blocks, last_end: _, range } =
@@ -361,10 +364,20 @@ impl<'a> AstBuilder<'a> {
         item: ListItem<'a>,
         range: Range<usize>,
     ) -> Result<(), ParseError> {
+        let source = self.source;
         match self.frames.last_mut() {
-            Some(Frame::List { items, last_item_end, .. }) => {
+            Some(Frame::List { items, last_item_end, loose, .. }) => {
+                if let Some(previous_end) = *last_item_end
+                    && range.start >= previous_end
+                    && gap_has_blank_line(&source[previous_end..range.start])
+                {
+                    *loose = true;
+                }
+                if item.blocks.iter().any(|block| matches!(block, Block::BlankLine)) {
+                    *loose = true;
+                }
                 items.push(item);
-                *last_item_end = Some(trim_trailing_blank_gap_end(self.source, &range));
+                *last_item_end = Some(trim_trailing_blank_gap_end(source, &range));
                 Ok(())
             }
             _ => Err(ParseError::new("markdown list item appeared outside a list")),
@@ -470,6 +483,7 @@ enum Frame<'a> {
         kind: ListKind,
         items: Vec<ListItem<'a>>,
         last_item_end: Option<usize>,
+        loose: bool,
     },
     Item {
         task: Option<TaskState>,
