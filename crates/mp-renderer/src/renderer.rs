@@ -462,8 +462,11 @@ impl Renderer {
         widths: &[usize],
         alignments: &[mp_ast::Alignment],
     ) -> io::Result<()> {
-        self.write_style_start(writer, TextStyle::default().fg(self.palette.body))?;
-        write_table_row(writer, row, row_layout, widths, alignments)?;
+        let body_style = TextStyle::default().fg(self.palette.body);
+        self.write_style_start(writer, body_style)?;
+        write_table_row(writer, row, row_layout, widths, alignments, &|writer, cell| {
+            self.render_inlines_inner(writer, cell, body_style, None)
+        })?;
         self.write_style_end(writer)
     }
 
@@ -807,6 +810,182 @@ mod tests {
             render_plain(&blocks)?,
             "┌─────┬─────┐\n│ A   │ B   │\n├─────┼─────┤\n│ 1   │ 2   │\n└─────┴─────┘\n",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn table_cell_inline_code_uses_inline_code_color_when_ansi_enabled() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Code(Text::borrowed("mp"))]]],
+        })];
+        let output = render_ansi(&blocks)?;
+        let colors = ansi_rgb_colors(&output);
+
+        assert!(
+            colors.contains("42;161;152"),
+            "expected inline code color in table output, got {colors:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn table_cell_text_after_inline_code_restores_body_color() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![
+                Inline::Code(Text::borrowed("mp")),
+                Inline::Text(Text::borrowed("after")),
+            ]]],
+        })];
+        let output = render_ansi(&blocks)?;
+
+        assert!(
+            output.contains("\u{1b}[38;2;131;148;150mafter"),
+            "expected body color restored before trailing text, got {output:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn table_cell_strong_renders_bold_when_ansi_enabled() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Strong(vec![Inline::Text(Text::borrowed("H"))])]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Text(Text::borrowed("body"))]]],
+        })];
+        let output = render_ansi(&blocks)?;
+
+        assert!(
+            output.contains("\u{1b}[1;38;2;131;148;150mH"),
+            "expected bold styling around strong header cell, got {output:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn table_cell_emphasis_and_strikethrough_render_italic_and_strikethrough() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![
+                vec![vec![Inline::Emphasis(vec![Inline::Text(Text::borrowed("em"))])]],
+                vec![vec![Inline::Strikethrough(vec![Inline::Text(Text::borrowed("st"))])]],
+            ],
+        })];
+        let output = render_ansi(&blocks)?;
+
+        assert!(
+            output.contains("\u{1b}[3;38;2;131;148;150mem"),
+            "expected italic styling around emphasis cell, got {output:?}",
+        );
+        assert!(
+            output.contains("\u{1b}[9;38;2;131;148;150mst"),
+            "expected strikethrough styling around strikethrough cell, got {output:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn table_cell_link_renders_underline_link_color_and_muted_url() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Link {
+                destination: Text::borrowed("example.com"),
+                title: Text::borrowed(""),
+                kind: LinkKind::Regular,
+                children: vec![Inline::Text(Text::borrowed("site"))],
+            }]]],
+        })];
+        let output = render_ansi(&blocks)?;
+
+        assert!(
+            output.contains("\u{1b}[4;38;2;108;113;196msite"),
+            "expected underlined link color around link text, got {output:?}",
+        );
+        assert!(
+            output.contains("\u{1b}[2;38;2;88;110;117m(example.com)"),
+            "expected muted dim styling around link url, got {output:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn styled_table_output_strips_to_the_same_layout_as_plain_output() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![
+                vec![Inline::Text(Text::borrowed("Command"))],
+                vec![Inline::Text(Text::borrowed("Note"))],
+            ],
+            alignments: vec![Alignment::Left, Alignment::Right],
+            rows: vec![
+                vec![
+                    vec![Inline::Code(Text::borrowed("mp"))],
+                    vec![Inline::Strong(vec![Inline::Text(Text::borrowed("bold"))])],
+                ],
+                vec![
+                    vec![Inline::Link {
+                        destination: Text::borrowed("example.com"),
+                        title: Text::borrowed(""),
+                        kind: LinkKind::Regular,
+                        children: vec![Inline::Text(Text::borrowed("site"))],
+                    }],
+                    vec![Inline::Emphasis(vec![Inline::Text(Text::borrowed("x"))])],
+                ],
+            ],
+        })];
+
+        assert_eq!(strip_ansi(&render_ansi(&blocks)?), render_plain(&blocks)?);
+        Ok(())
+    }
+
+    #[test]
+    fn styled_link_cell_with_title_keeps_plain_layout() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Link {
+                destination: Text::borrowed("https://example.com"),
+                title: Text::borrowed("Example"),
+                kind: LinkKind::Regular,
+                children: vec![Inline::Text(Text::borrowed("link"))],
+            }]]],
+        })];
+
+        assert_eq!(strip_ansi(&render_ansi(&blocks)?), render_plain(&blocks)?);
+        Ok(())
+    }
+
+    #[test]
+    fn styled_image_cell_with_title_keeps_plain_layout() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Image {
+                destination: Text::borrowed("image.png"),
+                title: Text::borrowed("Logo"),
+                alt: vec![Inline::Text(Text::borrowed("alt"))],
+            }]]],
+        })];
+
+        assert_eq!(strip_ansi(&render_ansi(&blocks)?), render_plain(&blocks)?);
+        Ok(())
+    }
+
+    #[test]
+    fn ansi_disabled_table_cells_stay_plain() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Code(Text::borrowed("mp"))]]],
+        })];
+        let output = render_plain(&blocks)?;
+
+        assert!(!output.contains('\u{1b}'), "expected no escape sequences, got {output:?}");
+        assert!(output.contains("`mp`"), "expected backtick-wrapped code text, got {output:?}");
         Ok(())
     }
 

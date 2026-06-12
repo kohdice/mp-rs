@@ -2,8 +2,15 @@ use std::io::{self, Write};
 
 use mp_ast::{Alignment, Inline, Table};
 
-use crate::plain::{plain_inlines_width, write_plain_inlines};
+use crate::plain::plain_inlines_width;
 use crate::writer::{write_repeated_str, write_spaces};
+
+/// Writes a cell's inline content to the row writer.
+///
+/// The width passed to [`write_table_row`] is measured from the plain text, so a writer
+/// must emit exactly that visible text; styling is only allowed through zero-width ANSI
+/// sequences, which keeps padding and borders aligned.
+pub(crate) type CellWriter<'a> = dyn Fn(&mut dyn Write, &[Inline<'_>]) -> io::Result<()> + 'a;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TableLayout {
@@ -46,16 +53,14 @@ fn update_widths(widths: &mut [usize], row: &RowLayout) {
     }
 }
 
-pub(crate) fn write_table_row<W>(
-    writer: &mut W,
+pub(crate) fn write_table_row(
+    writer: &mut dyn Write,
     row: &[Vec<Inline<'_>>],
     row_layout: &RowLayout,
     widths: &[usize],
     alignments: &[Alignment],
-) -> io::Result<()>
-where
-    W: Write + ?Sized,
-{
+    write_cell: &CellWriter<'_>,
+) -> io::Result<()> {
     writer.write_all("│".as_bytes())?;
     for (index, width) in widths.iter().enumerate() {
         if index > 0 {
@@ -70,37 +75,36 @@ where
             cell_width,
             *width,
             alignments.get(index).copied().unwrap_or(Alignment::None),
+            write_cell,
         )?;
         writer.write_all(b" ")?;
     }
     writer.write_all("│".as_bytes())
 }
 
-fn write_padded_cell<W>(
-    writer: &mut W,
+fn write_padded_cell(
+    writer: &mut dyn Write,
     cell: &[Inline<'_>],
     cell_width: usize,
     width: usize,
     alignment: Alignment,
-) -> io::Result<()>
-where
-    W: Write + ?Sized,
-{
+    write_cell: &CellWriter<'_>,
+) -> io::Result<()> {
     let padding = width.saturating_sub(cell_width);
     match alignment {
         Alignment::Right => {
             write_spaces(writer, padding)?;
-            write_plain_inlines(writer, cell)
+            write_cell(writer, cell)
         }
         Alignment::Center => {
             let left = padding / 2;
             let right = padding - left;
             write_spaces(writer, left)?;
-            write_plain_inlines(writer, cell)?;
+            write_cell(writer, cell)?;
             write_spaces(writer, right)
         }
         Alignment::None | Alignment::Left => {
-            write_plain_inlines(writer, cell)?;
+            write_cell(writer, cell)?;
             write_spaces(writer, padding)
         }
     }
