@@ -3,4 +3,4 @@
 
 mod cli;
 
-pub use cli::{Cli, run};
+pub use cli::{Cli, Env, run};

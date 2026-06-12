@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 clap.workspace = true
 mp-preview.workspace = true
+terminal_size.workspace = true
 
 [lints]
 workspace = true
