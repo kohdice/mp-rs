@@ -1,15 +1,16 @@
 use std::io::{self, Write};
 
 use mp_ast::{
-    Block, BlockQuote, BlockQuoteKind, CodeBlock, Inline, LinkKind, List, ListItem, Table,
+    Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, Inline, LinkKind, List, ListItem, Table,
     TaskState,
 };
 
 use crate::list::{ListMarkerDisplay, list_marker, marker_width, task_marker, write_list_marker};
 use crate::style::{TextStyle, heading_style};
-use crate::table::{BorderKind, table_layout, write_border_line, write_table_row};
+use crate::table::{BorderKind, table_layout, write_border_line, write_table_row_line};
 use crate::theme::Palette;
 use crate::tokens::{IMAGE_OPEN, LINK_TEXT_CLOSE, TITLE_SEPARATOR, URL_CLOSE, URL_OPEN};
+use crate::wrap::WordWrapWriter;
 use crate::writer::{LinePrefixWriter, WidthMeasuringWriter, write_repeated_str, write_spaces};
 
 const THEMATIC_BREAK_WIDTH: usize = 32;
@@ -23,6 +24,8 @@ pub struct RenderOptions {
     pub palette: Palette,
     /// Syntax-highlighting theme for fenced code blocks; solarized dark by default.
     pub code_theme: CodeTheme,
+    /// Maximum display width of the output in columns; `None` means no limit.
+    pub width: Option<usize>,
 }
 
 /// How colors and text styles are written to the output.
@@ -62,6 +65,9 @@ enum LineBreak {
     Newline(Option<usize>),
     /// Emit a single space so the content stays on one line (table cells).
     Space,
+    /// Emit a space for a soft break and a newline for a hard break, leaving
+    /// line breaking to a wrapping writer (used when a width limit is set).
+    Reflow,
 }
 
 /// Renders [`Block`]s as terminal output.
@@ -91,7 +97,7 @@ impl Renderer {
     where
         W: Write + ?Sized,
     {
-        self.render_block_with_state(writer, block, 0, state)
+        self.render_block_with_state(writer, block, 0, self.options.width, state)
     }
 
     /// Completes streaming rendering by terminating the output with a newline.
@@ -117,6 +123,7 @@ impl Renderer {
         writer: &mut W,
         block: &Block<'_>,
         depth: usize,
+        width: Option<usize>,
         state: &mut RenderState,
     ) -> io::Result<()>
     where
@@ -126,7 +133,7 @@ impl Renderer {
         if state.has_rendered {
             writer.write_all(b"\n")?;
         }
-        self.render_block_at_depth(&mut writer, depth, block)?;
+        self.render_block_at_depth(&mut writer, depth, width, block)?;
         state.has_rendered |= writer.wrote_bytes();
         state.ended_with_newline = writer.ended_with_newline();
         Ok(())
@@ -136,25 +143,23 @@ impl Renderer {
         &self,
         writer: &mut dyn Write,
         depth: usize,
+        width: Option<usize>,
         block: &Block<'_>,
     ) -> io::Result<()> {
         match block {
-            Block::Paragraph(inlines) => self.render_paragraph(writer, inlines, None),
-            Block::Heading(heading) => self.render_inlines(
-                writer,
-                &heading.children,
-                heading_style(heading.level, self.options.palette),
-                LineBreak::Newline(None),
-            ),
-            Block::BlockQuote(blockquote) => self.render_blockquote(writer, blockquote, depth),
-            Block::List(list) => self.render_list(writer, list, depth, 0),
+            Block::Paragraph(inlines) => self.render_paragraph(writer, inlines, None, width),
+            Block::Heading(heading) => self.render_heading(writer, heading, width),
+            Block::BlockQuote(blockquote) => {
+                self.render_blockquote(writer, blockquote, depth, width)
+            }
+            Block::List(list) => self.render_list(writer, list, depth, 0, width),
             Block::CodeBlock(code_block) => self.render_code_block(writer, code_block),
             // Normalize to the no-trailing-newline shape every other block uses, so the
             // streaming separator and `finish` logic stay correct.
             Block::HtmlBlock(text) => {
                 writer.write_all(text.as_bytes().strip_suffix(b"\n").unwrap_or(text.as_bytes()))
             }
-            Block::Table(table) => self.render_table(writer, table),
+            Block::Table(table) => self.render_table(writer, table, width),
             Block::ThematicBreak => {
                 self.write_style_start(
                     writer,
@@ -172,13 +177,56 @@ impl Renderer {
         writer: &mut dyn Write,
         inlines: &[Inline<'_>],
         break_prefix: Option<usize>,
+        width: Option<usize>,
     ) -> io::Result<()> {
-        self.render_inlines(
+        let style = TextStyle::default().fg(self.options.palette.body);
+        match width {
+            None => self.render_inlines(writer, inlines, style, LineBreak::Newline(break_prefix)),
+            Some(width) => {
+                self.render_reflowed_inlines(writer, inlines, style, break_prefix, width)
+            }
+        }
+    }
+
+    fn render_heading(
+        &self,
+        writer: &mut dyn Write,
+        heading: &Heading<'_>,
+        width: Option<usize>,
+    ) -> io::Result<()> {
+        let style = heading_style(heading.level, self.options.palette);
+        match width {
+            None => self.render_inlines(writer, &heading.children, style, LineBreak::Newline(None)),
+            Some(width) => {
+                self.render_reflowed_inlines(writer, &heading.children, style, None, width)
+            }
+        }
+    }
+
+    /// Renders inline content reflowed to the given width: soft breaks become
+    /// spaces, a [`WordWrapWriter`] decides line breaks, and continuation
+    /// lines are indented by `break_prefix` columns (which reduce the usable
+    /// width accordingly).
+    fn render_reflowed_inlines(
+        &self,
+        writer: &mut dyn Write,
+        inlines: &[Inline<'_>],
+        style: TextStyle,
+        break_prefix: Option<usize>,
+        width: usize,
+    ) -> io::Result<()> {
+        let indent = break_prefix.unwrap_or(0);
+        let wrap_width = width.saturating_sub(indent).max(1);
+        let mut prefixed = LinePrefixWriter::new(
             writer,
-            inlines,
-            TextStyle::default().fg(self.options.palette.body),
-            LineBreak::Newline(break_prefix),
-        )
+            move |writer, blank_line| {
+                if blank_line { Ok(()) } else { write_spaces(writer, indent) }
+            },
+            true,
+        );
+        let mut wrapper = WordWrapWriter::new(&mut prefixed, wrap_width);
+        self.render_inlines(&mut wrapper, inlines, style, LineBreak::Reflow)?;
+        wrapper.finish()
     }
 
     fn render_blockquote(
@@ -186,7 +234,9 @@ impl Renderer {
         writer: &mut dyn Write,
         blockquote: &BlockQuote<'_>,
         depth: usize,
+        width: Option<usize>,
     ) -> io::Result<()> {
+        const QUOTE_PREFIX_WIDTH: usize = 2;
         let options = self.options;
         let palette = self.options.palette;
         let mut prefixed = LinePrefixWriter::new(
@@ -212,7 +262,13 @@ impl Renderer {
             state.has_rendered = true;
         }
         for block in &blockquote.blocks {
-            self.render_block_with_state(&mut prefixed, block, depth, &mut state)?;
+            self.render_block_with_state(
+                &mut prefixed,
+                block,
+                depth,
+                width.map(|w| w.saturating_sub(QUOTE_PREFIX_WIDTH)),
+                &mut state,
+            )?;
         }
         if prefixed.wrote_anything() {
             return Ok(());
@@ -231,13 +287,14 @@ impl Renderer {
         list: &List<'_>,
         depth: usize,
         indent: usize,
+        width: Option<usize>,
     ) -> io::Result<()> {
         for (index, item) in list.items.iter().enumerate() {
             if index > 0 {
                 writer.write_all(if list.loose { b"\n\n" } else { b"\n" })?;
             }
             let marker = list_marker(list, index, depth);
-            self.render_list_item(writer, marker, item, depth, indent)?;
+            self.render_list_item(writer, marker, item, depth, indent, width)?;
         }
         Ok(())
     }
@@ -249,6 +306,7 @@ impl Renderer {
         item: &ListItem<'_>,
         depth: usize,
         indent: usize,
+        width: Option<usize>,
     ) -> io::Result<()> {
         write_spaces(writer, indent)?;
         self.write_style_start(
@@ -277,14 +335,19 @@ impl Renderer {
                     if index > 0 {
                         write_spaces(writer, content_width)?;
                     }
-                    self.render_paragraph(writer, inlines, Some(content_width))?;
+                    self.render_paragraph(writer, inlines, Some(content_width), width)?;
                 }
                 Block::BlankLine => {}
                 // The first block shares the marker's line, so it hangs: its first line
                 // sits after the marker and only later lines indent to the content column.
-                child => {
-                    self.render_indented_block(writer, child, content_width, depth + 1, index == 0)?
-                }
+                child => self.render_indented_block(
+                    writer,
+                    child,
+                    content_width,
+                    depth + 1,
+                    index == 0,
+                    width,
+                )?,
             }
         }
         Ok(())
@@ -297,6 +360,7 @@ impl Renderer {
         indent: usize,
         depth: usize,
         hanging: bool,
+        width: Option<usize>,
     ) -> io::Result<()> {
         let mut prefixed = LinePrefixWriter::new(
             writer,
@@ -305,7 +369,12 @@ impl Renderer {
             },
             hanging,
         );
-        self.render_block_at_depth(&mut prefixed, depth, block)
+        self.render_block_at_depth(
+            &mut prefixed,
+            depth,
+            width.map(|w| w.saturating_sub(indent)),
+            block,
+        )
     }
 
     fn render_code_block(
@@ -351,8 +420,13 @@ impl Renderer {
         self.write_styled_text(writer, fallback_style, &code_block.text)
     }
 
-    fn render_table(&self, writer: &mut dyn Write, table: &Table<'_>) -> io::Result<()> {
-        let layout = table_layout(table, &|cell| self.measure_cell(cell));
+    fn render_table(
+        &self,
+        writer: &mut dyn Write,
+        table: &Table<'_>,
+        width: Option<usize>,
+    ) -> io::Result<()> {
+        let layout = table_layout(table, &|cell| self.measure_cell(cell), width);
         if layout.widths.is_empty() {
             return Ok(());
         }
@@ -360,13 +434,7 @@ impl Renderer {
         self.write_table_border(writer, &layout.widths, BorderKind::Top)?;
         if !table.header.is_empty() {
             writer.write_all(b"\n")?;
-            self.write_table_row(
-                writer,
-                &table.header,
-                &layout.header,
-                &layout.widths,
-                &table.alignments,
-            )?;
+            self.write_table_row(writer, &table.header, &layout.widths, &table.alignments)?;
             writer.write_all(b"\n")?;
             self.write_table_border(writer, &layout.widths, BorderKind::Middle)?;
         }
@@ -376,13 +444,7 @@ impl Renderer {
                 self.write_table_border(writer, &layout.widths, BorderKind::Middle)?;
                 writer.write_all(b"\n")?;
             }
-            self.write_table_row(
-                writer,
-                row,
-                &layout.rows[index],
-                &layout.widths,
-                &table.alignments,
-            )?;
+            self.write_table_row(writer, row, &layout.widths, &table.alignments)?;
         }
         writer.write_all(b"\n")?;
         self.write_table_border(writer, &layout.widths, BorderKind::Bottom)?;
@@ -476,14 +538,14 @@ impl Renderer {
                     self.restore_style(writer, current_style)?;
                     self.write_url_display(writer, destination, title.as_deref(), current_style)?;
                 }
-                Inline::HardBreak | Inline::SoftBreak => match line_break {
-                    LineBreak::Newline(prefix) => {
-                        writer.write_all(b"\n")?;
-                        if let Some(prefix) = prefix {
-                            write_spaces(writer, prefix)?;
-                        }
-                    }
+                Inline::HardBreak => match line_break {
+                    LineBreak::Newline(prefix) => write_line_break(writer, prefix)?,
                     LineBreak::Space => writer.write_all(b" ")?,
+                    LineBreak::Reflow => writer.write_all(b"\n")?,
+                },
+                Inline::SoftBreak => match line_break {
+                    LineBreak::Newline(prefix) => write_line_break(writer, prefix)?,
+                    LineBreak::Space | LineBreak::Reflow => writer.write_all(b" ")?,
                 },
             }
         }
@@ -514,20 +576,49 @@ impl Renderer {
         self.write_style_end(writer)
     }
 
+    /// Writes a table row, wrapping each cell to its column width; the row
+    /// spans as many output lines as its tallest cell. Every output line is
+    /// wrapped in the body style so borders and padding stay styled even
+    /// when a cell's inline style spans a wrap point.
     fn write_table_row(
         &self,
         writer: &mut dyn Write,
         row: &[Vec<Inline<'_>>],
-        row_layout: &crate::table::RowLayout,
         widths: &[usize],
         alignments: &[mp_ast::Alignment],
     ) -> io::Result<()> {
         let body_style = TextStyle::default().fg(self.options.palette.body);
-        self.write_style_start(writer, body_style)?;
-        write_table_row(writer, row, row_layout, widths, alignments, &|writer, cell| {
-            self.write_cell_inlines(writer, cell, body_style)
-        })?;
-        self.write_style_end(writer)
+        let mut cells = Vec::with_capacity(widths.len());
+        for (index, width) in widths.iter().enumerate() {
+            let cell = row.get(index).map_or([].as_slice(), Vec::as_slice);
+            cells.push(self.wrap_cell_lines(cell, *width, body_style)?);
+        }
+
+        let height = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        for line_index in 0..height {
+            if line_index > 0 {
+                writer.write_all(b"\n")?;
+            }
+            self.write_style_start(writer, body_style)?;
+            write_table_row_line(writer, &cells, line_index, widths, alignments)?;
+            self.write_style_end(writer)?;
+        }
+        Ok(())
+    }
+
+    /// Renders one cell's inline content wrapped to the column width and
+    /// returns its output lines.
+    fn wrap_cell_lines(
+        &self,
+        cell: &[Inline<'_>],
+        width: usize,
+        body_style: TextStyle,
+    ) -> io::Result<Vec<Vec<u8>>> {
+        let mut buffer = Vec::new();
+        let mut wrapper = WordWrapWriter::new(&mut buffer, width);
+        self.write_cell_inlines(&mut wrapper, cell, body_style)?;
+        wrapper.finish()?;
+        Ok(buffer.split(|byte| *byte == b'\n').map(<[u8]>::to_vec).collect())
     }
 
     fn write_cell_inlines(
@@ -676,6 +767,15 @@ where
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
+}
+
+/// Emits a line break followed by the optional continuation indent.
+fn write_line_break(writer: &mut dyn Write, prefix: Option<usize>) -> io::Result<()> {
+    writer.write_all(b"\n")?;
+    if let Some(prefix) = prefix {
+        write_spaces(writer, prefix)?;
+    }
+    Ok(())
 }
 
 fn write_styled_text<W>(
@@ -997,6 +1097,160 @@ mod tests {
             render_plain(&blocks)?,
             "link(https://example.com) — Example [img: alt](image.png) — Logo\n",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tables_narrower_than_the_available_width_render_unchanged() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![
+                vec![Inline::Text(Text::borrowed("A"))],
+                vec![Inline::Text(Text::borrowed("B"))],
+            ],
+            alignments: vec![Alignment::Left, Alignment::Left],
+            rows: vec![vec![
+                vec![Inline::Text(Text::borrowed("a"))],
+                vec![Inline::Text(Text::borrowed("b"))],
+            ]],
+        })];
+
+        let unlimited = render_plain(&blocks)?;
+        let limited =
+            render_to_string(&blocks, RenderOptions { width: Some(80), ..Default::default() })?;
+
+        assert_eq!(limited, unlimited);
+        Ok(())
+    }
+
+    #[test]
+    fn cells_wider_than_their_column_wrap_onto_multiple_lines() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Text(Text::borrowed("alpha beta"))]]],
+        })];
+
+        // The natural column width is 10 (total 14); a 9-column budget shrinks
+        // the column to 5, so the cell wraps onto two lines inside its row.
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(9), ..Default::default() })?;
+
+        assert_eq!(output, "┌───────┐\n│ H     │\n├───────┤\n│ alpha │\n│ beta  │\n└───────┘\n");
+        Ok(())
+    }
+
+    #[test]
+    fn shorter_cells_in_a_multi_line_row_pad_to_keep_borders_aligned() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![
+                vec![Inline::Text(Text::borrowed("A"))],
+                vec![Inline::Text(Text::borrowed("B"))],
+            ],
+            alignments: vec![Alignment::Left, Alignment::Left],
+            rows: vec![vec![
+                vec![Inline::Text(Text::borrowed("alpha beta"))],
+                vec![Inline::Text(Text::borrowed("x"))],
+            ]],
+        })];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(15), ..Default::default() })?;
+
+        assert_eq!(
+            output,
+            "┌───────┬─────┐\n\
+             │ A     │ B   │\n\
+             ├───────┼─────┤\n\
+             │ alpha │ x   │\n\
+             │ beta  │     │\n\
+             └───────┴─────┘\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn center_and_right_alignment_apply_to_each_wrapped_cell_line() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![
+                vec![Inline::Text(Text::borrowed("R"))],
+                vec![Inline::Text(Text::borrowed("C"))],
+            ],
+            alignments: vec![Alignment::Right, Alignment::Center],
+            rows: vec![vec![
+                vec![Inline::Text(Text::borrowed("alpha beta"))],
+                vec![Inline::Text(Text::borrowed("gg dd"))],
+            ]],
+        })];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(17), ..Default::default() })?;
+
+        assert_eq!(
+            output,
+            "┌───────┬───────┐\n\
+             │     R │   C   │\n\
+             ├───────┼───────┤\n\
+             │ alpha │ gg dd │\n\
+             │  beta │       │\n\
+             └───────┴───────┘\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_output_line_of_a_width_limited_table_shares_one_display_width() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![
+                vec![Inline::Text(Text::borrowed("Crate"))],
+                vec![Inline::Text(Text::borrowed("Responsibility"))],
+            ],
+            alignments: vec![Alignment::Left, Alignment::Left],
+            rows: vec![
+                vec![
+                    vec![Inline::Text(Text::borrowed("mp-renderer"))],
+                    vec![Inline::Text(Text::borrowed(
+                        "Block-to-terminal rendering with a trailing-newline guarantee",
+                    ))],
+                ],
+                vec![
+                    vec![Inline::Text(Text::borrowed("mp-parser"))],
+                    vec![Inline::Text(Text::borrowed(
+                        "Markdown-to-block parsing with a streaming iterator",
+                    ))],
+                ],
+            ],
+        })];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(24), ..Default::default() })?;
+        let widths: BTreeSet<usize> = output.lines().map(crate::list::str_width).collect();
+
+        assert_eq!(widths.len(), 1, "every table line shares one display width: {output:?}");
+        assert!(
+            widths.iter().all(|width| *width <= 24),
+            "every line fits in the 24-column budget: {output:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ansi_styled_cells_wrap_without_breaking_border_alignment() -> io::Result<()> {
+        let blocks = vec![Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("H"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![vec![Inline::Strong(vec![Inline::Text(Text::borrowed(
+                "alpha beta",
+            ))])]]],
+        })];
+
+        let output = render_to_string(
+            &blocks,
+            RenderOptions { color: ColorMode::Ansi, width: Some(9), ..Default::default() },
+        )?;
+        let widths: BTreeSet<usize> =
+            output.lines().map(|line| crate::wrap::visible_width(line.as_bytes())).collect();
+
+        assert_eq!(widths.len(), 1, "styled cells must not skew padding: {output:?}");
         Ok(())
     }
 
@@ -1590,6 +1844,136 @@ mod tests {
     fn default_render_options_use_the_solarized_dark_palette() {
         assert_eq!(RenderOptions::default().palette, solarized::DARK_PALETTE);
         assert_eq!(Palette::default(), solarized::DARK_PALETTE);
+    }
+
+    #[test]
+    fn default_render_options_have_no_width_limit() {
+        assert_eq!(RenderOptions::default().width, None);
+    }
+
+    #[test]
+    fn paragraphs_wrap_at_word_boundaries_within_the_width_limit() -> io::Result<()> {
+        let blocks =
+            vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("alpha beta gamma delta"))])];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(11), ..Default::default() })?;
+
+        assert_eq!(output, "alpha beta\ngamma delta\n");
+        Ok(())
+    }
+
+    #[test]
+    fn paragraphs_without_a_width_limit_keep_source_line_breaks() -> io::Result<()> {
+        let blocks = vec![Block::Paragraph(vec![
+            Inline::Text(Text::borrowed("alpha")),
+            Inline::SoftBreak,
+            Inline::Text(Text::borrowed("beta")),
+        ])];
+
+        let output = render_plain(&blocks)?;
+
+        assert_eq!(output, "alpha\nbeta\n");
+        Ok(())
+    }
+
+    #[test]
+    fn soft_breaks_reflow_to_spaces_when_a_width_limit_is_set() -> io::Result<()> {
+        let blocks = vec![Block::Paragraph(vec![
+            Inline::Text(Text::borrowed("alpha beta")),
+            Inline::SoftBreak,
+            Inline::Text(Text::borrowed("gamma")),
+        ])];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(16), ..Default::default() })?;
+
+        assert_eq!(output, "alpha beta gamma\n");
+        Ok(())
+    }
+
+    #[test]
+    fn hard_breaks_still_break_lines_when_a_width_limit_is_set() -> io::Result<()> {
+        let blocks = vec![Block::Paragraph(vec![
+            Inline::Text(Text::borrowed("alpha")),
+            Inline::HardBreak,
+            Inline::Text(Text::borrowed("beta")),
+        ])];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(80), ..Default::default() })?;
+
+        assert_eq!(output, "alpha\nbeta\n");
+        Ok(())
+    }
+
+    #[test]
+    fn headings_wrap_and_keep_their_style_on_continuation_lines() -> io::Result<()> {
+        let blocks = vec![Block::Heading(Heading {
+            level: HeadingLevel::H1,
+            children: vec![Inline::Text(Text::borrowed("alpha beta gamma"))],
+        })];
+
+        let output = render_to_string(
+            &blocks,
+            RenderOptions { color: ColorMode::Ansi, width: Some(11), ..Default::default() },
+        )?;
+
+        assert!(output.contains("alpha beta\ngamma"), "heading must wrap: {output:?}");
+        let first_newline = output.find('\n');
+        let style_reset = output.find("\x1b[0m");
+        assert!(
+            matches!((first_newline, style_reset), (Some(newline), Some(reset)) if reset > newline),
+            "the style must stay open across the wrapped line: {output:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn list_item_paragraphs_wrap_aligned_to_the_content_column() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![list_item(None, "alpha beta gamma")],
+            loose: false,
+        })];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(12), ..Default::default() })?;
+
+        assert_eq!(output, "• alpha beta\n  gamma\n");
+        Ok(())
+    }
+
+    #[test]
+    fn blockquote_content_wraps_within_the_width_minus_the_quote_prefix() -> io::Result<()> {
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: None,
+            blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("alpha beta gamma"))])],
+        })];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(12), ..Default::default() })?;
+
+        assert_eq!(output, "│ alpha beta\n│ gamma\n");
+        Ok(())
+    }
+
+    #[test]
+    fn nested_prefixes_reduce_the_usable_width_cumulatively() -> io::Result<()> {
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: None,
+            blocks: vec![Block::List(List {
+                kind: ListKind::Unordered,
+                items: vec![list_item(None, "alpha beta gamma")],
+                loose: false,
+            })],
+        })];
+
+        let output =
+            render_to_string(&blocks, RenderOptions { width: Some(14), ..Default::default() })?;
+
+        assert_eq!(output, "│ • alpha beta\n│   gamma\n");
+        Ok(())
     }
 
     #[test]

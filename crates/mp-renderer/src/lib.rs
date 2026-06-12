@@ -11,6 +11,7 @@ mod syntax;
 mod table;
 mod theme;
 mod tokens;
+mod wrap;
 mod writer;
 
 pub use renderer::{CodeTheme, ColorMode, RenderOptions, RenderState, Renderer};
