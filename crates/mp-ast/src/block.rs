@@ -26,10 +26,43 @@ pub enum Block<'a> {
 /// A heading and its inline content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heading<'a> {
-    /// Heading level, from 1 (`#`) to 6 (`######`).
-    pub level: u8,
+    /// Heading level, from [`HeadingLevel::H1`] (`#`) to [`HeadingLevel::H6`] (`######`).
+    pub level: HeadingLevel,
     /// Inline content of the heading.
     pub children: Vec<Inline<'a>>,
+}
+
+/// Heading depth, restricted to CommonMark's six levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HeadingLevel {
+    /// Level 1 (`#`).
+    H1,
+    /// Level 2 (`##`).
+    H2,
+    /// Level 3 (`###`).
+    H3,
+    /// Level 4 (`####`).
+    H4,
+    /// Level 5 (`#####`).
+    H5,
+    /// Level 6 (`######`).
+    H6,
+}
+
+impl HeadingLevel {
+    /// Returns the numeric depth, from 1 for [`HeadingLevel::H1`] to 6 for
+    /// [`HeadingLevel::H6`].
+    #[must_use]
+    pub const fn depth(self) -> u8 {
+        match self {
+            Self::H1 => 1,
+            Self::H2 => 2,
+            Self::H3 => 3,
+            Self::H4 => 4,
+            Self::H5 => 5,
+            Self::H6 => 6,
+        }
+    }
 }
 
 /// A block quote and the blocks nested inside it.
@@ -66,7 +99,7 @@ mod tests {
         let document_blocks = [
             Block::Paragraph(vec![Inline::Text(Text::borrowed("paragraph"))]),
             Block::Heading(Heading {
-                level: 2,
+                level: HeadingLevel::H2,
                 children: vec![Inline::Text(Text::borrowed("heading"))],
             }),
             Block::List(List {

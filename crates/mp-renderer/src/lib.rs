@@ -14,4 +14,5 @@ mod theme;
 mod tokens;
 mod writer;
 
-pub use renderer::{RenderOptions, RenderState, Renderer};
+pub use renderer::{ColorMode, RenderOptions, RenderState, Renderer};
+pub use theme::{HEADING_LEVEL_COUNT, Palette, Rgb};

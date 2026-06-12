@@ -104,8 +104,8 @@ fn parser_options() -> Options {
 #[cfg(test)]
 mod tests {
     use mp_ast::{
-        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, Inline, LinkKind,
-        ListKind, TaskState, Text,
+        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, HeadingLevel, Inline,
+        LinkKind, ListKind, TaskState, Text,
     };
 
     use super::*;
@@ -126,7 +126,7 @@ mod tests {
             blocks,
             vec![
                 Block::Heading(Heading {
-                    level: 1,
+                    level: HeadingLevel::H1,
                     children: vec![Inline::Text(Text::borrowed("Title"))],
                 }),
                 Block::BlankLine,
@@ -242,6 +242,30 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_ragged_table_rows_to_the_header_width() -> Result<(), ParseError> {
+        let blocks = blocks("| a | b |\n| - | - |\n| 1 |\n| 2 | 3 | 4 |\n")
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(blocks.len(), 1);
+        let Block::Table(table) = &blocks[0] else {
+            panic!("expected table");
+        };
+        assert_eq!(table.header.len(), 2);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![vec![Inline::Text(Text::borrowed("1"))], vec![]],
+                vec![
+                    vec![Inline::Text(Text::borrowed("2"))],
+                    vec![Inline::Text(Text::borrowed("3"))],
+                ],
+            ],
+            "short rows gain empty cells and long rows drop extra cells (GFM)",
+        );
+        Ok(())
+    }
+
+    #[test]
     fn converts_inline_markdown_into_inline_ast_nodes() -> Result<(), ParseError> {
         let blocks = blocks(
             "text *em* **strong** ~~strike~~ `code` [link](https://example.com \"Title\") \
@@ -262,13 +286,13 @@ mod tests {
         assert!(inlines.contains(&Inline::Code(Text::borrowed("code"))));
         assert!(inlines.contains(&Inline::Link {
             destination: Text::borrowed("https://example.com"),
-            title: Text::borrowed("Title"),
+            title: Some(Text::borrowed("Title")),
             kind: LinkKind::Regular,
             children: vec![Inline::Text(Text::borrowed("link"))],
         }));
         assert!(inlines.contains(&Inline::Image {
             destination: Text::borrowed("image.png"),
-            title: Text::borrowed("Image"),
+            title: Some(Text::borrowed("Image")),
             alt: vec![Inline::Text(Text::borrowed("alt"))],
         }));
         assert!(inlines.contains(&Inline::HardBreak));
@@ -285,7 +309,7 @@ mod tests {
             blocks,
             vec![
                 Block::Heading(Heading {
-                    level: 1,
+                    level: HeadingLevel::H1,
                     children: vec![Inline::Text(Text::borrowed("Title"))],
                 }),
                 Block::BlankLine,

@@ -1,6 +1,12 @@
 use crate::Inline;
 
 /// A GFM table.
+///
+/// Parser-produced tables uphold the GFM column invariant: `alignments` has one entry
+/// per `header` column, and every row in `rows` holds exactly `header.len()` cells
+/// (short source rows gain empty cells, extra cells are dropped). Renderers may rely
+/// on the header for the column count and must ignore any cells beyond it in
+/// hand-built tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table<'a> {
     /// Header cells, one inline sequence per column.

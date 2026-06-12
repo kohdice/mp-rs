@@ -17,8 +17,8 @@ pub enum Inline<'a> {
     Link {
         /// Link destination URL.
         destination: Text<'a>,
-        /// Link title; empty when the source declares none.
-        title: Text<'a>,
+        /// Link title, when the source declares one.
+        title: Option<Text<'a>>,
         /// How the link was written in the source.
         kind: LinkKind,
         /// Visible link text.
@@ -28,8 +28,8 @@ pub enum Inline<'a> {
     Image {
         /// Image destination URL.
         destination: Text<'a>,
-        /// Image title; empty when the source declares none.
-        title: Text<'a>,
+        /// Image title, when the source declares one.
+        title: Option<Text<'a>>,
         /// Alt text shown as the visible placeholder.
         alt: Vec<Inline<'a>>,
     },
@@ -62,13 +62,13 @@ mod tests {
             Inline::Code(Text::borrowed("code")),
             Inline::Link {
                 destination: Text::borrowed("https://example.com"),
-                title: Text::borrowed("Example"),
+                title: Some(Text::borrowed("Example")),
                 kind: LinkKind::Regular,
                 children: vec![Inline::Text(Text::borrowed("link"))],
             },
             Inline::Image {
                 destination: Text::borrowed("image.png"),
-                title: Text::borrowed("Image"),
+                title: Some(Text::borrowed("Image")),
                 alt: vec![Inline::Text(Text::borrowed("alt"))],
             },
             Inline::HardBreak,

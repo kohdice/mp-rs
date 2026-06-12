@@ -18,7 +18,7 @@ fn plain_inline_width(inline: &Inline<'_>) -> usize {
             let mut width = plain_inlines_width(children);
             if *kind == LinkKind::Regular {
                 width += str_width(URL_OPEN) + str_width(destination) + str_width(URL_CLOSE);
-                if !title.is_empty() {
+                if let Some(title) = title {
                     width += str_width(TITLE_SEPARATOR) + str_width(title);
                 }
             }
@@ -31,7 +31,7 @@ fn plain_inline_width(inline: &Inline<'_>) -> usize {
                 + str_width(URL_OPEN)
                 + str_width(destination)
                 + str_width(URL_CLOSE);
-            if !title.is_empty() {
+            if let Some(title) = title {
                 width += str_width(TITLE_SEPARATOR) + str_width(title);
             }
             width

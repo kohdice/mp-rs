@@ -1,4 +1,6 @@
-use crate::theme::{HEADING_LEVEL_COUNT, Palette, Rgb};
+use mp_ast::HeadingLevel;
+
+use crate::theme::{Palette, Rgb};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TextStyle {
@@ -66,16 +68,63 @@ impl TextStyle {
     }
 }
 
-pub(crate) fn heading_style(level: u8, palette: Palette) -> TextStyle {
-    let color = palette
-        .heading_colors
-        .get(usize::from(level.saturating_sub(1)))
-        .copied()
-        .unwrap_or(palette.heading_colors[HEADING_LEVEL_COUNT - 1]);
+pub(crate) fn heading_style(level: HeadingLevel, palette: Palette) -> TextStyle {
+    let color = palette.heading_colors[usize::from(level.depth() - 1)];
     match level {
-        1 | 2 => TextStyle::default().fg(color).bold().underline(),
-        3 | 4 => TextStyle::default().fg(color).bold(),
-        6 => TextStyle::default().fg(color).dim(),
-        _ => TextStyle::default().fg(color),
+        HeadingLevel::H1 | HeadingLevel::H2 => TextStyle::default().fg(color).bold().underline(),
+        HeadingLevel::H3 | HeadingLevel::H4 => TextStyle::default().fg(color).bold(),
+        HeadingLevel::H5 | HeadingLevel::H6 => TextStyle::default().fg(color),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mp_ast::HeadingLevel;
+
+    use super::heading_style;
+    use crate::theme::solarized;
+
+    #[test]
+    fn heading_style_applies_decreasing_emphasis_per_level() {
+        let palette = solarized::DARK_PALETTE;
+
+        let h1 = heading_style(HeadingLevel::H1, palette);
+        assert!(h1.is_bold() && h1.is_underline(), "H1 should be bold and underlined");
+
+        let h2 = heading_style(HeadingLevel::H2, palette);
+        assert!(h2.is_bold() && h2.is_underline(), "H2 should be bold and underlined");
+
+        let h3 = heading_style(HeadingLevel::H3, palette);
+        assert!(h3.is_bold() && !h3.is_underline(), "H3 should be bold without underline");
+
+        let h4 = heading_style(HeadingLevel::H4, palette);
+        assert!(h4.is_bold() && !h4.is_underline(), "H4 should be bold without underline");
+
+        let h5 = heading_style(HeadingLevel::H5, palette);
+        assert!(
+            !h5.is_bold() && !h5.is_underline() && !h5.is_dim(),
+            "H5 should be plain color only"
+        );
+
+        let h6 = heading_style(HeadingLevel::H6, palette);
+        assert!(
+            !h6.is_bold() && !h6.is_underline() && !h6.is_dim(),
+            "H6 should be plain color only"
+        );
+        let shallower_levels = [
+            HeadingLevel::H1,
+            HeadingLevel::H2,
+            HeadingLevel::H3,
+            HeadingLevel::H4,
+            HeadingLevel::H5,
+        ];
+        for level in shallower_levels {
+            assert_ne!(
+                h6.fg,
+                heading_style(level, palette).fg,
+                "H6 color must differ from the {level:?} color"
+            );
+        }
+        assert_ne!(h6.fg, Some(palette.body), "H6 color must differ from the body color");
     }
 }

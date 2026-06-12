@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 pub use mp_parser::ParseError;
-pub use mp_renderer::RenderOptions;
+pub use mp_renderer::{ColorMode, Palette, RenderOptions, Rgb};
 
 /// Failure modes of the preview use case.
 #[derive(Debug)]
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn preview_renders_markdown_text_to_the_writer() -> Result<(), PreviewError> {
         let mut output = Vec::new();
-        preview("# Title\n\nHello\n", RenderOptions { ansi: false }, &mut output)?;
+        preview("# Title\n\nHello\n", RenderOptions::default(), &mut output)?;
 
         let rendered = String::from_utf8(output).map_err(|error| {
             PreviewError::Write(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn preview_reports_writer_failures_as_write_errors() {
         let mut writer = FailingWriter;
-        let result = preview("Hello\n", RenderOptions { ansi: false }, &mut writer);
+        let result = preview("Hello\n", RenderOptions::default(), &mut writer);
 
         assert!(matches!(result, Err(PreviewError::Write(_))));
     }
@@ -142,7 +142,7 @@ mod tests {
         std::fs::write(&path, "Hello\n").map_err(PreviewError::Read)?;
 
         let mut output = Vec::new();
-        let result = preview_file(&path, RenderOptions { ansi: false }, &mut output);
+        let result = preview_file(&path, RenderOptions::default(), &mut output);
         let _ = std::fs::remove_file(&path);
         result?;
 
@@ -157,7 +157,7 @@ mod tests {
     fn preview_file_reports_missing_files_as_read_errors() {
         let missing = unique_temp_path();
         let mut output = Vec::new();
-        let result = preview_file(&missing, RenderOptions { ansi: false }, &mut output);
+        let result = preview_file(&missing, RenderOptions::default(), &mut output);
 
         assert!(matches!(result, Err(PreviewError::Read(_))));
     }
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn stream_errors_after_partial_output_still_terminate_with_a_newline()
     -> Result<(), PreviewError> {
-        let renderer = mp_renderer::Renderer::new(RenderOptions { ansi: false });
+        let renderer = mp_renderer::Renderer::new(RenderOptions::default());
         let blocks =
             vec![Ok(paragraph("hello")), Err(PreviewError::Read(io::Error::other("boom")))];
         let mut output = Vec::new();
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn stream_errors_before_any_output_write_nothing() -> Result<(), PreviewError> {
-        let renderer = mp_renderer::Renderer::new(RenderOptions { ansi: false });
+        let renderer = mp_renderer::Renderer::new(RenderOptions::default());
         let blocks: Vec<Result<mp_ast::Block<'_>, PreviewError>> =
             vec![Err(PreviewError::Read(io::Error::other("boom")))];
         let mut output = Vec::new();
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn stream_errors_outrank_finish_write_failures() {
-        let renderer = mp_renderer::Renderer::new(RenderOptions { ansi: false });
+        let renderer = mp_renderer::Renderer::new(RenderOptions::default());
         let blocks =
             vec![Ok(paragraph("hello")), Err(PreviewError::Read(io::Error::other("boom")))];
         let mut writer = LimitedWriter { remaining_writes: 1, bytes: Vec::new() };

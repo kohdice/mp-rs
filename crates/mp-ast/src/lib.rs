@@ -11,7 +11,7 @@ mod list;
 mod table;
 mod text;
 
-pub use block::{Block, BlockQuote, BlockQuoteKind, Heading};
+pub use block::{Block, BlockQuote, BlockQuoteKind, Heading, HeadingLevel};
 pub use code::CodeBlock;
 pub use inline::{Inline, LinkKind};
 pub use list::{List, ListItem, ListKind, TaskState};

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser as ClapParser, ValueEnum};
-use mp_preview::{ParseError, PreviewError, RenderOptions};
+use mp_preview::{ColorMode, ParseError, PreviewError, RenderOptions};
 
 /// Runs the CLI: renders the requested file to `stdout` and maps failures to exit codes.
 ///
@@ -79,7 +79,10 @@ fn render_file<W>(
 where
     W: Write,
 {
-    let options = RenderOptions { ansi: resolve_color_policy(color_policy, stdout_is_terminal) };
+    let options = RenderOptions {
+        color: resolve_color_mode(color_policy, stdout_is_terminal),
+        ..RenderOptions::default()
+    };
     mp_preview::preview_file(path, options, stdout).map_err(|error| match error {
         PreviewError::Read(source) => CliError::Read { path: path.to_path_buf(), source },
         PreviewError::Parse(source) => CliError::Parse { path: path.to_path_buf(), source },
@@ -87,11 +90,11 @@ where
     })
 }
 
-const fn resolve_color_policy(color_policy: ColorPolicy, stdout_is_terminal: bool) -> bool {
+const fn resolve_color_mode(color_policy: ColorPolicy, stdout_is_terminal: bool) -> ColorMode {
     match color_policy {
-        ColorPolicy::Auto => stdout_is_terminal,
-        ColorPolicy::Always => true,
-        ColorPolicy::Never => false,
+        ColorPolicy::Auto if stdout_is_terminal => ColorMode::Ansi,
+        ColorPolicy::Auto | ColorPolicy::Never => ColorMode::Plain,
+        ColorPolicy::Always => ColorMode::Ansi,
     }
 }
 

@@ -20,11 +20,8 @@ where
         Self { inner, prefix, at_line_start: true, wrote_anything: false }
     }
 
-    pub(crate) fn finish(mut self) -> io::Result<()> {
-        if !self.wrote_anything || self.at_line_start {
-            self.write_prefix()?;
-        }
-        Ok(())
+    pub(crate) fn wrote_anything(&self) -> bool {
+        self.wrote_anything
     }
 
     fn write_prefix(&mut self) -> io::Result<()> {
@@ -64,24 +61,16 @@ where
     }
 }
 
-pub(crate) fn write_spaces<W>(writer: &mut W, mut count: usize) -> io::Result<()>
+pub(crate) fn write_spaces<W>(writer: &mut W, count: usize) -> io::Result<()>
 where
     W: Write + ?Sized,
 {
     const SPACES: &[u8] = b"                                                                ";
 
-    while count >= SPACES.len() {
-        writer.write_all(SPACES)?;
-        count -= SPACES.len();
-    }
-    if count > 0 {
-        writer.write_all(&SPACES[..count])?;
-    }
-
-    Ok(())
+    write_chunked_repeats(writer, SPACES, 1, count)
 }
 
-pub(crate) fn write_repeated_str<W>(writer: &mut W, text: &str, mut count: usize) -> io::Result<()>
+pub(crate) fn write_repeated_str<W>(writer: &mut W, text: &str, count: usize) -> io::Result<()>
 where
     W: Write + ?Sized,
 {
@@ -92,26 +81,40 @@ where
     }
 
     let text = text.as_bytes();
-    let repeats_per_chunk = BUFFER_SIZE / text.len();
-    if repeats_per_chunk == 0 {
+    if text.len() > BUFFER_SIZE {
         for _ in 0..count {
             writer.write_all(text)?;
         }
         return Ok(());
     }
 
-    let chunk_len = repeats_per_chunk * text.len();
+    let chunk_len = (BUFFER_SIZE / text.len()) * text.len();
     let mut buffer = [0; BUFFER_SIZE];
     for slot in buffer[..chunk_len].chunks_exact_mut(text.len()) {
         slot.copy_from_slice(text);
     }
 
+    write_chunked_repeats(writer, &buffer[..chunk_len], text.len(), count)
+}
+
+/// Writes `count` repetitions of a `unit`-byte pattern, where `chunk` holds whole
+/// repetitions of that pattern (`chunk.len()` is a non-zero multiple of `unit`).
+fn write_chunked_repeats<W>(
+    writer: &mut W,
+    chunk: &[u8],
+    unit: usize,
+    mut count: usize,
+) -> io::Result<()>
+where
+    W: Write + ?Sized,
+{
+    let repeats_per_chunk = chunk.len() / unit;
     while count >= repeats_per_chunk {
-        writer.write_all(&buffer[..chunk_len])?;
+        writer.write_all(chunk)?;
         count -= repeats_per_chunk;
     }
     if count > 0 {
-        writer.write_all(&buffer[..count * text.len()])?;
+        writer.write_all(&chunk[..count * unit])?;
     }
 
     Ok(())
@@ -141,10 +144,28 @@ mod tests {
         let mut prefixed = LinePrefixWriter::new(&mut output, |writer| writer.write_all(b"> "));
 
         prefixed.write_all(b"a\nb")?;
-        prefixed.finish()?;
 
         assert_eq!(String::from_utf8_lossy(&output), "> a\n> b");
         Ok(())
+    }
+
+    #[test]
+    fn appends_no_prefix_after_a_trailing_newline() -> io::Result<()> {
+        let mut output = Vec::new();
+        let mut prefixed = LinePrefixWriter::new(&mut output, |writer| writer.write_all(b"> "));
+
+        prefixed.write_all(b"a\n")?;
+
+        assert_eq!(String::from_utf8_lossy(&output), "> a\n");
+        Ok(())
+    }
+
+    #[test]
+    fn writes_nothing_when_unused() {
+        let mut output = Vec::new();
+        let _prefixed = LinePrefixWriter::new(&mut output, |writer| writer.write_all(b"> "));
+
+        assert!(output.is_empty(), "an unused writer must not emit an orphaned prefix");
     }
 
     #[test]

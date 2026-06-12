@@ -25,10 +25,9 @@ pub(crate) struct RowLayout {
 }
 
 pub(crate) fn table_layout(table: &Table<'_>) -> TableLayout {
-    let mut column_count = table.alignments.len().max(table.header.len());
-    for row in &table.rows {
-        column_count = column_count.max(row.len());
-    }
+    // Parser-produced tables are already normalized to the header width (GFM), so the
+    // header decides the column count; cells beyond it in hand-built rows are ignored.
+    let column_count = table.alignments.len().max(table.header.len());
 
     let header = row_layout(&table.header);
     let rows: Vec<_> = table.rows.iter().map(Vec::as_slice).map(row_layout).collect();
@@ -48,8 +47,8 @@ pub(crate) fn row_layout(row: &[Vec<Inline<'_>>]) -> RowLayout {
 }
 
 fn update_widths(widths: &mut [usize], row: &RowLayout) {
-    for (index, width) in row.cell_widths.iter().enumerate() {
-        widths[index] = widths[index].max(*width);
+    for (target, width) in widths.iter_mut().zip(&row.cell_widths) {
+        *target = (*target).max(*width);
     }
 }
 
@@ -145,6 +144,19 @@ where
 mod tests {
     use super::*;
     use mp_ast::Text;
+
+    #[test]
+    fn table_layout_ignores_cells_beyond_the_header_columns() {
+        let table = Table {
+            header: vec![cell("H")],
+            alignments: vec![Alignment::Left],
+            rows: vec![vec![cell("a"), cell("ignored extra cell")]],
+        };
+
+        let layout = table_layout(&table);
+
+        assert_eq!(layout.widths.len(), 1, "column count follows the header, not ragged rows");
+    }
 
     #[test]
     fn table_layout_preserves_measured_unicode_cell_widths() {

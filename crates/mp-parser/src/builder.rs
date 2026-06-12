@@ -1,12 +1,12 @@
 use std::ops::Range;
 
 use mp_ast::{
-    Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, Inline, LinkKind, List,
-    ListItem, ListKind, Table, TaskState, Text,
+    Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, HeadingLevel, Inline,
+    LinkKind, List, ListItem, ListKind, Table, TaskState, Text,
 };
 use pulldown_cmark::{
     Alignment as MarkdownAlignment, BlockQuoteKind as MarkdownBlockQuoteKind, CodeBlockKind,
-    CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
+    CowStr, Event, HeadingLevel as MarkdownHeadingLevel, LinkType, Tag, TagEnd,
 };
 
 use crate::ParseError;
@@ -79,9 +79,10 @@ impl<'a> AstBuilder<'a> {
 
         match tag {
             Tag::Paragraph => self.frames.push(Frame::Paragraph { inlines: Vec::new() }),
-            Tag::Heading { level, .. } => self
-                .frames
-                .push(Frame::Heading { level: heading_level_to_u8(level), inlines: Vec::new() }),
+            Tag::Heading { level, .. } => self.frames.push(Frame::Heading {
+                level: markdown_heading_level_to_ast(level),
+                inlines: Vec::new(),
+            }),
             Tag::BlockQuote(kind) => {
                 self.frames.push(Frame::BlockQuote {
                     kind: kind.map(markdown_blockquote_kind_to_ast),
@@ -126,13 +127,13 @@ impl<'a> AstBuilder<'a> {
             Tag::Strikethrough => self.frames.push(Frame::Strikethrough { inlines: Vec::new() }),
             Tag::Link { link_type, dest_url, title, .. } => self.frames.push(Frame::Link {
                 destination: cow_str_to_text(dest_url),
-                title: cow_str_to_text(title),
+                title: non_empty_title(title),
                 kind: link_kind(link_type),
                 inlines: Vec::new(),
             }),
             Tag::Image { dest_url, title, .. } => self.frames.push(Frame::Image {
                 destination: cow_str_to_text(dest_url),
-                title: cow_str_to_text(title),
+                title: non_empty_title(title),
                 inlines: Vec::new(),
             }),
             Tag::FootnoteDefinition(_)
@@ -457,7 +458,7 @@ enum Frame<'a> {
         inlines: Vec<Inline<'a>>,
     },
     Heading {
-        level: u8,
+        level: HeadingLevel,
         inlines: Vec<Inline<'a>>,
     },
     BlockQuote {
@@ -507,13 +508,13 @@ enum Frame<'a> {
     },
     Link {
         destination: Text<'a>,
-        title: Text<'a>,
+        title: Option<Text<'a>>,
         kind: LinkKind,
         inlines: Vec<Inline<'a>>,
     },
     Image {
         destination: Text<'a>,
-        title: Text<'a>,
+        title: Option<Text<'a>>,
         inlines: Vec<Inline<'a>>,
     },
     Ignored,
@@ -527,6 +528,10 @@ fn cow_str_to_text(text: CowStr<'_>) -> Text<'_> {
     }
 }
 
+fn non_empty_title(title: CowStr<'_>) -> Option<Text<'_>> {
+    if title.is_empty() { None } else { Some(cow_str_to_text(title)) }
+}
+
 fn code_block_info(kind: CodeBlockKind<'_>) -> Option<Text<'_>> {
     match kind {
         CodeBlockKind::Indented => None,
@@ -535,14 +540,14 @@ fn code_block_info(kind: CodeBlockKind<'_>) -> Option<Text<'_>> {
     }
 }
 
-fn heading_level_to_u8(level: HeadingLevel) -> u8 {
+fn markdown_heading_level_to_ast(level: MarkdownHeadingLevel) -> HeadingLevel {
     match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
+        MarkdownHeadingLevel::H1 => HeadingLevel::H1,
+        MarkdownHeadingLevel::H2 => HeadingLevel::H2,
+        MarkdownHeadingLevel::H3 => HeadingLevel::H3,
+        MarkdownHeadingLevel::H4 => HeadingLevel::H4,
+        MarkdownHeadingLevel::H5 => HeadingLevel::H5,
+        MarkdownHeadingLevel::H6 => HeadingLevel::H6,
     }
 }
 

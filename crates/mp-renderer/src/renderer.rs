@@ -8,7 +8,7 @@ use mp_ast::{
 use crate::list::{ListMarkerDisplay, list_marker, marker_width, task_marker, write_list_marker};
 use crate::style::{TextStyle, heading_style};
 use crate::table::{BorderKind, table_layout, write_border_line, write_table_row};
-use crate::theme::{Palette, solarized};
+use crate::theme::Palette;
 use crate::tokens::{IMAGE_OPEN, LINK_TEXT_CLOSE, TITLE_SEPARATOR, URL_CLOSE, URL_OPEN};
 use crate::writer::{LinePrefixWriter, write_repeated_str, write_spaces};
 
@@ -17,8 +17,20 @@ const THEMATIC_BREAK_WIDTH: usize = 32;
 /// Configuration for a [`Renderer`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderOptions {
-    /// Whether to emit ANSI escape sequences for colors and text styles.
-    pub ansi: bool,
+    /// How colors and text styles are written to the output.
+    pub color: ColorMode,
+    /// Colors used for each kind of content; solarized dark by default.
+    pub palette: Palette,
+}
+
+/// How colors and text styles are written to the output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ColorMode {
+    /// Emit ANSI escape sequences for colors and text styles.
+    Ansi,
+    /// Emit plain text without escape sequences.
+    #[default]
+    Plain,
 }
 
 /// Streaming render state threaded through [`Renderer::render_block`] calls.
@@ -35,14 +47,13 @@ pub struct RenderState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Renderer {
     options: RenderOptions,
-    palette: Palette,
 }
 
 impl Renderer {
     /// Creates a renderer with the given options.
     #[must_use]
     pub fn new(options: RenderOptions) -> Self {
-        Self { options, palette: solarized::DARK_PALETTE }
+        Self { options }
     }
 
     /// Renders one top-level block and updates the streaming render state.
@@ -80,22 +91,6 @@ impl Renderer {
         Ok(())
     }
 
-    fn render_blocks<W>(
-        &self,
-        writer: &mut W,
-        blocks: &[Block<'_>],
-        depth: usize,
-        state: &mut RenderState,
-    ) -> io::Result<()>
-    where
-        W: Write + ?Sized,
-    {
-        for block in blocks {
-            self.render_block_with_state(writer, block, depth, state)?;
-        }
-        Ok(())
-    }
-
     fn render_block_with_state<W>(
         &self,
         writer: &mut W,
@@ -127,7 +122,7 @@ impl Renderer {
             Block::Heading(heading) => self.render_inlines(
                 writer,
                 &heading.children,
-                heading_style(heading.level, self.palette),
+                heading_style(heading.level, self.options.palette),
                 None,
             ),
             Block::BlockQuote(blockquote) => self.render_blockquote(writer, blockquote, depth),
@@ -136,7 +131,10 @@ impl Renderer {
             Block::HtmlBlock(text) => writer.write_all(text.as_bytes()),
             Block::Table(table) => self.render_table(writer, table),
             Block::ThematicBreak => {
-                self.write_style_start(writer, TextStyle::default().fg(self.palette.muted))?;
+                self.write_style_start(
+                    writer,
+                    TextStyle::default().fg(self.options.palette.muted),
+                )?;
                 write_repeated_str(writer, "─", THEMATIC_BREAK_WIDTH)?;
                 self.write_style_end(writer)
             }
@@ -153,7 +151,7 @@ impl Renderer {
         self.render_inlines(
             writer,
             inlines,
-            TextStyle::default().fg(self.palette.body),
+            TextStyle::default().fg(self.options.palette.body),
             break_prefix,
         )
     }
@@ -165,21 +163,31 @@ impl Renderer {
         depth: usize,
     ) -> io::Result<()> {
         let options = self.options;
-        let palette = self.palette;
-        let mut prefixed = LinePrefixWriter::new(writer, move |writer| {
+        let palette = self.options.palette;
+        let mut prefixed = LinePrefixWriter::new(&mut *writer, move |writer| {
             write_styled_text(writer, options, TextStyle::default().fg(palette.muted).dim(), "│ ")
         });
         let mut state = RenderState::default();
         if let Some(kind) = blockquote.kind {
             self.write_styled_text(
                 &mut prefixed,
-                TextStyle::default().fg(self.palette.list_marker).bold(),
+                TextStyle::default().fg(self.options.palette.list_marker).bold(),
                 blockquote_kind_label(kind),
             )?;
             state.has_rendered = true;
         }
-        self.render_blocks(&mut prefixed, &blockquote.blocks, depth, &mut state)?;
-        prefixed.finish()
+        for block in &blockquote.blocks {
+            self.render_block_with_state(&mut prefixed, block, depth, &mut state)?;
+        }
+        if prefixed.wrote_anything() {
+            return Ok(());
+        }
+        // An empty quote still shows its bar, without the prefix's trailing space.
+        self.write_styled_text(
+            writer,
+            TextStyle::default().fg(self.options.palette.muted).dim(),
+            "│",
+        )
     }
 
     fn render_list(
@@ -208,7 +216,10 @@ impl Renderer {
         indent: usize,
     ) -> io::Result<()> {
         write_spaces(writer, indent)?;
-        self.write_style_start(writer, TextStyle::default().fg(self.palette.list_marker).bold())?;
+        self.write_style_start(
+            writer,
+            TextStyle::default().fg(self.options.palette.list_marker).bold(),
+        )?;
         write_list_marker(writer, marker)?;
         self.write_style_end(writer)?;
         writer.write_all(b" ")?;
@@ -224,11 +235,10 @@ impl Renderer {
                 writer.write_all(b"\n")?;
             }
             match block {
-                Block::Paragraph(inlines) if index == 0 => {
-                    self.render_paragraph(writer, inlines, Some(content_width))?;
-                }
                 Block::Paragraph(inlines) => {
-                    write_spaces(writer, content_width)?;
+                    if index > 0 {
+                        write_spaces(writer, content_width)?;
+                    }
                     self.render_paragraph(writer, inlines, Some(content_width))?;
                 }
                 Block::List(list) => self.render_list(writer, list, depth + 1, content_width)?,
@@ -254,8 +264,7 @@ impl Renderer {
     ) -> io::Result<()> {
         let mut prefixed =
             LinePrefixWriter::new(writer, move |writer| write_spaces(writer, indent));
-        self.render_block_at_depth(&mut prefixed, depth, block)?;
-        prefixed.finish()
+        self.render_block_at_depth(&mut prefixed, depth, block)
     }
 
     fn render_code_block(
@@ -263,8 +272,8 @@ impl Renderer {
         writer: &mut dyn Write,
         code_block: &CodeBlock<'_>,
     ) -> io::Result<()> {
-        let fence_style = TextStyle::default().fg(self.palette.code_fence).dim();
-        let code_style = TextStyle::default().fg(self.palette.inline_code);
+        let fence_style = TextStyle::default().fg(self.options.palette.code_fence).dim();
+        let code_style = TextStyle::default().fg(self.options.palette.inline_code);
         self.write_style_start(writer, fence_style)?;
         writer.write_all(b"```")?;
         if let Some(info) = &code_block.info {
@@ -287,7 +296,7 @@ impl Renderer {
         code_block: &CodeBlock<'_>,
         fallback_style: TextStyle,
     ) -> io::Result<()> {
-        if self.options.ansi {
+        if self.options.color == ColorMode::Ansi {
             let info = code_block.info.as_ref().map(|info| info.as_str());
             if let Some(ranges) = crate::syntax::highlighted_ranges(info, &code_block.text) {
                 for range in ranges {
@@ -390,7 +399,7 @@ impl Renderer {
                     )?;
                 }
                 Inline::Code(text) => {
-                    let style = TextStyle::default().fg(self.palette.inline_code);
+                    let style = TextStyle::default().fg(self.options.palette.inline_code);
                     self.write_style_start(writer, style)?;
                     writer.write_all(b"`")?;
                     writer.write_all(text.as_bytes())?;
@@ -398,7 +407,7 @@ impl Renderer {
                     self.restore_style(writer, current_style)?;
                 }
                 Inline::Link { destination, title, kind, children } => {
-                    let child_style = current_style.fg(self.palette.link).underline();
+                    let child_style = current_style.fg(self.options.palette.link).underline();
                     self.render_wrapped_inlines(
                         writer,
                         children,
@@ -407,17 +416,22 @@ impl Renderer {
                         break_prefix,
                     )?;
                     if *kind == LinkKind::Regular {
-                        self.write_url_display(writer, destination, title, current_style)?;
+                        self.write_url_display(
+                            writer,
+                            destination,
+                            title.as_deref(),
+                            current_style,
+                        )?;
                     }
                 }
                 Inline::Image { destination, title, alt } => {
-                    let image_style = TextStyle::default().fg(self.palette.muted).italic();
+                    let image_style = TextStyle::default().fg(self.options.palette.muted).italic();
                     self.write_style_start(writer, image_style)?;
                     writer.write_all(IMAGE_OPEN.as_bytes())?;
                     self.render_inlines_inner(writer, alt, image_style, break_prefix)?;
                     writer.write_all(LINK_TEXT_CLOSE.as_bytes())?;
                     self.restore_style(writer, current_style)?;
-                    self.write_url_display(writer, destination, title, current_style)?;
+                    self.write_url_display(writer, destination, title.as_deref(), current_style)?;
                 }
                 Inline::HardBreak | Inline::SoftBreak => {
                     writer.write_all(b"\n")?;
@@ -449,7 +463,7 @@ impl Renderer {
         widths: &[usize],
         kind: BorderKind,
     ) -> io::Result<()> {
-        self.write_style_start(writer, TextStyle::default().fg(self.palette.muted))?;
+        self.write_style_start(writer, TextStyle::default().fg(self.options.palette.muted))?;
         write_border_line(writer, widths, kind)?;
         self.write_style_end(writer)
     }
@@ -462,7 +476,7 @@ impl Renderer {
         widths: &[usize],
         alignments: &[mp_ast::Alignment],
     ) -> io::Result<()> {
-        let body_style = TextStyle::default().fg(self.palette.body);
+        let body_style = TextStyle::default().fg(self.options.palette.body);
         self.write_style_start(writer, body_style)?;
         write_table_row(writer, row, row_layout, widths, alignments, &|writer, cell| {
             self.render_inlines_inner(writer, cell, body_style, None)
@@ -474,16 +488,16 @@ impl Renderer {
         &self,
         writer: &mut dyn Write,
         destination: &str,
-        title: &str,
+        title: Option<&str>,
         restore_style: TextStyle,
     ) -> io::Result<()> {
-        let muted_dim = TextStyle::default().fg(self.palette.muted).dim();
+        let muted_dim = TextStyle::default().fg(self.options.palette.muted).dim();
         self.write_style_start(writer, muted_dim)?;
         writer.write_all(URL_OPEN.as_bytes())?;
         writer.write_all(destination.as_bytes())?;
         writer.write_all(URL_CLOSE.as_bytes())?;
-        if !title.is_empty() {
-            let title_style = TextStyle::default().fg(self.palette.muted).dim().italic();
+        if let Some(title) = title {
+            let title_style = TextStyle::default().fg(self.options.palette.muted).dim().italic();
             self.write_style_start(writer, title_style)?;
             writer.write_all(TITLE_SEPARATOR.as_bytes())?;
             writer.write_all(title.as_bytes())?;
@@ -495,8 +509,12 @@ impl Renderer {
     fn write_task_marker(&self, writer: &mut dyn Write, task: Option<TaskState>) -> io::Result<()> {
         if let Some(marker) = task_marker(task) {
             let style = match task {
-                Some(TaskState::Checked) => TextStyle::default().fg(self.palette.list_marker),
-                Some(TaskState::Unchecked) => TextStyle::default().fg(self.palette.muted).dim(),
+                Some(TaskState::Checked) => {
+                    TextStyle::default().fg(self.options.palette.list_marker)
+                }
+                Some(TaskState::Unchecked) => {
+                    TextStyle::default().fg(self.options.palette.muted).dim()
+                }
                 None => TextStyle::default(),
             };
             self.write_styled_text(writer, style, marker)?;
@@ -612,7 +630,7 @@ fn write_style_start<W>(writer: &mut W, options: RenderOptions, style: TextStyle
 where
     W: Write + ?Sized,
 {
-    if options.ansi {
+    if options.color == ColorMode::Ansi {
         // Worst case is all five attributes plus a truecolor foreground:
         // "\x1b[" (2) + "1;2;3;4;9" (9) + ";38;2;255;255;255" (17) + "m" (1) = 29 bytes.
         // 48 leaves comfortable headroom while staying allocation-free on the stack.
@@ -644,7 +662,7 @@ fn write_style_end<W>(writer: &mut W, options: RenderOptions) -> io::Result<()>
 where
     W: Write + ?Sized,
 {
-    if options.ansi {
+    if options.color == ColorMode::Ansi {
         writer.write_all(b"\x1b[0m")?;
     }
     Ok(())
@@ -697,17 +715,18 @@ mod tests {
     use std::io::{self, Write};
 
     use mp_ast::{
-        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, Inline, LinkKind, List,
-        ListItem, ListKind, Table, TaskState, Text,
+        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, HeadingLevel, Inline,
+        LinkKind, List, ListItem, ListKind, Table, TaskState, Text,
     };
 
     use super::*;
+    use crate::theme::solarized;
 
     #[test]
     fn renders_reference_style_block_spacing_and_markers() -> io::Result<()> {
         let blocks = vec![
             Block::Heading(Heading {
-                level: 1,
+                level: HeadingLevel::H1,
                 children: vec![Inline::Text(Text::borrowed("Title"))],
             }),
             Block::BlankLine,
@@ -773,14 +792,14 @@ mod tests {
         let blocks = vec![Block::Paragraph(vec![
             Inline::Link {
                 destination: Text::borrowed("https://example.com"),
-                title: Text::borrowed("Example"),
+                title: Some(Text::borrowed("Example")),
                 kind: LinkKind::Regular,
                 children: vec![Inline::Text(Text::borrowed("link"))],
             },
             Inline::Text(Text::borrowed(" ")),
             Inline::Image {
                 destination: Text::borrowed("image.png"),
-                title: Text::borrowed("Logo"),
+                title: Some(Text::borrowed("Logo")),
                 alt: vec![Inline::Text(Text::borrowed("alt"))],
             },
         ])];
@@ -895,7 +914,7 @@ mod tests {
             alignments: vec![Alignment::Left],
             rows: vec![vec![vec![Inline::Link {
                 destination: Text::borrowed("example.com"),
-                title: Text::borrowed(""),
+                title: None,
                 kind: LinkKind::Regular,
                 children: vec![Inline::Text(Text::borrowed("site"))],
             }]]],
@@ -929,7 +948,7 @@ mod tests {
                 vec![
                     vec![Inline::Link {
                         destination: Text::borrowed("example.com"),
-                        title: Text::borrowed(""),
+                        title: None,
                         kind: LinkKind::Regular,
                         children: vec![Inline::Text(Text::borrowed("site"))],
                     }],
@@ -949,7 +968,7 @@ mod tests {
             alignments: vec![Alignment::Left],
             rows: vec![vec![vec![Inline::Link {
                 destination: Text::borrowed("https://example.com"),
-                title: Text::borrowed("Example"),
+                title: Some(Text::borrowed("Example")),
                 kind: LinkKind::Regular,
                 children: vec![Inline::Text(Text::borrowed("link"))],
             }]]],
@@ -966,7 +985,7 @@ mod tests {
             alignments: vec![Alignment::Left],
             rows: vec![vec![vec![Inline::Image {
                 destination: Text::borrowed("image.png"),
-                title: Text::borrowed("Logo"),
+                title: Some(Text::borrowed("Logo")),
                 alt: vec![Inline::Text(Text::borrowed("alt"))],
             }]]],
         })];
@@ -1121,7 +1140,7 @@ mod tests {
     #[test]
     fn emits_ansi_styling_when_enabled() -> io::Result<()> {
         let blocks = vec![Block::Heading(Heading {
-            level: 1,
+            level: HeadingLevel::H1,
             children: vec![Inline::Text(Text::borrowed("Title"))],
         })];
 
@@ -1166,7 +1185,7 @@ mod tests {
         let blocks = vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("stream"))])];
         let mut writer = CountingWriter::default();
 
-        let renderer = Renderer::new(RenderOptions { ansi: false });
+        let renderer = Renderer::new(RenderOptions::default());
         let mut state = RenderState::default();
         for block in &blocks {
             renderer.render_block(&mut writer, block, &mut state)?;
@@ -1182,7 +1201,7 @@ mod tests {
     #[test]
     fn finish_appends_a_newline_when_nonempty_output_lacks_one() -> io::Result<()> {
         let blocks = vec![Block::Heading(Heading {
-            level: 1,
+            level: HeadingLevel::H1,
             children: vec![Inline::Text(Text::borrowed("Title"))],
         })];
 
@@ -1231,12 +1250,77 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn renders_an_empty_blockquote_as_a_single_bar_line() -> io::Result<()> {
+        let blocks = vec![Block::BlockQuote(BlockQuote { kind: None, blocks: vec![] })];
+
+        assert_eq!(render_plain(&blocks)?, "│\n", "bare bar without a trailing space");
+        Ok(())
+    }
+
+    #[test]
+    fn blockquote_ending_with_a_newline_emits_no_dangling_prefix() -> io::Result<()> {
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: None,
+            blocks: vec![Block::HtmlBlock(Text::borrowed("<div>\n"))],
+        })];
+
+        assert_eq!(render_plain(&blocks)?, "│ <div>\n");
+        Ok(())
+    }
+
+    #[test]
+    fn indented_child_block_emits_no_trailing_whitespace() -> io::Result<()> {
+        let blocks = vec![Block::List(List {
+            kind: ListKind::Unordered,
+            items: vec![ListItem {
+                task: None,
+                blocks: vec![
+                    Block::Paragraph(vec![Inline::Text(Text::borrowed("item"))]),
+                    Block::CodeBlock(CodeBlock { info: None, text: Text::borrowed("code\n") }),
+                ],
+            }],
+        })];
+
+        let output = render_plain(&blocks)?;
+
+        assert!(
+            output.lines().all(|line| line == line.trim_end()),
+            "no line may carry trailing whitespace: {output:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn default_render_options_use_the_solarized_dark_palette() {
+        assert_eq!(RenderOptions::default().palette, solarized::DARK_PALETTE);
+        assert_eq!(Palette::default(), solarized::DARK_PALETTE);
+    }
+
+    #[test]
+    fn renderer_uses_the_palette_from_render_options() -> io::Result<()> {
+        let sentinel = crate::theme::Rgb { r: 1, g: 2, b: 3 };
+        let palette = Palette { heading_colors: [sentinel; 6], ..Palette::default() };
+        let blocks = vec![Block::Heading(Heading {
+            level: HeadingLevel::H1,
+            children: vec![Inline::Text(Text::borrowed("Title"))],
+        })];
+
+        let output = render_to_string(&blocks, RenderOptions { color: ColorMode::Ansi, palette })?;
+
+        assert!(
+            output.contains("38;2;1;2;3"),
+            "the custom heading color must reach the SGR output: {output:?}"
+        );
+        Ok(())
+    }
+
     fn render_plain(blocks: &[Block<'_>]) -> io::Result<String> {
-        render_to_string(blocks, RenderOptions { ansi: false })
+        render_to_string(blocks, RenderOptions::default())
     }
 
     fn render_ansi(blocks: &[Block<'_>]) -> io::Result<String> {
-        render_to_string(blocks, RenderOptions { ansi: true })
+        render_to_string(blocks, RenderOptions { color: ColorMode::Ansi, ..Default::default() })
     }
 
     fn render_to_string(blocks: &[Block<'_>], options: RenderOptions) -> io::Result<String> {
