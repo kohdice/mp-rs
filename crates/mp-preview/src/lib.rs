@@ -1,20 +1,18 @@
 //! The preview use case: composes parsing and rendering.
 //!
-//! This is the only crate the `mp` binary depends on directly; [`preview`] renders
-//! Markdown text and [`preview_file`] adds the file-system read in front of it.
+//! This is the only crate the `mp` binary depends on directly. [`preview`] renders
+//! Markdown text to a writer; callers own the file-system read so they can attach their
+//! own path-bearing error context.
 
 use std::fmt;
 use std::io::{self, Write};
-use std::path::Path;
 
 pub use mp_parser::ParseError;
-pub use mp_renderer::{ColorMode, Palette, RenderOptions, Rgb};
+pub use mp_renderer::{CodeTheme, ColorMode, HEADING_LEVEL_COUNT, Palette, RenderOptions, Rgb};
 
 /// Failure modes of the preview use case.
 #[derive(Debug)]
 pub enum PreviewError {
-    /// The document could not be read from the file system.
-    Read(io::Error),
     /// The Markdown event stream was structurally inconsistent.
     Parse(mp_parser::ParseError),
     /// The writer reported an I/O error while rendering.
@@ -24,7 +22,6 @@ pub enum PreviewError {
 impl fmt::Display for PreviewError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Read(_) => formatter.write_str("unable to read the Markdown document"),
             Self::Parse(_) => formatter.write_str("unable to parse the Markdown document"),
             Self::Write(_) => formatter.write_str("unable to write the rendered preview"),
         }
@@ -34,7 +31,7 @@ impl fmt::Display for PreviewError {
 impl std::error::Error for PreviewError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Read(source) | Self::Write(source) => Some(source),
+            Self::Write(source) => Some(source),
             Self::Parse(source) => Some(source),
         }
     }
@@ -94,27 +91,18 @@ where
     renderer.finish(writer, &state).map_err(PreviewError::Write)
 }
 
-/// Reads a Markdown file and renders it as a terminal preview.
-///
-/// # Errors
-///
-/// Returns [`PreviewError::Read`] if the file cannot be read, in addition to the failure
-/// modes of [`preview`].
-pub fn preview_file<W>(
-    path: &Path,
-    options: RenderOptions,
-    writer: &mut W,
-) -> Result<(), PreviewError>
-where
-    W: Write,
-{
-    let markdown = std::fs::read_to_string(path).map_err(PreviewError::Read)?;
-    preview(&markdown, options, writer)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reexports_let_callers_build_a_palette_without_reaching_into_mp_renderer() {
+        let color = Rgb { r: 1, g: 2, b: 3 };
+        let palette =
+            Palette { heading_colors: [color; HEADING_LEVEL_COUNT], ..Palette::default() };
+
+        assert!(palette.heading_colors.iter().all(|&value| value == color));
+    }
 
     #[test]
     fn preview_renders_markdown_text_to_the_writer() -> Result<(), PreviewError> {
@@ -137,32 +125,6 @@ mod tests {
     }
 
     #[test]
-    fn preview_file_renders_a_markdown_file() -> Result<(), PreviewError> {
-        let path = unique_temp_path();
-        std::fs::write(&path, "Hello\n").map_err(PreviewError::Read)?;
-
-        let mut output = Vec::new();
-        let result = preview_file(&path, RenderOptions::default(), &mut output);
-        let _ = std::fs::remove_file(&path);
-        result?;
-
-        let rendered = String::from_utf8(output).map_err(|error| {
-            PreviewError::Write(io::Error::new(io::ErrorKind::InvalidData, error))
-        })?;
-        assert_eq!(rendered, "Hello\n");
-        Ok(())
-    }
-
-    #[test]
-    fn preview_file_reports_missing_files_as_read_errors() {
-        let missing = unique_temp_path();
-        let mut output = Vec::new();
-        let result = preview_file(&missing, RenderOptions::default(), &mut output);
-
-        assert!(matches!(result, Err(PreviewError::Read(_))));
-    }
-
-    #[test]
     fn preview_error_exposes_the_underlying_cause_via_source() {
         use std::error::Error;
 
@@ -178,11 +140,11 @@ mod tests {
     -> Result<(), PreviewError> {
         let renderer = mp_renderer::Renderer::new(RenderOptions::default());
         let blocks =
-            vec![Ok(paragraph("hello")), Err(PreviewError::Read(io::Error::other("boom")))];
+            vec![Ok(paragraph("hello")), Err(PreviewError::Write(io::Error::other("boom")))];
         let mut output = Vec::new();
         let result = render_stream(&renderer, blocks.into_iter(), &mut output);
 
-        assert!(matches!(result, Err(PreviewError::Read(_))));
+        assert!(matches!(result, Err(PreviewError::Write(_))));
         assert_eq!(utf8(output)?, "hello\n");
         Ok(())
     }
@@ -191,11 +153,11 @@ mod tests {
     fn stream_errors_before_any_output_write_nothing() -> Result<(), PreviewError> {
         let renderer = mp_renderer::Renderer::new(RenderOptions::default());
         let blocks: Vec<Result<mp_ast::Block<'_>, PreviewError>> =
-            vec![Err(PreviewError::Read(io::Error::other("boom")))];
+            vec![Err(PreviewError::Write(io::Error::other("boom")))];
         let mut output = Vec::new();
         let result = render_stream(&renderer, blocks.into_iter(), &mut output);
 
-        assert!(matches!(result, Err(PreviewError::Read(_))));
+        assert!(matches!(result, Err(PreviewError::Write(_))));
         assert_eq!(utf8(output)?, "");
         Ok(())
     }
@@ -204,11 +166,11 @@ mod tests {
     fn stream_errors_outrank_finish_write_failures() {
         let renderer = mp_renderer::Renderer::new(RenderOptions::default());
         let blocks =
-            vec![Ok(paragraph("hello")), Err(PreviewError::Read(io::Error::other("boom")))];
+            vec![Ok(paragraph("hello")), Err(PreviewError::Write(io::Error::other("boom")))];
         let mut writer = LimitedWriter { remaining_writes: 1, bytes: Vec::new() };
         let result = render_stream(&renderer, blocks.into_iter(), &mut writer);
 
-        assert!(matches!(result, Err(PreviewError::Read(_))));
+        assert!(matches!(result, Err(PreviewError::Write(_))));
     }
 
     fn paragraph(text: &'static str) -> mp_ast::Block<'static> {
@@ -250,11 +212,5 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             self.bytes.flush()
         }
-    }
-
-    fn unique_temp_path() -> std::path::PathBuf {
-        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!("mp-preview-test-{}-{id}.md", std::process::id()))
     }
 }
