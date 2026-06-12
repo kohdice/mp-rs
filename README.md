@@ -12,6 +12,12 @@ cargo run -p mp -- <file.md>
 terminal, plain text otherwise), and writes the result to stdout. Non-empty output always
 ends with exactly one trailing newline.
 
+When stdout is a terminal, the output adapts to its width: paragraphs, headings, list
+items, and blockquotes reflow at word boundaries, and tables shrink their columns
+(wrapping cell content onto multiple lines) instead of overflowing. Code blocks are
+never wrapped. When stdout is piped or redirected, no width limit applies and the
+content keeps its natural width.
+
 ## Workspace layout
 
 The project is a Cargo workspace whose responsibilities are split across crates so that
