@@ -11,6 +11,7 @@ mod syntax;
 mod table;
 mod theme;
 mod tokens;
+mod utf8;
 mod wrap;
 mod writer;
 

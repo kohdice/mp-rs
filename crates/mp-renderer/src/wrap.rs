@@ -4,6 +4,8 @@ use std::io::{self, Write};
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::utf8::utf8_complete_prefix;
+
 /// A [`Write`] adapter that wraps UTF-8 text written through it at a maximum
 /// display width, breaking lines at word boundaries.
 ///
@@ -99,26 +101,14 @@ const ESCAPE: u8 = 0x1b;
 
 /// Returns the byte length and display width of the next segment of `bytes`:
 /// an ANSI escape sequence (zero width), a single character, or the whole
-/// remainder when it is not valid UTF-8 (counted as zero width).
+/// remainder when no character can be decoded (counted as zero width).
 fn next_segment(bytes: &[u8]) -> (usize, usize) {
     if bytes.first() == Some(&ESCAPE) {
         return (escape_sequence_len(bytes), 0);
     }
-    match std::str::from_utf8(bytes) {
-        Ok(text) => match text.chars().next() {
-            Some(c) => (c.len_utf8(), c.width().unwrap_or(0)),
-            None => (bytes.len().max(1), 0),
-        },
-        Err(error) if error.valid_up_to() > 0 => {
-            let c = std::str::from_utf8(&bytes[..error.valid_up_to()])
-                .ok()
-                .and_then(|text| text.chars().next());
-            match c {
-                Some(c) => (c.len_utf8(), c.width().unwrap_or(0)),
-                None => (bytes.len(), 0),
-            }
-        }
-        Err(_) => (bytes.len(), 0),
+    match utf8_complete_prefix(bytes).chars().next() {
+        Some(c) => (c.len_utf8(), c.width().unwrap_or(0)),
+        None => (bytes.len().max(1), 0),
     }
 }
 

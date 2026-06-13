@@ -2,6 +2,8 @@ use std::io::{self, Write};
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::utf8::utf8_complete_prefix;
+
 /// A [`Write`] sink that discards its bytes and accumulates the unicode display width of
 /// the UTF-8 text written through it. Measuring a cell by rendering it through this
 /// adapter keeps width measurement and emission on one code path, so they cannot drift.
@@ -42,15 +44,8 @@ impl Write for WidthMeasuringWriter {
 /// Returns the length of the longest UTF-8-complete prefix of `bytes` and its unicode
 /// display width; any trailing incomplete scalar sequence is excluded from both.
 fn utf8_prefix_width(bytes: &[u8]) -> (usize, usize) {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => (bytes.len(), text.width()),
-        Err(error) => {
-            let valid_up_to = error.valid_up_to();
-            let width =
-                std::str::from_utf8(&bytes[..valid_up_to]).map_or(0, UnicodeWidthStr::width);
-            (valid_up_to, width)
-        }
-    }
+    let text = utf8_complete_prefix(bytes);
+    (text.len(), text.width())
 }
 
 pub(crate) struct LinePrefixWriter<'a, W, P>
