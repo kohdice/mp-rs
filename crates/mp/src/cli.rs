@@ -49,11 +49,7 @@ where
 
 /// Command-line arguments of the `mp` binary.
 #[derive(Debug, ClapParser)]
-#[command(
-    name = "mp",
-    version = env!("CARGO_PKG_VERSION"),
-    about = "Preview Markdown in the terminal"
-)]
+#[command(name = "mp", version, about = "Preview Markdown in the terminal")]
 pub struct Cli {
     /// When to colorize output: auto (a terminal, unless NO_COLOR), always, or never.
     #[arg(long, value_enum, default_value_t = ColorPolicy::Auto)]
@@ -86,6 +82,16 @@ impl fmt::Display for CliError {
                 write!(formatter, "unable to parse '{}': {source}", path.display())
             }
             Self::WriteStdout(source) => write!(formatter, "unable to write stdout: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            Self::Parse { source, .. } => Some(source),
+            Self::WriteStdout(source) => Some(source),
         }
     }
 }
