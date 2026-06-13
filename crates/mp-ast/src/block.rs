@@ -50,6 +50,10 @@ pub enum HeadingLevel {
 }
 
 impl HeadingLevel {
+    /// The number of heading levels (CommonMark's six). Kept here next to the
+    /// enum so any code sizing per-level data cannot drift from the variants.
+    pub const COUNT: usize = 6;
+
     /// Returns the numeric depth, from 1 for [`HeadingLevel::H1`] to 6 for
     /// [`HeadingLevel::H6`].
     #[must_use]

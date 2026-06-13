@@ -1,5 +1,8 @@
-/// Number of heading levels a [`Palette`] assigns colors to.
-pub const HEADING_LEVEL_COUNT: usize = 6;
+use mp_ast::HeadingLevel;
+
+/// Number of heading levels a [`Palette`] assigns colors to, tied to
+/// [`HeadingLevel`] so the palette and the enum cannot drift apart.
+pub const HEADING_LEVEL_COUNT: usize = HeadingLevel::COUNT;
 
 /// A 24-bit RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
