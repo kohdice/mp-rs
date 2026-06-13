@@ -1,3 +1,9 @@
+//! Markdown-to-block parsing.
+//!
+//! Wraps pulldown-cmark's event stream and assembles it into [`mp_ast`] blocks, exposed
+//! as the streaming [`blocks`] iterator so callers can render without buffering the
+//! whole document.
+
 mod builder;
 mod error;
 mod source;
@@ -5,25 +11,20 @@ mod source;
 use std::collections::VecDeque;
 
 use builder::AstBuilder;
-use mp_ast::{Block, Document};
+use mp_ast::Block;
 use pulldown_cmark::{DefaultBrokenLinkCallback, OffsetIter, Options, Parser};
 
 pub use error::ParseError;
 
-/// Parses a complete Markdown document into an AST.
+/// Creates an iterator over top-level Markdown blocks.
+///
+/// This is the primary entry point: it streams the document one top-level [`Block`] at a
+/// time without buffering the whole AST.
 ///
 /// # Errors
 ///
-/// Returns an error if the underlying Markdown event stream is structurally inconsistent.
-pub fn parse(input: &str) -> Result<Document<'_>, ParseError> {
-    let mut builder = AstBuilder::new(input);
-    for (event, range) in Parser::new_ext(input, parser_options()).into_offset_iter() {
-        builder.push_event(event, range)?;
-    }
-    builder.finish()
-}
-
-/// Creates an iterator over top-level Markdown blocks.
+/// Each yielded item is an error if the underlying Markdown event stream is structurally
+/// inconsistent.
 #[must_use]
 pub fn blocks(input: &str) -> Blocks<'_> {
     Blocks {
@@ -34,6 +35,7 @@ pub fn blocks(input: &str) -> Blocks<'_> {
     }
 }
 
+/// Streaming iterator over top-level Markdown blocks, created by [`blocks`].
 pub struct Blocks<'a> {
     parser: OffsetIter<'a, DefaultBrokenLinkCallback>,
     builder: Option<AstBuilder<'a>>,
@@ -80,8 +82,8 @@ impl<'a> Iterator for Blocks<'a> {
             self.finished = true;
             let builder = self.builder.take()?;
             return match builder.finish() {
-                Ok(document) => {
-                    self.pending.extend(document.blocks);
+                Ok(blocks) => {
+                    self.pending.extend(blocks);
                     self.pending.pop_front().map(Ok)
                 }
                 Err(error) => Some(Err(error)),
@@ -102,29 +104,29 @@ fn parser_options() -> Options {
 #[cfg(test)]
 mod tests {
     use mp_ast::{
-        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, Inline, LinkKind,
-        ListKind, TaskState, Text,
+        Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, HeadingLevel, Inline,
+        LinkKind, ListKind, TaskState, Text,
     };
 
     use super::*;
 
     #[test]
     fn converts_empty_markdown_input_into_an_empty_document() -> Result<(), ParseError> {
-        let document = parse("")?;
+        let blocks = blocks("").collect::<Result<Vec<_>, _>>()?;
 
-        assert!(document.blocks.is_empty());
+        assert!(blocks.is_empty());
         Ok(())
     }
 
     #[test]
     fn converts_a_paragraph_and_atx_heading_into_ast_blocks() -> Result<(), ParseError> {
-        let document = parse("# Title\n\nHello, world!")?;
+        let blocks = blocks("# Title\n\nHello, world!").collect::<Result<Vec<_>, _>>()?;
 
         assert_eq!(
-            document.blocks,
+            blocks,
             vec![
                 Block::Heading(Heading {
-                    level: 1,
+                    level: HeadingLevel::H1,
                     children: vec![Inline::Text(Text::borrowed("Title"))],
                 }),
                 Block::BlankLine,
@@ -136,10 +138,11 @@ mod tests {
 
     #[test]
     fn preserves_fenced_code_block_info_and_body_content() -> Result<(), ParseError> {
-        let document = parse("```mermaid\ngraph TD;\nA-->B;\n```\n")?;
+        let blocks =
+            blocks("```mermaid\ngraph TD;\nA-->B;\n```\n").collect::<Result<Vec<_>, _>>()?;
 
         assert_eq!(
-            document.blocks,
+            blocks,
             vec![Block::CodeBlock(CodeBlock {
                 info: Some(Text::borrowed("mermaid")),
                 text: Text::borrowed("graph TD;\nA-->B;\n"),
@@ -150,10 +153,11 @@ mod tests {
 
     #[test]
     fn converts_unordered_ordered_and_task_lists_into_list_ast_nodes() -> Result<(), ParseError> {
-        let document = parse("- plain\n- [x] done\n- [ ] todo\n\n3. ordered\n")?;
+        let blocks = blocks("- plain\n- [x] done\n- [ ] todo\n\n3. ordered\n")
+            .collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(document.blocks.len(), 3);
-        let Block::List(unordered) = &document.blocks[0] else {
+        assert_eq!(blocks.len(), 3);
+        let Block::List(unordered) = &blocks[0] else {
             panic!("expected unordered list");
         };
         assert_eq!(unordered.kind, ListKind::Unordered);
@@ -162,9 +166,9 @@ mod tests {
         assert_eq!(unordered.items[1].task, Some(TaskState::Checked));
         assert_eq!(unordered.items[2].task, Some(TaskState::Unchecked));
 
-        assert_eq!(document.blocks[1], Block::BlankLine);
+        assert_eq!(blocks[1], Block::BlankLine);
 
-        let Block::List(ordered) = &document.blocks[2] else {
+        let Block::List(ordered) = &blocks[2] else {
             panic!("expected ordered list");
         };
         assert_eq!(ordered.kind, ListKind::Ordered { start: 3 });
@@ -173,11 +177,45 @@ mod tests {
     }
 
     #[test]
-    fn converts_blockquotes_into_nested_block_ast_nodes() -> Result<(), ParseError> {
-        let document = parse("> quoted\n>\n> - item\n")?;
+    fn marks_a_list_with_a_blank_line_between_items_as_loose() -> Result<(), ParseError> {
+        let blocks = blocks("- a\n\n- b\n").collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(document.blocks.len(), 1);
-        let Block::BlockQuote(blockquote) = &document.blocks[0] else {
+        let Block::List(list) = &blocks[0] else {
+            panic!("expected list");
+        };
+        assert!(list.loose);
+        Ok(())
+    }
+
+    #[test]
+    fn marks_a_list_without_blank_separation_as_tight() -> Result<(), ParseError> {
+        let blocks = blocks("- a\n- b\n").collect::<Result<Vec<_>, _>>()?;
+
+        let Block::List(list) = &blocks[0] else {
+            panic!("expected list");
+        };
+        assert!(!list.loose);
+        Ok(())
+    }
+
+    #[test]
+    fn marks_a_list_with_a_blank_gap_between_blocks_inside_an_item_as_loose()
+    -> Result<(), ParseError> {
+        let blocks = blocks("- a\n\n  b\n- c\n").collect::<Result<Vec<_>, _>>()?;
+
+        let Block::List(list) = &blocks[0] else {
+            panic!("expected list");
+        };
+        assert!(list.loose);
+        Ok(())
+    }
+
+    #[test]
+    fn converts_blockquotes_into_nested_block_ast_nodes() -> Result<(), ParseError> {
+        let blocks = blocks("> quoted\n>\n> - item\n").collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(blocks.len(), 1);
+        let Block::BlockQuote(blockquote) = &blocks[0] else {
             panic!("expected blockquote");
         };
         assert_eq!(blockquote.kind, None);
@@ -190,12 +228,48 @@ mod tests {
     }
 
     #[test]
+    fn blockquote_blank_line_separation_matches_top_level_separation() -> Result<(), ParseError> {
+        let top_level = blocks("a\n\nb\n").collect::<Result<Vec<_>, _>>()?;
+        let quoted = blocks("> a\n>\n> b\n").collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(
+            top_level,
+            vec![
+                Block::Paragraph(vec![Inline::Text(Text::borrowed("a"))]),
+                Block::BlankLine,
+                Block::Paragraph(vec![Inline::Text(Text::borrowed("b"))]),
+            ],
+        );
+        let Block::BlockQuote(blockquote) = &quoted[0] else {
+            panic!("expected blockquote");
+        };
+        assert_eq!(blockquote.blocks, top_level);
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_blank_line_before_an_indented_paragraph_continuation() -> Result<(), ParseError> {
+        let blocks = blocks("a\n\n  b\n").collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Paragraph(vec![Inline::Text(Text::borrowed("a"))]),
+                Block::BlankLine,
+                Block::Paragraph(vec![Inline::Text(Text::borrowed("b"))]),
+            ],
+        );
+        Ok(())
+    }
+
+    #[test]
     fn converts_tables_into_table_ast_nodes_with_header_rows_and_alignments()
     -> Result<(), ParseError> {
-        let document = parse("| Name | Count |\n| :--- | ---: |\n| mp | 1 |\n")?;
+        let blocks = blocks("| Name | Count |\n| :--- | ---: |\n| mp | 1 |\n")
+            .collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(document.blocks.len(), 1);
-        let Block::Table(table) = &document.blocks[0] else {
+        assert_eq!(blocks.len(), 1);
+        let Block::Table(table) = &blocks[0] else {
             panic!("expected table");
         };
         assert_eq!(table.alignments, vec![Alignment::Left, Alignment::Right]);
@@ -217,14 +291,39 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_ragged_table_rows_to_the_header_width() -> Result<(), ParseError> {
+        let blocks = blocks("| a | b |\n| - | - |\n| 1 |\n| 2 | 3 | 4 |\n")
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(blocks.len(), 1);
+        let Block::Table(table) = &blocks[0] else {
+            panic!("expected table");
+        };
+        assert_eq!(table.header.len(), 2);
+        assert_eq!(
+            table.rows,
+            vec![
+                vec![vec![Inline::Text(Text::borrowed("1"))], vec![]],
+                vec![
+                    vec![Inline::Text(Text::borrowed("2"))],
+                    vec![Inline::Text(Text::borrowed("3"))],
+                ],
+            ],
+            "short rows gain empty cells and long rows drop extra cells (GFM)",
+        );
+        Ok(())
+    }
+
+    #[test]
     fn converts_inline_markdown_into_inline_ast_nodes() -> Result<(), ParseError> {
-        let document = parse(
+        let blocks = blocks(
             "text *em* **strong** ~~strike~~ `code` [link](https://example.com \"Title\") \
              ![alt](image.png \"Image\")  \nhard\nsoft",
-        )?;
+        )
+        .collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(document.blocks.len(), 1);
-        let Block::Paragraph(inlines) = &document.blocks[0] else {
+        assert_eq!(blocks.len(), 1);
+        let Block::Paragraph(inlines) = &blocks[0] else {
             panic!("expected paragraph");
         };
         assert!(inlines.contains(&Inline::Text(Text::borrowed("text "))));
@@ -236,13 +335,13 @@ mod tests {
         assert!(inlines.contains(&Inline::Code(Text::borrowed("code"))));
         assert!(inlines.contains(&Inline::Link {
             destination: Text::borrowed("https://example.com"),
-            title: Text::borrowed("Title"),
+            title: Some(Text::borrowed("Title")),
             kind: LinkKind::Regular,
             children: vec![Inline::Text(Text::borrowed("link"))],
         }));
         assert!(inlines.contains(&Inline::Image {
             destination: Text::borrowed("image.png"),
-            title: Text::borrowed("Image"),
+            title: Some(Text::borrowed("Image")),
             alt: vec![Inline::Text(Text::borrowed("alt"))],
         }));
         assert!(inlines.contains(&Inline::HardBreak));
@@ -259,7 +358,7 @@ mod tests {
             blocks,
             vec![
                 Block::Heading(Heading {
-                    level: 1,
+                    level: HeadingLevel::H1,
                     children: vec![Inline::Text(Text::borrowed("Title"))],
                 }),
                 Block::BlankLine,
@@ -271,10 +370,10 @@ mod tests {
 
     #[test]
     fn parses_unclosed_fenced_code_blocks_as_code_blocks() -> Result<(), ParseError> {
-        let document = parse("```\nabc\n")?;
+        let blocks = blocks("```\nabc\n").collect::<Result<Vec<_>, _>>()?;
 
         assert_eq!(
-            document.blocks,
+            blocks,
             vec![Block::CodeBlock(CodeBlock { info: None, text: Text::borrowed("abc\n") })],
         );
         Ok(())
@@ -282,22 +381,19 @@ mod tests {
 
     #[test]
     fn preserves_html_blocks_as_raw_markdown_content() -> Result<(), ParseError> {
-        let document = parse("<div>\nhello\n</div>\n")?;
+        let blocks = blocks("<div>\nhello\n</div>\n").collect::<Result<Vec<_>, _>>()?;
 
-        assert_eq!(
-            document.blocks,
-            vec![Block::HtmlBlock(Text::borrowed("<div>\nhello\n</div>\n"))]
-        );
+        assert_eq!(blocks, vec![Block::HtmlBlock(Text::borrowed("<div>\nhello\n</div>\n"))]);
         Ok(())
     }
 
     #[test]
     fn preserves_gfm_blockquote_kind_without_dropping_the_marker_semantics()
     -> Result<(), ParseError> {
-        let document = parse("> [!NOTE]\n> Read this\n")?;
+        let blocks = blocks("> [!NOTE]\n> Read this\n").collect::<Result<Vec<_>, _>>()?;
 
         assert_eq!(
-            document.blocks,
+            blocks,
             vec![Block::BlockQuote(BlockQuote {
                 kind: Some(BlockQuoteKind::Note),
                 blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("Read this"))])],

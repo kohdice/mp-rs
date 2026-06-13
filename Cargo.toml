@@ -1,11 +1,6 @@
 [workspace]
 resolver = "3"
-members = [
-    "crates/mp",
-    "crates/mp-ast",
-    "crates/mp-parser",
-    "crates/mp-renderer",
-]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,6 +13,7 @@ repository = "https://github.com/kohdice/mp-rs"
 [workspace.dependencies]
 mp-ast = { path = "crates/mp-ast" }
 mp-parser = { path = "crates/mp-parser" }
+mp-preview = { path = "crates/mp-preview" }
 mp-renderer = { path = "crates/mp-renderer" }
 
 clap = { version = "4.6.1", default-features = false, features = [
@@ -25,15 +21,18 @@ clap = { version = "4.6.1", default-features = false, features = [
     "error-context",
     "help",
     "std",
+    "suggestions",
     "usage",
 ] }
-pulldown-cmark = { version = "0.13.3", default-features = false }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 syntect = { version = "5.3.0", default-features = false, features = [
     "default-fancy",
 ] }
+terminal_size = "0.4.4"
 two-face = { version = "0.5.1", default-features = false, features = [
     "syntect-default-fancy",
 ] }
+unicode-segmentation = "1.13.3"
 unicode-width = { version = "0.2.2", default-features = false }
 
 [profile.release]
@@ -43,6 +42,7 @@ codegen-units = 1
 panic = "abort"
 
 [workspace.lints.rust]
+missing_docs = "warn"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]

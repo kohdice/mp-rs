@@ -11,6 +11,7 @@ repository.workspace = true
 mp-ast.workspace = true
 syntect.workspace = true
 two-face.workspace = true
+unicode-segmentation.workspace = true
 unicode-width.workspace = true
 
 [lints]

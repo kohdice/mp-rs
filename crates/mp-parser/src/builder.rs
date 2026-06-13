@@ -1,12 +1,12 @@
 use std::ops::Range;
 
 use mp_ast::{
-    Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Document, Heading, Inline, LinkKind,
-    List, ListItem, ListKind, Table, TaskState, Text,
+    Alignment, Block, BlockQuote, BlockQuoteKind, CodeBlock, Heading, HeadingLevel, Inline,
+    LinkKind, List, ListItem, ListKind, Table, TaskState, Text,
 };
 use pulldown_cmark::{
     Alignment as MarkdownAlignment, BlockQuoteKind as MarkdownBlockQuoteKind, CodeBlockKind,
-    CowStr, Event, HeadingLevel, LinkType, Tag, TagEnd,
+    CowStr, Event, HeadingLevel as MarkdownHeadingLevel, LinkType, Tag, TagEnd,
 };
 
 use crate::ParseError;
@@ -51,7 +51,7 @@ impl<'a> AstBuilder<'a> {
         }
     }
 
-    pub(crate) fn finish(mut self) -> Result<Document<'a>, ParseError> {
+    pub(crate) fn finish(mut self) -> Result<Vec<Block<'a>>, ParseError> {
         if self.frames.len() != 1 {
             return Err(ParseError::new("markdown parser ended with unclosed nodes"));
         }
@@ -59,7 +59,7 @@ impl<'a> AstBuilder<'a> {
         let Frame::Document { blocks, last_end: _, seen_block: _ } = frame else {
             return Err(ParseError::new("markdown parser ended without a document"));
         };
-        Ok(Document { blocks, has_trailing_newline: self.source.ends_with('\n') })
+        Ok(blocks)
     }
 
     pub(crate) fn drain_document_blocks(
@@ -79,9 +79,10 @@ impl<'a> AstBuilder<'a> {
 
         match tag {
             Tag::Paragraph => self.frames.push(Frame::Paragraph { inlines: Vec::new() }),
-            Tag::Heading { level, .. } => self
-                .frames
-                .push(Frame::Heading { level: heading_level_to_u8(level), inlines: Vec::new() }),
+            Tag::Heading { level, .. } => self.frames.push(Frame::Heading {
+                level: markdown_heading_level_to_ast(level),
+                inlines: Vec::new(),
+            }),
             Tag::BlockQuote(kind) => {
                 self.frames.push(Frame::BlockQuote {
                     kind: kind.map(markdown_blockquote_kind_to_ast),
@@ -100,6 +101,7 @@ impl<'a> AstBuilder<'a> {
                 },
                 items: Vec::new(),
                 last_item_end: None,
+                loose: false,
             }),
             Tag::Item => {
                 self.frames.push(Frame::Item {
@@ -121,18 +123,25 @@ impl<'a> AstBuilder<'a> {
                 self.frames.push(Frame::TableRow { is_header, cells: Vec::new() });
             }
             Tag::TableCell => self.frames.push(Frame::TableCell { inlines: Vec::new() }),
-            Tag::Emphasis => self.frames.push(Frame::Emphasis { inlines: Vec::new() }),
-            Tag::Strong => self.frames.push(Frame::Strong { inlines: Vec::new() }),
-            Tag::Strikethrough => self.frames.push(Frame::Strikethrough { inlines: Vec::new() }),
+            Tag::Emphasis => {
+                self.frames
+                    .push(Frame::InlineSpan { kind: SpanKind::Emphasis, inlines: Vec::new() });
+            }
+            Tag::Strong => {
+                self.frames.push(Frame::InlineSpan { kind: SpanKind::Strong, inlines: Vec::new() });
+            }
+            Tag::Strikethrough => self
+                .frames
+                .push(Frame::InlineSpan { kind: SpanKind::Strikethrough, inlines: Vec::new() }),
             Tag::Link { link_type, dest_url, title, .. } => self.frames.push(Frame::Link {
                 destination: cow_str_to_text(dest_url),
-                title: cow_str_to_text(title),
+                title: non_empty_title(title),
                 kind: link_kind(link_type),
                 inlines: Vec::new(),
             }),
             Tag::Image { dest_url, title, .. } => self.frames.push(Frame::Image {
                 destination: cow_str_to_text(dest_url),
-                title: cow_str_to_text(title),
+                title: non_empty_title(title),
                 inlines: Vec::new(),
             }),
             Tag::FootnoteDefinition(_)
@@ -147,6 +156,14 @@ impl<'a> AstBuilder<'a> {
     }
 
     fn end_tag(&mut self, tag: TagEnd, range: Range<usize>) -> Result<(), ParseError> {
+        // Everything started inside an ignored container pushes an `Ignored`
+        // frame (see `start_tag`), so any end tag while one is on top simply
+        // unwinds it, whatever the specific tag is.
+        if matches!(self.frames.last(), Some(Frame::Ignored)) {
+            self.frames.pop();
+            return Ok(());
+        }
+
         match tag {
             TagEnd::Paragraph => {
                 let Frame::Paragraph { inlines } = self.pop_frame("paragraph")? else {
@@ -181,10 +198,12 @@ impl<'a> AstBuilder<'a> {
                 self.append_block(Block::HtmlBlock(text), range)
             }
             TagEnd::List(_) => {
-                let Frame::List { kind, items, last_item_end: _ } = self.pop_frame("list")? else {
+                let Frame::List { kind, items, last_item_end: _, loose } =
+                    self.pop_frame("list")?
+                else {
                     return Err(ParseError::new("markdown list ended out of order"));
                 };
-                self.append_block(Block::List(List { kind, items }), range)
+                self.append_block(Block::List(List { kind, items, loose }), range)
             }
             TagEnd::Item => {
                 let Frame::Item { task, blocks, last_end: _, range } =
@@ -232,23 +251,11 @@ impl<'a> AstBuilder<'a> {
 
     fn end_inline_tag(&mut self, tag: TagEnd) -> Result<(), ParseError> {
         match tag {
-            TagEnd::Emphasis => {
-                let Frame::Emphasis { inlines } = self.pop_frame("emphasis")? else {
-                    return Err(ParseError::new("markdown emphasis ended out of order"));
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
+                let Frame::InlineSpan { kind, inlines } = self.pop_frame("inline span")? else {
+                    return Err(ParseError::new("markdown inline span ended out of order"));
                 };
-                self.append_inline(Inline::Emphasis(inlines))
-            }
-            TagEnd::Strong => {
-                let Frame::Strong { inlines } = self.pop_frame("strong")? else {
-                    return Err(ParseError::new("markdown strong ended out of order"));
-                };
-                self.append_inline(Inline::Strong(inlines))
-            }
-            TagEnd::Strikethrough => {
-                let Frame::Strikethrough { inlines } = self.pop_frame("strikethrough")? else {
-                    return Err(ParseError::new("markdown strikethrough ended out of order"));
-                };
-                self.append_inline(Inline::Strikethrough(inlines))
+                self.append_inline(kind.into_inline(inlines))
             }
             TagEnd::Link => {
                 let Frame::Link { destination, title, kind, inlines } = self.pop_frame("link")?
@@ -286,9 +293,7 @@ impl<'a> AstBuilder<'a> {
                 Frame::Paragraph { inlines }
                 | Frame::Heading { inlines, .. }
                 | Frame::TableCell { inlines }
-                | Frame::Emphasis { inlines }
-                | Frame::Strong { inlines }
-                | Frame::Strikethrough { inlines }
+                | Frame::InlineSpan { inlines, .. }
                 | Frame::Link { inlines, .. }
                 | Frame::Image { inlines, .. },
             ) => {
@@ -309,39 +314,45 @@ impl<'a> AstBuilder<'a> {
     }
 
     fn append_block(&mut self, block: Block<'a>, range: Range<usize>) -> Result<(), ParseError> {
+        let source = self.source;
         match self.frames.last_mut() {
             Some(Frame::Document { blocks, last_end, seen_block }) => {
-                if *seen_block
-                    && range.start >= *last_end
-                    && gap_has_blank_line(&self.source[*last_end..range.start])
-                {
-                    blocks.push(Block::BlankLine);
-                }
-                blocks.push(block);
+                push_block_with_blank_gap(
+                    source,
+                    blocks,
+                    block,
+                    last_end,
+                    range,
+                    *seen_block,
+                    gap_has_blank_line,
+                );
                 *seen_block = true;
-                *last_end = trim_trailing_blank_gap_end(self.source, &range);
                 Ok(())
             }
             Some(Frame::Item { blocks, last_end, .. }) => {
-                if !blocks.is_empty()
-                    && range.start >= *last_end
-                    && gap_has_blank_line(&self.source[*last_end..range.start])
-                {
-                    blocks.push(Block::BlankLine);
-                }
-                blocks.push(block);
-                *last_end = trim_trailing_blank_gap_end(self.source, &range);
+                let has_prior = !blocks.is_empty();
+                push_block_with_blank_gap(
+                    source,
+                    blocks,
+                    block,
+                    last_end,
+                    range,
+                    has_prior,
+                    gap_has_blank_line,
+                );
                 Ok(())
             }
             Some(Frame::BlockQuote { blocks, last_end, .. }) => {
-                if !blocks.is_empty()
-                    && range.start >= *last_end
-                    && gap_has_blockquote_blank_line(&self.source[*last_end..range.start])
-                {
-                    blocks.push(Block::BlankLine);
-                }
-                blocks.push(block);
-                *last_end = trim_trailing_blank_gap_end(self.source, &range);
+                let has_prior = !blocks.is_empty();
+                push_block_with_blank_gap(
+                    source,
+                    blocks,
+                    block,
+                    last_end,
+                    range,
+                    has_prior,
+                    gap_has_blockquote_blank_line,
+                );
                 Ok(())
             }
             Some(Frame::Ignored) => Ok(()),
@@ -354,10 +365,20 @@ impl<'a> AstBuilder<'a> {
         item: ListItem<'a>,
         range: Range<usize>,
     ) -> Result<(), ParseError> {
+        let source = self.source;
         match self.frames.last_mut() {
-            Some(Frame::List { items, last_item_end, .. }) => {
+            Some(Frame::List { items, last_item_end, loose, .. }) => {
+                if let Some(previous_end) = *last_item_end
+                    && range.start >= previous_end
+                    && gap_has_blank_line(&source[previous_end..range.start])
+                {
+                    *loose = true;
+                }
+                if item.blocks.iter().any(|block| matches!(block, Block::BlankLine)) {
+                    *loose = true;
+                }
                 items.push(item);
-                *last_item_end = Some(trim_trailing_blank_gap_end(self.source, &range));
+                *last_item_end = Some(trim_trailing_blank_gap_end(source, &range));
                 Ok(())
             }
             _ => Err(ParseError::new("markdown list item appeared outside a list")),
@@ -451,7 +472,7 @@ enum Frame<'a> {
         inlines: Vec<Inline<'a>>,
     },
     Heading {
-        level: u8,
+        level: HeadingLevel,
         inlines: Vec<Inline<'a>>,
     },
     BlockQuote {
@@ -463,6 +484,7 @@ enum Frame<'a> {
         kind: ListKind,
         items: Vec<ListItem<'a>>,
         last_item_end: Option<usize>,
+        loose: bool,
     },
     Item {
         task: Option<TaskState>,
@@ -490,35 +512,54 @@ enum Frame<'a> {
     TableCell {
         inlines: Vec<Inline<'a>>,
     },
-    Emphasis {
-        inlines: Vec<Inline<'a>>,
-    },
-    Strong {
-        inlines: Vec<Inline<'a>>,
-    },
-    Strikethrough {
+    InlineSpan {
+        kind: SpanKind,
         inlines: Vec<Inline<'a>>,
     },
     Link {
         destination: Text<'a>,
-        title: Text<'a>,
+        title: Option<Text<'a>>,
         kind: LinkKind,
         inlines: Vec<Inline<'a>>,
     },
     Image {
         destination: Text<'a>,
-        title: Text<'a>,
+        title: Option<Text<'a>>,
         inlines: Vec<Inline<'a>>,
     },
     Ignored,
+}
+
+/// The kind of inline emphasis span an [`Frame::InlineSpan`] is collecting.
+#[derive(Debug, Clone, Copy)]
+enum SpanKind {
+    Emphasis,
+    Strong,
+    Strikethrough,
+}
+
+impl SpanKind {
+    fn into_inline(self, inlines: Vec<Inline<'_>>) -> Inline<'_> {
+        match self {
+            Self::Emphasis => Inline::Emphasis(inlines),
+            Self::Strong => Inline::Strong(inlines),
+            Self::Strikethrough => Inline::Strikethrough(inlines),
+        }
+    }
 }
 
 fn cow_str_to_text(text: CowStr<'_>) -> Text<'_> {
     match text {
         CowStr::Borrowed(text) => Text::borrowed(text),
         CowStr::Boxed(text) => Text::owned(text),
-        CowStr::Inlined(text) => Text::owned(text.to_string()),
+        // `Inlined` is pulldown-cmark's stack-allocated small string; keep it
+        // allocation-free by storing it inline instead of promoting to a `String`.
+        CowStr::Inlined(text) => Text::inline(&text),
     }
+}
+
+fn non_empty_title(title: CowStr<'_>) -> Option<Text<'_>> {
+    if title.is_empty() { None } else { Some(cow_str_to_text(title)) }
 }
 
 fn code_block_info(kind: CodeBlockKind<'_>) -> Option<Text<'_>> {
@@ -529,14 +570,14 @@ fn code_block_info(kind: CodeBlockKind<'_>) -> Option<Text<'_>> {
     }
 }
 
-fn heading_level_to_u8(level: HeadingLevel) -> u8 {
+fn markdown_heading_level_to_ast(level: MarkdownHeadingLevel) -> HeadingLevel {
     match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
+        MarkdownHeadingLevel::H1 => HeadingLevel::H1,
+        MarkdownHeadingLevel::H2 => HeadingLevel::H2,
+        MarkdownHeadingLevel::H3 => HeadingLevel::H3,
+        MarkdownHeadingLevel::H4 => HeadingLevel::H4,
+        MarkdownHeadingLevel::H5 => HeadingLevel::H5,
+        MarkdownHeadingLevel::H6 => HeadingLevel::H6,
     }
 }
 
@@ -586,4 +627,20 @@ fn append_inline_to_blocks<'a>(blocks: &mut Vec<Block<'a>>, inline: Inline<'a>) 
         Some(Block::Paragraph(inlines)) => inlines.push(inline),
         _ => blocks.push(Block::Paragraph(vec![inline])),
     }
+}
+
+fn push_block_with_blank_gap<'a>(
+    source: &str,
+    blocks: &mut Vec<Block<'a>>,
+    block: Block<'a>,
+    last_end: &mut usize,
+    range: Range<usize>,
+    has_prior: bool,
+    gap_has_blank: fn(&str) -> bool,
+) {
+    if has_prior && range.start >= *last_end && gap_has_blank(&source[*last_end..range.start]) {
+        blocks.push(Block::BlankLine);
+    }
+    blocks.push(block);
+    *last_end = trim_trailing_blank_gap_end(source, &range);
 }
