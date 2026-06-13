@@ -7,7 +7,9 @@ use mp_ast::{
 
 use crate::list::{ListMarkerDisplay, list_marker, marker_width, task_marker, write_list_marker};
 use crate::style::{TextStyle, heading_style};
-use crate::table::{BorderKind, table_layout, write_border_line, write_table_row_line};
+use crate::table::{
+    BorderKind, WrappedCell, table_layout, write_border_line, write_table_row_line,
+};
 use crate::theme::Palette;
 use crate::tokens::{IMAGE_OPEN, LINK_TEXT_CLOSE, TITLE_SEPARATOR, URL_CLOSE, URL_OPEN};
 use crate::wrap::WordWrapWriter;
@@ -183,16 +185,24 @@ impl Renderer {
                 writer.write_all(text.as_bytes().strip_suffix(b"\n").unwrap_or(text.as_bytes()))
             }
             Block::Table(table) => self.render_table(writer, table, context.width),
-            Block::ThematicBreak => {
-                self.write_style_start(
-                    writer,
-                    TextStyle::default().fg(self.options.palette.muted),
-                )?;
-                write_repeated_str(writer, "─", THEMATIC_BREAK_WIDTH)?;
-                self.write_style_end(writer)
-            }
+            Block::ThematicBreak => self.render_thematic_break(writer, context.width),
             Block::BlankLine => Ok(()),
         }
+    }
+
+    /// Draws the horizontal rule, capped at the available width so it never
+    /// overflows a narrow (or narrowed) context; an unlimited width uses the
+    /// default rule length.
+    fn render_thematic_break(
+        &self,
+        writer: &mut dyn Write,
+        width: Option<usize>,
+    ) -> io::Result<()> {
+        let rule_width =
+            width.map_or(THEMATIC_BREAK_WIDTH, |width| THEMATIC_BREAK_WIDTH.min(width).max(1));
+        self.write_style_start(writer, TextStyle::default().fg(self.options.palette.muted))?;
+        write_repeated_str(writer, "─", rule_width)?;
+        self.write_style_end(writer)
     }
 
     fn render_paragraph(
@@ -203,12 +213,7 @@ impl Renderer {
         width: Option<usize>,
     ) -> io::Result<()> {
         let style = TextStyle::default().fg(self.options.palette.body);
-        match width {
-            None => self.render_inlines(writer, inlines, style, LineBreak::Newline(break_prefix)),
-            Some(width) => {
-                self.render_reflowed_inlines(writer, inlines, style, break_prefix, width)
-            }
-        }
+        self.render_inline_block(writer, inlines, style, break_prefix, width)
     }
 
     fn render_heading(
@@ -218,10 +223,24 @@ impl Renderer {
         width: Option<usize>,
     ) -> io::Result<()> {
         let style = heading_style(heading.level, self.options.palette);
+        self.render_inline_block(writer, &heading.children, style, None, width)
+    }
+
+    /// Renders a block of inline content in `style`: line-broken at the source
+    /// breaks when there is no width limit, or reflowed to `width` otherwise.
+    /// Continuation lines are indented by `break_prefix` columns.
+    fn render_inline_block(
+        &self,
+        writer: &mut dyn Write,
+        inlines: &[Inline<'_>],
+        style: TextStyle,
+        break_prefix: Option<usize>,
+        width: Option<usize>,
+    ) -> io::Result<()> {
         match width {
-            None => self.render_inlines(writer, &heading.children, style, LineBreak::Newline(None)),
+            None => self.render_inlines(writer, inlines, style, LineBreak::Newline(break_prefix)),
             Some(width) => {
-                self.render_reflowed_inlines(writer, &heading.children, style, None, width)
+                self.render_reflowed_inlines(writer, inlines, style, break_prefix, width)
             }
         }
     }
@@ -240,7 +259,13 @@ impl Renderer {
     ) -> io::Result<()> {
         let indent = break_prefix.unwrap_or(0);
         let wrap_width = width.saturating_sub(indent).max(1);
-        let mut prefixed = LinePrefixWriter::new(writer, indent_prefix(indent), true);
+        // The indent spaces must stay outside the inline style so a style that
+        // spans a wrap point neither underlines the indent nor dies on it.
+        let mut prefixed = if indent > 0 && self.options.color == ColorMode::Ansi {
+            LinePrefixWriter::with_style_carryover(writer, indent_prefix(indent), true)
+        } else {
+            LinePrefixWriter::new(writer, indent_prefix(indent), true)
+        };
         let mut wrapper = WordWrapWriter::new(&mut prefixed, wrap_width);
         self.render_inlines(&mut wrapper, inlines, style, LineBreak::Reflow)?;
         wrapper.finish()
@@ -255,7 +280,10 @@ impl Renderer {
         const QUOTE_PREFIX_WIDTH: usize = 2;
         let options = self.options;
         let palette = self.options.palette;
-        let mut prefixed = LinePrefixWriter::new(
+        let carry_style = options.color == ColorMode::Ansi;
+        // Carry the inner content's style across the bar so the bar's own reset
+        // does not strip the color of wrapped continuation lines.
+        let mut prefixed = LinePrefixWriter::with_style_carryover_enabled(
             &mut *writer,
             move |writer, blank_line| {
                 let bar = if blank_line { "│" } else { "│ " };
@@ -267,6 +295,7 @@ impl Renderer {
                 )
             },
             false,
+            carry_style,
         );
         let mut state = RenderState::default();
         if let Some(kind) = blockquote.kind {
@@ -285,7 +314,7 @@ impl Renderer {
                 &mut state,
             )?;
         }
-        if prefixed.wrote_anything() {
+        if state.has_rendered {
             return Ok(());
         }
         // An empty quote still shows its bar, without the prefix's trailing space.
@@ -373,7 +402,11 @@ impl Renderer {
         context: RenderContext,
         hanging: bool,
     ) -> io::Result<()> {
-        let mut prefixed = LinePrefixWriter::new(writer, indent_prefix(indent), hanging);
+        let mut prefixed = if indent > 0 && self.options.color == ColorMode::Ansi {
+            LinePrefixWriter::with_style_carryover(writer, indent_prefix(indent), hanging)
+        } else {
+            LinePrefixWriter::new(writer, indent_prefix(indent), hanging)
+        };
         self.render_block_in_context(&mut prefixed, context.narrowed(indent), block)
     }
 
@@ -426,28 +459,28 @@ impl Renderer {
         table: &Table<'_>,
         width: Option<usize>,
     ) -> io::Result<()> {
-        let layout = table_layout(table, &|cell| self.measure_cell(cell), width);
-        if layout.widths.is_empty() {
+        let widths = table_layout(table, |cell| self.measure_cell(cell), width);
+        if widths.is_empty() {
             return Ok(());
         }
 
-        self.write_table_border(writer, &layout.widths, BorderKind::Top)?;
+        self.write_table_border(writer, &widths, BorderKind::Top)?;
         if !table.header.is_empty() {
             writer.write_all(b"\n")?;
-            self.write_table_row(writer, &table.header, &layout.widths, &table.alignments)?;
+            self.write_table_row(writer, &table.header, &widths, &table.alignments)?;
             writer.write_all(b"\n")?;
-            self.write_table_border(writer, &layout.widths, BorderKind::Middle)?;
+            self.write_table_border(writer, &widths, BorderKind::Middle)?;
         }
         for (index, row) in table.rows.iter().enumerate() {
             writer.write_all(b"\n")?;
             if index > 0 {
-                self.write_table_border(writer, &layout.widths, BorderKind::Middle)?;
+                self.write_table_border(writer, &widths, BorderKind::Middle)?;
                 writer.write_all(b"\n")?;
             }
-            self.write_table_row(writer, row, &layout.widths, &table.alignments)?;
+            self.write_table_row(writer, row, &widths, &table.alignments)?;
         }
         writer.write_all(b"\n")?;
-        self.write_table_border(writer, &layout.widths, BorderKind::Bottom)?;
+        self.write_table_border(writer, &widths, BorderKind::Bottom)?;
         Ok(())
     }
 
@@ -594,7 +627,7 @@ impl Renderer {
             cells.push(self.wrap_cell_lines(cell, *width, body_style)?);
         }
 
-        let height = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+        let height = cells.iter().map(WrappedCell::height).max().unwrap_or(0).max(1);
         for line_index in 0..height {
             if line_index > 0 {
                 writer.write_all(b"\n")?;
@@ -606,19 +639,19 @@ impl Renderer {
         Ok(())
     }
 
-    /// Renders one cell's inline content wrapped to the column width and
-    /// returns its output lines.
+    /// Renders one cell's inline content wrapped to the column width into a
+    /// single buffer, with its output lines tracked as ranges into that buffer.
     fn wrap_cell_lines(
         &self,
         cell: &[Inline<'_>],
         width: usize,
         body_style: TextStyle,
-    ) -> io::Result<Vec<Vec<u8>>> {
+    ) -> io::Result<WrappedCell> {
         let mut buffer = Vec::new();
         let mut wrapper = WordWrapWriter::new(&mut buffer, width);
         self.write_cell_inlines(&mut wrapper, cell, body_style)?;
         wrapper.finish()?;
-        Ok(buffer.split(|byte| *byte == b'\n').map(<[u8]>::to_vec).collect())
+        Ok(WrappedCell::new(buffer))
     }
 
     fn write_cell_inlines(
@@ -1237,7 +1270,7 @@ mod tests {
 
         let output =
             render_to_string(&blocks, RenderOptions { width: Some(24), ..Default::default() })?;
-        let widths: BTreeSet<usize> = output.lines().map(crate::list::str_width).collect();
+        let widths: BTreeSet<usize> = output.lines().map(crate::wrap::display_width).collect();
 
         assert_eq!(widths.len(), 1, "every table line shares one display width: {output:?}");
         assert!(
@@ -1297,7 +1330,7 @@ mod tests {
             }]]],
         })];
         let output = render_plain(&blocks)?;
-        let widths: BTreeSet<usize> = output.lines().map(crate::list::str_width).collect();
+        let widths: BTreeSet<usize> = output.lines().map(crate::wrap::display_width).collect();
 
         assert_eq!(widths.len(), 1, "every table line shares one display width: {output:?}");
         Ok(())
@@ -2008,6 +2041,64 @@ mod tests {
             output.contains("38;2;1;2;3"),
             "the custom heading color must reach the SGR output: {output:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn thematic_break_is_capped_at_the_available_width() -> io::Result<()> {
+        let output = render_to_string(
+            &[Block::ThematicBreak],
+            RenderOptions { width: Some(8), ..Default::default() },
+        )?;
+
+        assert_eq!(output, "────────\n", "the rule must fit the 8-column budget");
+        Ok(())
+    }
+
+    #[test]
+    fn thematic_break_uses_the_default_length_without_a_width_limit() -> io::Result<()> {
+        let output = render_plain(&[Block::ThematicBreak])?;
+
+        assert_eq!(output.trim_end_matches('\n').chars().count(), 32);
+        Ok(())
+    }
+
+    #[test]
+    fn blockquote_keeps_the_body_color_on_wrapped_continuation_lines() -> io::Result<()> {
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: None,
+            blocks: vec![Block::Paragraph(vec![Inline::Text(Text::borrowed("alpha beta gamma"))])],
+        })];
+
+        let output = render_to_string(
+            &blocks,
+            RenderOptions { color: ColorMode::Ansi, width: Some(12), ..Default::default() },
+        )?;
+
+        let body_color = "\u{1b}[38;2;131;148;150m";
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines.len() >= 2, "the quote must wrap onto a continuation line: {output:?}");
+        assert!(
+            lines[1].contains(body_color),
+            "the continuation line must restore the body color after the bar: {output:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plain_blockquote_does_not_carry_source_ansi_across_prefixes() -> io::Result<()> {
+        let blocks = vec![Block::BlockQuote(BlockQuote {
+            kind: None,
+            blocks: vec![Block::Paragraph(vec![
+                Inline::Text(Text::borrowed("\u{1b}[31malpha")),
+                Inline::HardBreak,
+                Inline::Text(Text::borrowed("beta")),
+            ])],
+        })];
+
+        let output = render_plain(&blocks)?;
+
+        assert_eq!(output, "│ \u{1b}[31malpha\n│ beta\n");
         Ok(())
     }
 

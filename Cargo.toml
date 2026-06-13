@@ -32,6 +32,7 @@ terminal_size = "0.4.4"
 two-face = { version = "0.5.1", default-features = false, features = [
     "syntect-default-fancy",
 ] }
+unicode-segmentation = "1.13.3"
 unicode-width = { version = "0.2.2", default-features = false }
 
 [profile.release]

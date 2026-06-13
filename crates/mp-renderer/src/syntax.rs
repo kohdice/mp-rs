@@ -55,9 +55,8 @@ fn highlighted_ranges_for_syntax<'a>(
         return Err(std::io::Error::other("forced syntax highlighting error").into());
     }
 
-    let syntax_set = syntax_set();
     let mut highlighter = HighlightLines::new(syntax, syntax_theme(code_theme));
-    collect_highlighted_ranges(source, |line| highlighter.highlight_line(line, syntax_set))
+    collect_highlighted_ranges(source, |line| highlighter.highlight_line(line, &SYNTAX_SET))
 }
 
 fn collect_highlighted_ranges<'a, E>(
@@ -77,7 +76,7 @@ fn collect_highlighted_ranges<'a, E>(
 
 fn syntax_for_info(info: &str) -> Option<&'static SyntaxReference> {
     let token = language_token(info)?;
-    syntax_set().find_syntax_by_token(token)
+    SYNTAX_SET.find_syntax_by_token(token)
 }
 
 fn language_token(info: &str) -> Option<&str> {
@@ -116,10 +115,6 @@ fn text_style(style: SyntectStyle) -> TextStyle {
         text_style = text_style.underline();
     }
     text_style
-}
-
-fn syntax_set() -> &'static SyntaxSet {
-    &SYNTAX_SET
 }
 
 fn syntax_theme(code_theme: CodeTheme) -> &'static Theme {

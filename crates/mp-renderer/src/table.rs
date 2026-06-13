@@ -1,13 +1,9 @@
 use std::io::{self, Write};
+use std::ops::Range;
 
 use mp_ast::{Alignment, Inline, Table};
 
 use crate::writer::{write_repeated_str, write_spaces};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TableLayout {
-    pub(crate) widths: Vec<usize>,
-}
 
 /// Columns never shrink below this content width, even when the table then
 /// overflows the available width.
@@ -15,25 +11,26 @@ const MIN_COLUMN_WIDTH: usize = 3;
 
 pub(crate) fn table_layout(
     table: &Table<'_>,
-    measure_cell: &dyn Fn(&[Inline<'_>]) -> usize,
+    measure_cell: impl Fn(&[Inline<'_>]) -> usize,
     available: Option<usize>,
-) -> TableLayout {
-    // Parser-produced tables are already normalized to the header width (GFM), so the
-    // header decides the column count; cells beyond it in hand-built rows are ignored.
+) -> Vec<usize> {
+    // The wider of the header and the alignment row decides the column count;
+    // parser-produced rows are normalized to it, and cells beyond it in
+    // hand-built rows are ignored.
     let column_count = table.alignments.len().max(table.header.len());
 
     let mut widths = vec![MIN_COLUMN_WIDTH; column_count];
-    update_widths(&mut widths, &table.header, measure_cell);
+    update_widths(&mut widths, &table.header, &measure_cell);
 
     for row in &table.rows {
-        update_widths(&mut widths, row, measure_cell);
+        update_widths(&mut widths, row, &measure_cell);
     }
 
     if let Some(available) = available {
         shrink_to_fit(&mut widths, available);
     }
 
-    TableLayout { widths }
+    widths
 }
 
 /// Total display width of a table whose columns have the given content
@@ -43,28 +40,89 @@ fn table_total_width(widths: &[usize]) -> usize {
     widths.iter().sum::<usize>() + 3 * widths.len() + 1
 }
 
-/// Shrinks the widest column one display column at a time until the table
-/// fits in `available`, stopping once every column is at the minimum width.
+/// Shrinks the tallest columns toward the next-tallest level until the table
+/// fits in `available`, never dropping a column below the minimum width.
+///
+/// Each step lowers a whole front of equally-tall columns at once, so the loop
+/// runs in time proportional to the number of columns rather than to the amount
+/// of overflow (which a single wide cell can make arbitrarily large).
 fn shrink_to_fit(widths: &mut [usize], available: usize) {
-    while table_total_width(widths) > available {
-        let Some(widest) = widths
-            .iter_mut()
-            .filter(|width| **width > MIN_COLUMN_WIDTH)
-            .max_by_key(|width| **width)
-        else {
+    loop {
+        let Some(overflow) = table_total_width(widths).checked_sub(available) else {
             return;
         };
-        *widest -= 1;
+        if overflow == 0 {
+            return;
+        }
+        let Some(max) = widths.iter().copied().filter(|width| *width > MIN_COLUMN_WIDTH).max()
+        else {
+            return; // every column already sits at the minimum width
+        };
+        // The next level to lower the tallest columns down to: the next-tallest
+        // column, but never below the minimum width.
+        let next_level = widths
+            .iter()
+            .copied()
+            .filter(|width| *width < max)
+            .max()
+            .unwrap_or(MIN_COLUMN_WIDTH)
+            .max(MIN_COLUMN_WIDTH);
+        let tallest = widths.iter().filter(|width| **width == max).count();
+        let headroom = max - next_level;
+        let batch = overflow.min(tallest.saturating_mul(headroom));
+        let base_step = batch / tallest;
+        let mut extra_steps = batch % tallest;
+        for width in widths.iter_mut() {
+            if *width == max {
+                let extra_step = if extra_steps > 0 {
+                    extra_steps -= 1;
+                    1
+                } else {
+                    0
+                };
+                *width -= base_step + extra_step;
+            }
+        }
     }
 }
 
 fn update_widths(
     widths: &mut [usize],
     row: &[Vec<Inline<'_>>],
-    measure_cell: &dyn Fn(&[Inline<'_>]) -> usize,
+    measure_cell: impl Fn(&[Inline<'_>]) -> usize,
 ) {
     for (target, cell) in widths.iter_mut().zip(row) {
         *target = (*target).max(measure_cell(cell));
+    }
+}
+
+/// A table cell rendered into a single buffer, with its newline-separated output
+/// lines kept as ranges into that buffer so no per-line copies are made.
+pub(crate) struct WrappedCell {
+    bytes: Vec<u8>,
+    lines: Vec<Range<usize>>,
+}
+
+impl WrappedCell {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' {
+                lines.push(start..index);
+                start = index + 1;
+            }
+        }
+        lines.push(start..bytes.len());
+        Self { bytes, lines }
+    }
+
+    pub(crate) fn height(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn line(&self, index: usize) -> &[u8] {
+        self.lines.get(index).map_or(&[][..], |range| &self.bytes[range.clone()])
     }
 }
 
@@ -76,7 +134,7 @@ fn update_widths(
 /// from their visible width.
 pub(crate) fn write_table_row_line(
     writer: &mut dyn Write,
-    cells: &[Vec<Vec<u8>>],
+    cells: &[WrappedCell],
     line_index: usize,
     widths: &[usize],
     alignments: &[Alignment],
@@ -87,10 +145,7 @@ pub(crate) fn write_table_row_line(
             writer.write_all("│".as_bytes())?;
         }
         writer.write_all(b" ")?;
-        let line = cells
-            .get(column)
-            .and_then(|lines| lines.get(line_index))
-            .map_or([].as_slice(), Vec::as_slice);
+        let line = cells.get(column).map_or([].as_slice(), |cell| cell.line(line_index));
         write_aligned_line(
             writer,
             line,
@@ -162,7 +217,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::list::str_width;
+    use crate::wrap::display_width;
     use mp_ast::Text;
 
     #[test]
@@ -173,9 +228,9 @@ mod tests {
             rows: vec![vec![cell("a"), cell("ignored extra cell")]],
         };
 
-        let layout = table_layout(&table, &measure_text, None);
+        let widths = table_layout(&table, measure_text, None);
 
-        assert_eq!(layout.widths.len(), 1, "column count follows the header, not ragged rows");
+        assert_eq!(widths.len(), 1, "column count follows the header, not ragged rows");
     }
 
     #[test]
@@ -186,9 +241,9 @@ mod tests {
             rows: vec![vec![cell("日本語")], vec![cell("e\u{301}")], vec![cell("👩\u{200d}💻")]],
         };
 
-        let layout = table_layout(&table, &measure_text, None);
+        let widths = table_layout(&table, measure_text, None);
 
-        assert_eq!(layout.widths, vec![6]);
+        assert_eq!(widths, vec![6]);
     }
 
     #[test]
@@ -201,9 +256,30 @@ mod tests {
 
         // Natural widths are [4, 12]; borders and padding add 7, so the table
         // is 23 columns wide. Fitting into 19 must take 4 from the widest.
-        let layout = table_layout(&table, &measure_text, Some(19));
+        let widths = table_layout(&table, measure_text, Some(19));
 
-        assert_eq!(layout.widths, vec![4, 8]);
+        assert_eq!(widths, vec![4, 8]);
+    }
+
+    #[test]
+    fn tied_columns_shrink_only_by_the_remaining_overflow() {
+        let table = Table {
+            header: vec![cell("aaaaaaaaaa"), cell("bbbbbbbbbb")],
+            alignments: vec![Alignment::Left, Alignment::Left],
+            rows: vec![],
+        };
+
+        // Natural widths are [10, 10]; borders and padding add 7, so the
+        // table is 27 columns wide. Fitting into 26 must shrink only one
+        // content column, not every tied widest column.
+        let widths = table_layout(&table, measure_text, Some(26));
+
+        assert_eq!(table_total_width(&widths), 26);
+        assert_eq!(
+            widths.iter().filter(|width| **width == 10).count(),
+            1,
+            "one tied column should keep its full width: {widths:?}"
+        );
     }
 
     #[test]
@@ -215,15 +291,15 @@ mod tests {
         };
 
         // Even a 5-column budget cannot push content widths below 3.
-        let layout = table_layout(&table, &measure_text, Some(5));
+        let widths = table_layout(&table, measure_text, Some(5));
 
-        assert_eq!(layout.widths, vec![3, 3]);
+        assert_eq!(widths, vec![3, 3]);
     }
 
     fn measure_text(cell: &[Inline<'_>]) -> usize {
         cell.iter()
             .map(|inline| match inline {
-                Inline::Text(text) => str_width(text),
+                Inline::Text(text) => display_width(text),
                 _ => 0,
             })
             .sum()

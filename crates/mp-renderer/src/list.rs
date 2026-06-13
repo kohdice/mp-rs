@@ -1,7 +1,8 @@
 use std::io::{self, Write};
 
 use mp_ast::{List, ListKind, TaskState};
-use unicode_width::UnicodeWidthStr;
+
+use crate::wrap::display_width;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ListMarkerDisplay<'a> {
@@ -52,13 +53,13 @@ fn unordered_marker(depth: usize) -> &'static str {
 
 pub(crate) fn marker_width(marker: ListMarkerDisplay<'_>, task: Option<TaskState>) -> usize {
     // Each present part is followed by one separating space before the content column.
-    let task_width = task.map_or(0, |state| str_width(task_marker(state)) + 1);
+    let task_width = task.map_or(0, |state| display_width(task_marker(state)) + 1);
     marker_text_width(marker) + 1 + task_width
 }
 
 fn marker_text_width(marker: ListMarkerDisplay<'_>) -> usize {
     match marker {
-        ListMarkerDisplay::Text(text) => str_width(text),
+        ListMarkerDisplay::Text(text) => display_width(text),
         ListMarkerDisplay::OrderedGenerated(value) => decimal_width(value) + 1,
     }
 }
@@ -67,21 +68,10 @@ fn decimal_width(value: u64) -> usize {
     value.checked_ilog10().map_or(1, |log10| log10 as usize + 1)
 }
 
-pub(crate) fn str_width(text: &str) -> usize {
-    text.width()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ListMarkerDisplay, marker_text_width, str_width, write_list_marker};
-
-    #[test]
-    fn measures_fullwidth_and_combining_text_widths() {
-        assert_eq!(str_width("abc"), 3);
-        assert_eq!(str_width("日本語"), 6);
-        assert_eq!(str_width("e\u{301}"), 1);
-        assert_eq!(str_width("👩\u{200d}💻"), 2);
-    }
+    use super::{ListMarkerDisplay, marker_text_width, write_list_marker};
+    use crate::wrap::display_width;
 
     #[test]
     fn ordered_marker_text_width_matches_the_written_marker() -> std::io::Result<()> {
@@ -92,7 +82,7 @@ mod tests {
             let written = String::from_utf8(buffer)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
 
-            assert_eq!(str_width(&written), marker_text_width(marker), "value {value}");
+            assert_eq!(display_width(&written), marker_text_width(marker), "value {value}");
         }
         Ok(())
     }

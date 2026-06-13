@@ -15,27 +15,27 @@ impl TextStyle {
     const UNDERLINE: u8 = 1 << 3;
     const STRIKETHROUGH: u8 = 1 << 4;
 
-    pub(crate) fn fg(self, fg: Rgb) -> Self {
+    pub(crate) const fn fg(self, fg: Rgb) -> Self {
         Self { fg: Some(fg), ..self }
     }
 
-    pub(crate) fn bold(self) -> Self {
+    pub(crate) const fn bold(self) -> Self {
         self.with_flag(Self::BOLD)
     }
 
-    pub(crate) fn dim(self) -> Self {
+    pub(crate) const fn dim(self) -> Self {
         self.with_flag(Self::DIM)
     }
 
-    pub(crate) fn italic(self) -> Self {
+    pub(crate) const fn italic(self) -> Self {
         self.with_flag(Self::ITALIC)
     }
 
-    pub(crate) fn underline(self) -> Self {
+    pub(crate) const fn underline(self) -> Self {
         self.with_flag(Self::UNDERLINE)
     }
 
-    pub(crate) fn strikethrough(self) -> Self {
+    pub(crate) const fn strikethrough(self) -> Self {
         self.with_flag(Self::STRIKETHROUGH)
     }
 

@@ -1,8 +1,7 @@
 use std::io::{self, Write};
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::utf8::utf8_complete_prefix;
+use crate::wrap::display_width;
 
 /// A [`Write`] sink that discards its bytes and accumulates the unicode display width of
 /// the UTF-8 text written through it. Measuring a cell by rendering it through this
@@ -45,7 +44,58 @@ impl Write for WidthMeasuringWriter {
 /// display width; any trailing incomplete scalar sequence is excluded from both.
 fn utf8_prefix_width(bytes: &[u8]) -> (usize, usize) {
     let text = utf8_complete_prefix(bytes);
-    (text.len(), text.width())
+    (text.len(), display_width(text))
+}
+
+const ESC: u8 = 0x1b;
+const SGR_RESET: &[u8] = b"\x1b[0m";
+
+/// Tracks the active SGR (color and style) sequence in a byte stream so a
+/// [`LinePrefixWriter`] can re-establish it after each prefix it injects.
+///
+/// The renderer always sets a style with a single, complete SGR sequence and
+/// clears it with a reset, so remembering the last non-reset sequence captures
+/// the full active style.
+#[derive(Default)]
+struct StyleCarry {
+    /// The last non-reset SGR sequence seen, or empty after a reset.
+    active: Vec<u8>,
+    /// A partial escape sequence buffered across writes.
+    escape: Vec<u8>,
+    in_escape: bool,
+}
+
+impl StyleCarry {
+    fn track(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.in_escape {
+                self.escape.push(byte);
+                if self.escape.len() == 2 {
+                    // Only `ESC [` (CSI) sequences carry styling; abort anything else.
+                    if byte != b'[' {
+                        self.in_escape = false;
+                        self.escape.clear();
+                    }
+                } else if (0x40..=0x7e).contains(&byte) {
+                    // First byte in this range after `ESC [` is the final byte.
+                    self.in_escape = false;
+                    if byte == b'm' {
+                        self.active.clear();
+                        let is_reset = self.escape.as_slice() == SGR_RESET
+                            || self.escape.as_slice() == b"\x1b[m";
+                        if !is_reset {
+                            self.active.extend_from_slice(&self.escape);
+                        }
+                    }
+                    self.escape.clear();
+                }
+            } else if byte == ESC {
+                self.in_escape = true;
+                self.escape.clear();
+                self.escape.push(byte);
+            }
+        }
+    }
 }
 
 pub(crate) struct LinePrefixWriter<'a, W, P>
@@ -58,6 +108,8 @@ where
     at_line_start: bool,
     wrote_anything: bool,
     skip_next_prefix: bool,
+    /// When set, the active ANSI style is carried across the injected prefixes.
+    style: Option<StyleCarry>,
 }
 
 impl<'a, W, P> LinePrefixWriter<'a, W, P>
@@ -71,26 +123,53 @@ where
     /// With `hanging`, the first line is not prefixed, so the caller can place that
     /// line's leading content itself (a hanging indent).
     pub(crate) fn new(inner: &'a mut W, prefix: P, hanging: bool) -> Self {
+        Self::with_optional_style(inner, prefix, hanging, false)
+    }
+
+    /// Like [`LinePrefixWriter::new`], but keeps the active ANSI style open across the
+    /// injected prefixes: the prefix is emitted unstyled and the content's style is
+    /// re-established after it, so a style that spans a wrap point neither bleeds into
+    /// the prefix nor dies on the continuation line. Use only in ANSI mode.
+    pub(crate) fn with_style_carryover(inner: &'a mut W, prefix: P, hanging: bool) -> Self {
+        Self::with_optional_style(inner, prefix, hanging, true)
+    }
+
+    /// Like [`LinePrefixWriter::new`], with ANSI style carryover controlled by `enabled`.
+    pub(crate) fn with_style_carryover_enabled(
+        inner: &'a mut W,
+        prefix: P,
+        hanging: bool,
+        enabled: bool,
+    ) -> Self {
+        Self::with_optional_style(inner, prefix, hanging, enabled)
+    }
+
+    fn with_optional_style(inner: &'a mut W, prefix: P, hanging: bool, track: bool) -> Self {
         Self {
             inner,
             prefix,
             at_line_start: true,
             wrote_anything: false,
             skip_next_prefix: hanging,
+            style: track.then(StyleCarry::default),
         }
-    }
-
-    pub(crate) fn wrote_anything(&self) -> bool {
-        self.wrote_anything
     }
 
     fn write_prefix(&mut self, blank_line: bool) -> io::Result<()> {
         if self.skip_next_prefix {
             self.skip_next_prefix = false;
-        } else {
-            (self.prefix)(self.inner, blank_line)?;
-            self.wrote_anything = true;
+            self.at_line_start = false;
+            return Ok(());
         }
+        let carry_active = self.style.as_ref().is_some_and(|style| !style.active.is_empty());
+        if carry_active {
+            self.inner.write_all(SGR_RESET)?;
+        }
+        (self.prefix)(self.inner, blank_line)?;
+        if carry_active && let Some(style) = self.style.as_ref() {
+            self.inner.write_all(&style.active)?;
+        }
+        self.wrote_anything = true;
         self.at_line_start = false;
         Ok(())
     }
@@ -115,6 +194,9 @@ where
         let written = self.inner.write(&buffer[..end])?;
         if written > 0 {
             self.at_line_start = buffer[written - 1] == b'\n';
+        }
+        if let Some(style) = self.style.as_mut() {
+            style.track(&buffer[..written]);
         }
 
         Ok(written)
@@ -268,6 +350,26 @@ mod tests {
         prefixed.write_all(b"a\nb\nc")?;
 
         assert_eq!(String::from_utf8_lossy(&output), "a\n  b\n  c");
+        Ok(())
+    }
+
+    #[test]
+    fn carries_the_active_style_across_the_injected_prefix() -> io::Result<()> {
+        let mut output = Vec::new();
+        let mut prefixed = LinePrefixWriter::with_style_carryover(
+            &mut output,
+            |writer, _blank| writer.write_all(b"> "),
+            false,
+        );
+
+        prefixed.write_all(b"\x1b[31ma\nb\x1b[0m")?;
+
+        let out = String::from_utf8_lossy(&output).into_owned();
+        assert!(out.starts_with("> \x1b[31ma\n"), "first line keeps its style: {out:?}");
+        assert!(
+            out.contains("\x1b[0m> \x1b[31mb"),
+            "the prefix is unstyled and the content's style is restored after it: {out:?}",
+        );
         Ok(())
     }
 

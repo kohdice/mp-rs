@@ -1,9 +1,10 @@
 //! Shared link and image display delimiters.
 //!
-//! These are the single vocabulary that keeps the plain-text width calculation
-//! ([`crate::plain`]) and the ANSI renderer ([`crate::renderer`]) in agreement: both paths
-//! must emit the same visible characters so that table column widths, computed from the
-//! plain text, match what the styled output actually writes.
+//! These are the single vocabulary that keeps width measurement and emission in
+//! agreement: a table cell is measured by rendering it in plain mode through
+//! [`crate::writer::WidthMeasuringWriter`], while the styled output is produced by
+//! [`crate::renderer`]. Both paths emit the same visible characters, so a column's
+//! measured width matches what the styled output actually writes.
 
 /// Opening delimiter before a link or image destination, e.g. `link(url)`.
 pub(crate) const URL_OPEN: &str = "(";
