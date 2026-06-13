@@ -35,11 +35,10 @@ where
     }
 }
 
-pub(crate) fn task_marker(task: Option<TaskState>) -> Option<&'static str> {
+pub(crate) fn task_marker(task: TaskState) -> &'static str {
     match task {
-        Some(TaskState::Checked) => Some("☑"),
-        Some(TaskState::Unchecked) => Some("☐"),
-        None => None,
+        TaskState::Checked => "☑",
+        TaskState::Unchecked => "☐",
     }
 }
 
@@ -53,7 +52,7 @@ fn unordered_marker(depth: usize) -> &'static str {
 
 pub(crate) fn marker_width(marker: ListMarkerDisplay<'_>, task: Option<TaskState>) -> usize {
     // Each present part is followed by one separating space before the content column.
-    let task_width = task_marker(task).map_or(0, |glyph| str_width(glyph) + 1);
+    let task_width = task.map_or(0, |state| str_width(task_marker(state)) + 1);
     marker_text_width(marker) + 1 + task_width
 }
 

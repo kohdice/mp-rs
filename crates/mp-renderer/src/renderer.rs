@@ -11,7 +11,9 @@ use crate::table::{BorderKind, table_layout, write_border_line, write_table_row_
 use crate::theme::Palette;
 use crate::tokens::{IMAGE_OPEN, LINK_TEXT_CLOSE, TITLE_SEPARATOR, URL_CLOSE, URL_OPEN};
 use crate::wrap::WordWrapWriter;
-use crate::writer::{LinePrefixWriter, WidthMeasuringWriter, write_repeated_str, write_spaces};
+use crate::writer::{
+    LinePrefixWriter, WidthMeasuringWriter, indent_prefix, write_repeated_str, write_spaces,
+};
 
 const THEMATIC_BREAK_WIDTH: usize = 32;
 
@@ -58,6 +60,28 @@ pub struct RenderState {
     ended_with_newline: bool,
 }
 
+/// Per-call rendering position: the list nesting depth and the remaining usable
+/// width. Narrowing and deepening go through this type so the reduction rules
+/// live in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderContext {
+    depth: usize,
+    width: Option<usize>,
+}
+
+impl RenderContext {
+    /// Returns the context with `columns` subtracted (saturating) from the usable
+    /// width; an unlimited width stays unlimited.
+    fn narrowed(self, columns: usize) -> Self {
+        Self { width: self.width.map(|width| width.saturating_sub(columns)), ..self }
+    }
+
+    /// Returns the context one list nesting level deeper.
+    fn deeper(self) -> Self {
+        Self { depth: self.depth + 1, ..self }
+    }
+}
+
 /// How a soft or hard line break inside inline content is emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineBreak {
@@ -97,7 +121,8 @@ impl Renderer {
     where
         W: Write + ?Sized,
     {
-        self.render_block_with_state(writer, block, 0, self.options.width, state)
+        let context = RenderContext { depth: 0, width: self.options.width };
+        self.render_block_with_state(writer, block, context, state)
     }
 
     /// Completes streaming rendering by terminating the output with a newline.
@@ -122,8 +147,7 @@ impl Renderer {
         &self,
         writer: &mut W,
         block: &Block<'_>,
-        depth: usize,
-        width: Option<usize>,
+        context: RenderContext,
         state: &mut RenderState,
     ) -> io::Result<()>
     where
@@ -133,33 +157,32 @@ impl Renderer {
         if state.has_rendered {
             writer.write_all(b"\n")?;
         }
-        self.render_block_at_depth(&mut writer, depth, width, block)?;
+        self.render_block_in_context(&mut writer, context, block)?;
         state.has_rendered |= writer.wrote_bytes();
         state.ended_with_newline = writer.ended_with_newline();
         Ok(())
     }
 
-    fn render_block_at_depth(
+    fn render_block_in_context(
         &self,
         writer: &mut dyn Write,
-        depth: usize,
-        width: Option<usize>,
+        context: RenderContext,
         block: &Block<'_>,
     ) -> io::Result<()> {
         match block {
-            Block::Paragraph(inlines) => self.render_paragraph(writer, inlines, None, width),
-            Block::Heading(heading) => self.render_heading(writer, heading, width),
-            Block::BlockQuote(blockquote) => {
-                self.render_blockquote(writer, blockquote, depth, width)
+            Block::Paragraph(inlines) => {
+                self.render_paragraph(writer, inlines, None, context.width)
             }
-            Block::List(list) => self.render_list(writer, list, depth, 0, width),
+            Block::Heading(heading) => self.render_heading(writer, heading, context.width),
+            Block::BlockQuote(blockquote) => self.render_blockquote(writer, blockquote, context),
+            Block::List(list) => self.render_list(writer, list, context, 0),
             Block::CodeBlock(code_block) => self.render_code_block(writer, code_block),
             // Normalize to the no-trailing-newline shape every other block uses, so the
             // streaming separator and `finish` logic stay correct.
             Block::HtmlBlock(text) => {
                 writer.write_all(text.as_bytes().strip_suffix(b"\n").unwrap_or(text.as_bytes()))
             }
-            Block::Table(table) => self.render_table(writer, table, width),
+            Block::Table(table) => self.render_table(writer, table, context.width),
             Block::ThematicBreak => {
                 self.write_style_start(
                     writer,
@@ -217,13 +240,7 @@ impl Renderer {
     ) -> io::Result<()> {
         let indent = break_prefix.unwrap_or(0);
         let wrap_width = width.saturating_sub(indent).max(1);
-        let mut prefixed = LinePrefixWriter::new(
-            writer,
-            move |writer, blank_line| {
-                if blank_line { Ok(()) } else { write_spaces(writer, indent) }
-            },
-            true,
-        );
+        let mut prefixed = LinePrefixWriter::new(writer, indent_prefix(indent), true);
         let mut wrapper = WordWrapWriter::new(&mut prefixed, wrap_width);
         self.render_inlines(&mut wrapper, inlines, style, LineBreak::Reflow)?;
         wrapper.finish()
@@ -233,8 +250,7 @@ impl Renderer {
         &self,
         writer: &mut dyn Write,
         blockquote: &BlockQuote<'_>,
-        depth: usize,
-        width: Option<usize>,
+        context: RenderContext,
     ) -> io::Result<()> {
         const QUOTE_PREFIX_WIDTH: usize = 2;
         let options = self.options;
@@ -265,8 +281,7 @@ impl Renderer {
             self.render_block_with_state(
                 &mut prefixed,
                 block,
-                depth,
-                width.map(|w| w.saturating_sub(QUOTE_PREFIX_WIDTH)),
+                context.narrowed(QUOTE_PREFIX_WIDTH),
                 &mut state,
             )?;
         }
@@ -285,16 +300,15 @@ impl Renderer {
         &self,
         writer: &mut dyn Write,
         list: &List<'_>,
-        depth: usize,
+        context: RenderContext,
         indent: usize,
-        width: Option<usize>,
     ) -> io::Result<()> {
         for (index, item) in list.items.iter().enumerate() {
             if index > 0 {
                 writer.write_all(if list.loose { b"\n\n" } else { b"\n" })?;
             }
-            let marker = list_marker(list, index, depth);
-            self.render_list_item(writer, marker, item, depth, indent, width)?;
+            let marker = list_marker(list, index, context.depth);
+            self.render_list_item(writer, marker, item, context, indent)?;
         }
         Ok(())
     }
@@ -304,9 +318,8 @@ impl Renderer {
         writer: &mut dyn Write,
         marker: ListMarkerDisplay<'_>,
         item: &ListItem<'_>,
-        depth: usize,
+        context: RenderContext,
         indent: usize,
-        width: Option<usize>,
     ) -> io::Result<()> {
         write_spaces(writer, indent)?;
         self.write_style_start(
@@ -316,9 +329,9 @@ impl Renderer {
         write_list_marker(writer, marker)?;
         self.write_style_end(writer)?;
 
-        if item.task.is_some() {
+        if let Some(task) = item.task {
             writer.write_all(b" ")?;
-            self.write_task_marker(writer, item.task)?;
+            self.write_task_marker(writer, task)?;
         }
         let content_width = indent + marker_width(marker, item.task);
         if item.blocks.is_empty() {
@@ -335,7 +348,7 @@ impl Renderer {
                     if index > 0 {
                         write_spaces(writer, content_width)?;
                     }
-                    self.render_paragraph(writer, inlines, Some(content_width), width)?;
+                    self.render_paragraph(writer, inlines, Some(content_width), context.width)?;
                 }
                 Block::BlankLine => {}
                 // The first block shares the marker's line, so it hangs: its first line
@@ -344,9 +357,8 @@ impl Renderer {
                     writer,
                     child,
                     content_width,
-                    depth + 1,
+                    context.deeper(),
                     index == 0,
-                    width,
                 )?,
             }
         }
@@ -358,23 +370,11 @@ impl Renderer {
         writer: &mut dyn Write,
         block: &Block<'_>,
         indent: usize,
-        depth: usize,
+        context: RenderContext,
         hanging: bool,
-        width: Option<usize>,
     ) -> io::Result<()> {
-        let mut prefixed = LinePrefixWriter::new(
-            writer,
-            move |writer, blank_line| {
-                if blank_line { Ok(()) } else { write_spaces(writer, indent) }
-            },
-            hanging,
-        );
-        self.render_block_at_depth(
-            &mut prefixed,
-            depth,
-            width.map(|w| w.saturating_sub(indent)),
-            block,
-        )
+        let mut prefixed = LinePrefixWriter::new(writer, indent_prefix(indent), hanging);
+        self.render_block_in_context(&mut prefixed, context.narrowed(indent), block)
     }
 
     fn render_code_block(
@@ -666,20 +666,12 @@ impl Renderer {
         Ok(())
     }
 
-    fn write_task_marker(&self, writer: &mut dyn Write, task: Option<TaskState>) -> io::Result<()> {
-        if let Some(marker) = task_marker(task) {
-            let style = match task {
-                Some(TaskState::Checked) => {
-                    TextStyle::default().fg(self.options.palette.list_marker)
-                }
-                Some(TaskState::Unchecked) => {
-                    TextStyle::default().fg(self.options.palette.muted).dim()
-                }
-                None => TextStyle::default(),
-            };
-            self.write_styled_text(writer, style, marker)?;
-        }
-        Ok(())
+    fn write_task_marker(&self, writer: &mut dyn Write, task: TaskState) -> io::Result<()> {
+        let style = match task {
+            TaskState::Checked => TextStyle::default().fg(self.options.palette.list_marker),
+            TaskState::Unchecked => TextStyle::default().fg(self.options.palette.muted).dim(),
+        };
+        self.write_styled_text(writer, style, task_marker(task))
     }
 
     fn write_styled_text(
@@ -890,6 +882,28 @@ mod tests {
 
     use super::*;
     use crate::theme::solarized;
+
+    #[test]
+    fn narrowed_context_subtracts_columns_with_saturation_and_keeps_depth() {
+        let context = RenderContext { depth: 3, width: Some(10) };
+
+        assert_eq!(context.narrowed(4), RenderContext { depth: 3, width: Some(6) });
+        assert_eq!(context.narrowed(15), RenderContext { depth: 3, width: Some(0) });
+    }
+
+    #[test]
+    fn narrowed_context_keeps_an_unlimited_width_unlimited() {
+        let context = RenderContext { depth: 1, width: None };
+
+        assert_eq!(context.narrowed(4), RenderContext { depth: 1, width: None });
+    }
+
+    #[test]
+    fn deeper_context_increments_depth_and_keeps_width() {
+        let context = RenderContext { depth: 2, width: Some(8) };
+
+        assert_eq!(context.deeper(), RenderContext { depth: 3, width: Some(8) });
+    }
 
     #[test]
     fn renders_reference_style_block_spacing_and_markers() -> io::Result<()> {

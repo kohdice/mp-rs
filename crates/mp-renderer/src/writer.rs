@@ -134,6 +134,15 @@ where
     write_chunked_repeats(writer, SPACES, 1, count)
 }
 
+/// Returns a [`LinePrefixWriter`] prefix that indents every line by `indent` columns,
+/// leaving lines whose only content is their newline free of trailing whitespace.
+pub(crate) fn indent_prefix<W>(indent: usize) -> impl FnMut(&mut W, bool) -> io::Result<()>
+where
+    W: Write + ?Sized,
+{
+    move |writer, blank_line| if blank_line { Ok(()) } else { write_spaces(writer, indent) }
+}
+
 pub(crate) fn write_repeated_str<W>(writer: &mut W, text: &str, count: usize) -> io::Result<()>
 where
     W: Write + ?Sized,
