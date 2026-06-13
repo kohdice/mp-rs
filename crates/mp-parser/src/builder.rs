@@ -123,9 +123,16 @@ impl<'a> AstBuilder<'a> {
                 self.frames.push(Frame::TableRow { is_header, cells: Vec::new() });
             }
             Tag::TableCell => self.frames.push(Frame::TableCell { inlines: Vec::new() }),
-            Tag::Emphasis => self.frames.push(Frame::Emphasis { inlines: Vec::new() }),
-            Tag::Strong => self.frames.push(Frame::Strong { inlines: Vec::new() }),
-            Tag::Strikethrough => self.frames.push(Frame::Strikethrough { inlines: Vec::new() }),
+            Tag::Emphasis => {
+                self.frames
+                    .push(Frame::InlineSpan { kind: SpanKind::Emphasis, inlines: Vec::new() });
+            }
+            Tag::Strong => {
+                self.frames.push(Frame::InlineSpan { kind: SpanKind::Strong, inlines: Vec::new() });
+            }
+            Tag::Strikethrough => self
+                .frames
+                .push(Frame::InlineSpan { kind: SpanKind::Strikethrough, inlines: Vec::new() }),
             Tag::Link { link_type, dest_url, title, .. } => self.frames.push(Frame::Link {
                 destination: cow_str_to_text(dest_url),
                 title: non_empty_title(title),
@@ -149,6 +156,14 @@ impl<'a> AstBuilder<'a> {
     }
 
     fn end_tag(&mut self, tag: TagEnd, range: Range<usize>) -> Result<(), ParseError> {
+        // Everything started inside an ignored container pushes an `Ignored`
+        // frame (see `start_tag`), so any end tag while one is on top simply
+        // unwinds it, whatever the specific tag is.
+        if matches!(self.frames.last(), Some(Frame::Ignored)) {
+            self.frames.pop();
+            return Ok(());
+        }
+
         match tag {
             TagEnd::Paragraph => {
                 let Frame::Paragraph { inlines } = self.pop_frame("paragraph")? else {
@@ -236,23 +251,11 @@ impl<'a> AstBuilder<'a> {
 
     fn end_inline_tag(&mut self, tag: TagEnd) -> Result<(), ParseError> {
         match tag {
-            TagEnd::Emphasis => {
-                let Frame::Emphasis { inlines } = self.pop_frame("emphasis")? else {
-                    return Err(ParseError::new("markdown emphasis ended out of order"));
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
+                let Frame::InlineSpan { kind, inlines } = self.pop_frame("inline span")? else {
+                    return Err(ParseError::new("markdown inline span ended out of order"));
                 };
-                self.append_inline(Inline::Emphasis(inlines))
-            }
-            TagEnd::Strong => {
-                let Frame::Strong { inlines } = self.pop_frame("strong")? else {
-                    return Err(ParseError::new("markdown strong ended out of order"));
-                };
-                self.append_inline(Inline::Strong(inlines))
-            }
-            TagEnd::Strikethrough => {
-                let Frame::Strikethrough { inlines } = self.pop_frame("strikethrough")? else {
-                    return Err(ParseError::new("markdown strikethrough ended out of order"));
-                };
-                self.append_inline(Inline::Strikethrough(inlines))
+                self.append_inline(kind.into_inline(inlines))
             }
             TagEnd::Link => {
                 let Frame::Link { destination, title, kind, inlines } = self.pop_frame("link")?
@@ -290,9 +293,7 @@ impl<'a> AstBuilder<'a> {
                 Frame::Paragraph { inlines }
                 | Frame::Heading { inlines, .. }
                 | Frame::TableCell { inlines }
-                | Frame::Emphasis { inlines }
-                | Frame::Strong { inlines }
-                | Frame::Strikethrough { inlines }
+                | Frame::InlineSpan { inlines, .. }
                 | Frame::Link { inlines, .. }
                 | Frame::Image { inlines, .. },
             ) => {
@@ -511,13 +512,8 @@ enum Frame<'a> {
     TableCell {
         inlines: Vec<Inline<'a>>,
     },
-    Emphasis {
-        inlines: Vec<Inline<'a>>,
-    },
-    Strong {
-        inlines: Vec<Inline<'a>>,
-    },
-    Strikethrough {
+    InlineSpan {
+        kind: SpanKind,
         inlines: Vec<Inline<'a>>,
     },
     Link {
@@ -534,11 +530,31 @@ enum Frame<'a> {
     Ignored,
 }
 
+/// The kind of inline emphasis span an [`Frame::InlineSpan`] is collecting.
+#[derive(Debug, Clone, Copy)]
+enum SpanKind {
+    Emphasis,
+    Strong,
+    Strikethrough,
+}
+
+impl SpanKind {
+    fn into_inline(self, inlines: Vec<Inline<'_>>) -> Inline<'_> {
+        match self {
+            Self::Emphasis => Inline::Emphasis(inlines),
+            Self::Strong => Inline::Strong(inlines),
+            Self::Strikethrough => Inline::Strikethrough(inlines),
+        }
+    }
+}
+
 fn cow_str_to_text(text: CowStr<'_>) -> Text<'_> {
     match text {
         CowStr::Borrowed(text) => Text::borrowed(text),
         CowStr::Boxed(text) => Text::owned(text),
-        CowStr::Inlined(text) => Text::owned(text.to_string()),
+        // `Inlined` is pulldown-cmark's stack-allocated small string; keep it
+        // allocation-free by storing it inline instead of promoting to a `String`.
+        CowStr::Inlined(text) => Text::inline(&text),
     }
 }
 
