@@ -11,9 +11,9 @@ use crate::writer::write_spaces;
 /// A [`Write`] adapter that wraps UTF-8 text written through it at a maximum
 /// display width, breaking lines at word boundaries.
 ///
-/// Runs of spaces and tabs between words are kept verbatim when they fit on a
-/// line and dropped only at a wrap point, so inline code spans (whose interior
-/// spaces are significant) are not rewritten. Tabs count as one column.
+/// Runs of spaces between words are preserved when they fit on a line. Each tab
+/// becomes one space. These separators are dropped at line edges, including wrap
+/// points. An indivisible grapheme cluster may exceed the requested width.
 ///
 /// Callers must call [`WordWrapWriter::finish`] after the last write so any
 /// buffered content reaches the inner writer.

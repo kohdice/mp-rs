@@ -130,6 +130,7 @@ const fn resolve_color_mode(color_policy: ColorPolicy, env: Env) -> ColorMode {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fs;
     use std::io;
     use std::path::PathBuf;
@@ -196,13 +197,20 @@ mod tests {
     fn run_flushes_stdout_after_rendering() -> io::Result<()> {
         let file = write_temp_markdown("Hello\n")?;
         let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = CountingWriter::default();
+        let log = RefCell::new(Vec::new());
+        let mut stdout = RecordingWriter {
+            log: &log,
+            stream: OutputStream::Stdout,
+            remaining_bytes: None,
+            bytes: Vec::new(),
+        };
         let mut stderr = Vec::new();
 
         let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
 
         assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        assert_eq!(stdout.flush_count, 1);
+        assert_eq!(stdout.bytes, b"Hello\n");
+        assert_eq!(log.borrow().last(), Some(&WriterEvent::Flush(OutputStream::Stdout)));
         assert!(stderr.is_empty());
         fs::remove_file(file)?;
         Ok(())
@@ -270,22 +278,35 @@ mod tests {
     fn run_flushes_stdout_before_reporting_a_mid_stream_failure() -> io::Result<()> {
         let file = write_temp_markdown("a\n\nb\n")?;
         let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = RecordingWriter { writes_before_failure: Some(1), ..Default::default() };
-        let mut stderr = Vec::new();
+        let log = RefCell::new(Vec::new());
+        let mut stdout = RecordingWriter {
+            log: &log,
+            stream: OutputStream::Stdout,
+            remaining_bytes: Some(1),
+            bytes: Vec::new(),
+        };
+        let mut stderr = RecordingWriter {
+            log: &log,
+            stream: OutputStream::Stderr,
+            remaining_bytes: None,
+            bytes: Vec::new(),
+        };
 
         let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
 
         assert_eq!(exit_code, std::process::ExitCode::FAILURE);
+        assert_eq!(stdout.bytes, b"a");
+        assert!(utf8(stderr.bytes)?.contains("unable to write stdout"));
+        let events = log.borrow();
+        let diagnostic = events
+            .iter()
+            .position(|event| *event == WriterEvent::Write(OutputStream::Stderr))
+            .ok_or_else(|| io::Error::other("missing stderr diagnostic"))?;
         assert_eq!(
-            stdout.log.last(),
-            Some(&WriterEvent::Flush),
-            "stdout must be flushed on the error path",
+            events[..diagnostic].last(),
+            Some(&WriterEvent::Flush(OutputStream::Stdout)),
+            "partial stdout must be flushed before the stderr diagnostic",
         );
-        assert!(
-            stdout.log.contains(&WriterEvent::Write),
-            "the partial render must reach stdout before the flush",
-        );
-        assert!(utf8(stderr)?.contains("unable to write stdout"));
         fs::remove_file(file)?;
         Ok(())
     }
@@ -349,23 +370,6 @@ mod tests {
         String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    #[derive(Default)]
-    struct CountingWriter {
-        bytes: Vec<u8>,
-        flush_count: usize,
-    }
-
-    impl io::Write for CountingWriter {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.bytes.write(buffer)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            self.flush_count += 1;
-            self.bytes.flush()
-        }
-    }
-
     struct FailingWriter;
 
     impl io::Write for FailingWriter {
@@ -378,33 +382,47 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum OutputStream {
+        Stdout,
+        Stderr,
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     enum WriterEvent {
-        Write,
-        Flush,
+        Write(OutputStream),
+        Flush(OutputStream),
     }
 
-    /// Records the order of write and flush calls, optionally failing once a write budget
-    /// is exhausted, so tests can assert that stdout is flushed on the error path.
-    #[derive(Default)]
-    struct RecordingWriter {
-        log: Vec<WriterEvent>,
-        writes_before_failure: Option<usize>,
-        writes: usize,
+    /// Shares an event log across stdout and stderr to expose their ordering.
+    struct RecordingWriter<'a> {
+        log: &'a RefCell<Vec<WriterEvent>>,
+        stream: OutputStream,
+        remaining_bytes: Option<usize>,
+        bytes: Vec<u8>,
     }
 
-    impl io::Write for RecordingWriter {
+    impl io::Write for RecordingWriter<'_> {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.log.push(WriterEvent::Write);
-            self.writes += 1;
-            if self.writes_before_failure.is_some_and(|limit| self.writes > limit) {
-                return Err(io::Error::other("stdout exhausted"));
+            if buffer.is_empty() {
+                return Ok(0);
             }
-            Ok(buffer.len())
+            let accepted = if let Some(remaining) = &mut self.remaining_bytes {
+                if *remaining == 0 {
+                    return Err(io::Error::other("stdout exhausted"));
+                }
+                let accepted = buffer.len().min(*remaining);
+                *remaining -= accepted;
+                accepted
+            } else {
+                buffer.len()
+            };
+            self.log.borrow_mut().push(WriterEvent::Write(self.stream));
+            self.bytes.write(&buffer[..accepted])
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.log.push(WriterEvent::Flush);
+            self.log.borrow_mut().push(WriterEvent::Flush(self.stream));
             Ok(())
         }
     }

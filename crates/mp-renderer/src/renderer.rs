@@ -28,7 +28,12 @@ pub struct RenderOptions {
     pub palette: Palette,
     /// Syntax-highlighting theme for fenced code blocks; solarized dark by default.
     pub code_theme: CodeTheme,
-    /// Maximum display width of the output in columns; `None` means no limit.
+    /// Preferred layout width in terminal columns; `None` disables wrapping.
+    ///
+    /// Code and HTML blocks retain their source width. Minimum table widths,
+    /// list and quote prefixes, indivisible wide characters, and thematic breaks
+    /// (at least one column) can exceed this budget. Reflow converts each tab to
+    /// one space and drops separator spaces at line edges.
     pub width: Option<usize>,
 }
 
@@ -37,7 +42,7 @@ pub struct RenderOptions {
 pub enum ColorMode {
     /// Emit ANSI escape sequences for colors and text styles.
     Ansi,
-    /// Emit plain text without escape sequences.
+    /// Add no color or style escape sequences; preserve any present in the input.
     #[default]
     Plain,
 }
@@ -54,12 +59,12 @@ pub enum CodeTheme {
 
 /// Streaming render state threaded through [`Renderer::render_block`] calls.
 ///
-/// Tracks whether any bytes have been written and whether the output currently ends
-/// with a newline, so block separators and the final newline are emitted correctly.
+/// Tracks rendered content and pending trailing newlines between calls. Complete
+/// the output with [`Renderer::finish`] using the same writer and state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderState {
     has_rendered: bool,
-    ended_with_newline: bool,
+    pending_newlines: usize,
 }
 
 /// Per-call rendering position: the list nesting depth and the remaining usable
@@ -111,6 +116,9 @@ impl Renderer {
 
     /// Renders one top-level block and updates the streaming render state.
     ///
+    /// Trailing newlines are held until more content arrives or [`Self::finish`]
+    /// completes the output. Other bytes are written as the block is rendered.
+    ///
     /// # Errors
     ///
     /// Returns any I/O error reported by the writer.
@@ -124,7 +132,10 @@ impl Renderer {
         W: Write + ?Sized,
     {
         let context = RenderContext { depth: 0, width: self.options.width };
-        self.render_block_with_state(writer, block, context, state)
+        let mut writer = TrailingNewlineWriter { inner: writer, pending: state.pending_newlines };
+        let result = self.render_block_with_state(&mut writer, block, context, state);
+        state.pending_newlines = writer.pending;
+        result
     }
 
     /// Completes streaming rendering by terminating the output with a newline.
@@ -139,7 +150,7 @@ impl Renderer {
     where
         W: Write + ?Sized,
     {
-        if state.has_rendered && !state.ended_with_newline {
+        if state.has_rendered {
             writer.write_all(b"\n")?;
         }
         Ok(())
@@ -155,13 +166,12 @@ impl Renderer {
     where
         W: Write + ?Sized,
     {
-        let mut writer = NewlineTrackingWriter::new(writer, state.ended_with_newline);
+        let mut writer = OutputTrackingWriter { inner: writer, wrote_bytes: false };
         if state.has_rendered {
             writer.write_all(b"\n")?;
         }
         self.render_block_in_context(&mut writer, context, block)?;
-        state.has_rendered |= writer.wrote_bytes();
-        state.ended_with_newline = writer.ended_with_newline();
+        state.has_rendered |= writer.wrote_bytes;
         Ok(())
     }
 
@@ -179,8 +189,7 @@ impl Renderer {
             Block::BlockQuote(blockquote) => self.render_blockquote(writer, blockquote, context),
             Block::List(list) => self.render_list(writer, list, context, 0),
             Block::CodeBlock(code_block) => self.render_code_block(writer, code_block),
-            // Normalize to the no-trailing-newline shape every other block uses, so the
-            // streaming separator and `finish` logic stay correct.
+            // The next block's separator replaces the HTML source's final newline.
             Block::HtmlBlock(text) => {
                 writer.write_all(text.as_bytes().strip_suffix(b"\n").unwrap_or(text.as_bytes()))
             }
@@ -190,9 +199,7 @@ impl Renderer {
         }
     }
 
-    /// Draws the horizontal rule, capped at the available width so it never
-    /// overflows a narrow (or narrowed) context; an unlimited width uses the
-    /// default rule length.
+    /// A rule occupies at least one column, even when no layout width remains.
     fn render_thematic_break(
         &self,
         writer: &mut dyn Write,
@@ -663,10 +670,8 @@ impl Renderer {
         self.render_inlines_inner(writer, cell, body_style, LineBreak::Space)
     }
 
-    /// Measures a table cell's display width by rendering it through a width-counting
-    /// writer on the same code path as emission, so width and output cannot drift. The
-    /// render runs in plain mode so only the visible text reaches the counter; the ANSI
-    /// escapes a styled render would add are zero-width and must not be counted.
+    /// Measures the complete unwrapped cell in plain mode, excluding generated
+    /// style escapes. Unicode sequences may span multiple inline nodes.
     fn measure_cell(&self, cell: &[Inline<'_>]) -> usize {
         let plain = Renderer::new(RenderOptions { color: ColorMode::Plain, ..self.options });
         let body_style = TextStyle::default().fg(plain.options.palette.body);
@@ -740,52 +745,59 @@ fn blockquote_kind_label(kind: BlockQuoteKind) -> &'static str {
     }
 }
 
-struct NewlineTrackingWriter<'a, W>
+// A stream cannot retract bytes already written. Delay trailing newlines until
+// more content makes them interior separators, or `finish` replaces them with one.
+struct TrailingNewlineWriter<'a, W: Write + ?Sized> {
+    inner: &'a mut W,
+    pending: usize,
+}
+
+impl<W: Write + ?Sized> Write for TrailingNewlineWriter<'_, W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let content_end =
+            buffer.iter().rposition(|byte| *byte != b'\n').map_or(0, |index| index + 1);
+        if content_end == 0 {
+            self.pending += buffer.len();
+            return Ok(buffer.len());
+        }
+
+        write_repeated_str(self.inner, "\n", self.pending)?;
+        self.pending = 0;
+        let written = self.inner.write(&buffer[..content_end])?;
+        if written == content_end {
+            self.pending = buffer.len() - content_end;
+            Ok(buffer.len())
+        } else {
+            Ok(written)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct OutputTrackingWriter<'a, W>
 where
     W: Write + ?Sized,
 {
     inner: &'a mut W,
-    ended_with_newline: bool,
     wrote_bytes: bool,
 }
 
-impl<'a, W> NewlineTrackingWriter<'a, W>
-where
-    W: Write + ?Sized,
-{
-    fn new(inner: &'a mut W, ended_with_newline: bool) -> Self {
-        Self { inner, ended_with_newline, wrote_bytes: false }
-    }
-
-    fn ended_with_newline(&self) -> bool {
-        self.ended_with_newline
-    }
-
-    fn wrote_bytes(&self) -> bool {
-        self.wrote_bytes
-    }
-
-    fn track_bytes(&mut self, bytes: &[u8]) {
-        if let Some(last) = bytes.last() {
-            self.ended_with_newline = *last == b'\n';
-            self.wrote_bytes = true;
-        }
-    }
-}
-
-impl<W> Write for NewlineTrackingWriter<'_, W>
+impl<W> Write for OutputTrackingWriter<'_, W>
 where
     W: Write + ?Sized,
 {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let written = self.inner.write(buffer)?;
-        self.track_bytes(&buffer[..written]);
+        self.wrote_bytes |= written > 0;
         Ok(written)
     }
 
     fn write_all(&mut self, buffer: &[u8]) -> io::Result<()> {
         self.inner.write_all(buffer)?;
-        self.track_bytes(buffer);
+        self.wrote_bytes |= !buffer.is_empty();
         Ok(())
     }
 
@@ -1337,6 +1349,32 @@ mod tests {
     }
 
     #[test]
+    fn table_width_matches_split_unicode_sequences() -> io::Result<()> {
+        let joined = Block::Table(Table {
+            header: vec![vec![Inline::Text(Text::borrowed("👩\u{200d}💻"))]],
+            alignments: vec![Alignment::Left],
+            rows: vec![],
+        });
+        let split = Block::Table(Table {
+            header: vec![vec![
+                Inline::Text(Text::borrowed("👩")),
+                Inline::Text(Text::borrowed("\u{200d}💻")),
+            ]],
+            alignments: vec![Alignment::Left],
+            rows: vec![],
+        });
+
+        for color in [ColorMode::Plain, ColorMode::Ansi] {
+            let options = RenderOptions { color, ..Default::default() };
+            assert_eq!(
+                render_to_string(std::slice::from_ref(&split), options)?,
+                render_to_string(std::slice::from_ref(&joined), options)?,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn renders_tables_with_box_drawing_borders() -> io::Result<()> {
         let blocks = vec![Block::Table(Table {
             header: vec![
@@ -1816,20 +1854,67 @@ mod tests {
     }
 
     #[test]
+    fn trailing_blank_blocks_end_with_one_newline() -> io::Result<()> {
+        let blocks = [
+            paragraph("a"),
+            Block::BlankLine,
+            Block::BlankLine,
+            paragraph("b"),
+            Block::BlankLine,
+            Block::BlankLine,
+        ];
+
+        assert_eq!(render_plain(&blocks)?, "a\n\n\nb\n");
+        Ok(())
+    }
+
+    #[test]
+    fn trailing_html_newlines_end_with_one_newline() -> io::Result<()> {
+        let blocks = [Block::HtmlBlock(Text::borrowed("<div>\n\ncontent\n</div>\n\n\n"))];
+
+        assert_eq!(render_plain(&blocks)?, "<div>\n\ncontent\n</div>\n");
+        Ok(())
+    }
+
+    #[test]
+    fn short_writes_preserve_streaming_separators() -> io::Result<()> {
+        #[derive(Default)]
+        struct ShortWriter(Vec<u8>);
+
+        impl Write for ShortWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.write(&bytes[..bytes.len().min(2)])
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let renderer = Renderer::new(RenderOptions::default());
+        let mut output = ShortWriter::default();
+        let mut state = RenderState::default();
+
+        renderer.render_block(&mut output, &paragraph("alpha\n"), &mut state)?;
+        assert_eq!(output.0, b"alpha");
+        renderer.render_block(&mut output, &Block::BlankLine, &mut state)?;
+        renderer.render_block(&mut output, &paragraph("beta\n\n"), &mut state)?;
+        assert_eq!(output.0, b"alpha\n\n\nbeta");
+        renderer.finish(&mut output, &state)?;
+
+        assert_eq!(output.0, b"alpha\n\n\nbeta\n");
+        Ok(())
+    }
+
+    #[test]
     fn blank_line_between_paragraphs_still_renders_a_blank_separator_line() -> io::Result<()> {
         assert_eq!(render_plain(&[paragraph("a"), Block::BlankLine, paragraph("b")])?, "a\n\nb\n",);
         Ok(())
     }
 
     #[test]
-    fn finish_does_not_duplicate_an_existing_trailing_newline() -> io::Result<()> {
-        let blocks = vec![Block::List(List {
-            kind: ListKind::Unordered,
-            items: vec![list_item(None, "item")],
-            loose: false,
-        })];
-
-        assert_eq!(render_plain(&blocks)?, "• item\n");
+    fn finish_does_not_duplicate_a_source_trailing_newline() -> io::Result<()> {
+        assert_eq!(render_plain(&[paragraph("item\n")])?, "item\n");
         Ok(())
     }
 
@@ -1955,7 +2040,7 @@ mod tests {
     }
 
     #[test]
-    fn headings_wrap_and_keep_their_style_on_continuation_lines() -> io::Result<()> {
+    fn headings_keep_effective_style_on_each_wrapped_line() -> io::Result<()> {
         let blocks = vec![Block::Heading(Heading {
             level: HeadingLevel::H1,
             children: vec![Inline::Text(Text::borrowed("alpha beta gamma"))],
@@ -1966,13 +2051,43 @@ mod tests {
             RenderOptions { color: ColorMode::Ansi, width: Some(11), ..Default::default() },
         )?;
 
-        assert!(output.contains("alpha beta\ngamma"), "heading must wrap: {output:?}");
-        let first_newline = output.find('\n');
-        let style_reset = output.find("\x1b[0m");
-        assert!(
-            matches!((first_newline, style_reset), (Some(newline), Some(reset)) if reset > newline),
-            "the style must stay open across the wrapped line: {output:?}"
-        );
+        assert_eq!(strip_ansi(&output), "alpha beta\ngamma\n");
+        let heading_color = Palette::default().heading_colors[0];
+        let expected_color = format!("{};{};{}", heading_color.r, heading_color.g, heading_color.b);
+        let mut bold = false;
+        let mut underline = false;
+        let mut color = None;
+        let mut sequences = output.split("\x1b[");
+        assert!(sequences.next().is_some_and(|text| text.trim().is_empty()));
+        for sequence in sequences {
+            let (style_parameters, text) = sequence
+                .split_once('m')
+                .ok_or_else(|| io::Error::other("unterminated style sequence"))?;
+            let mut parameters = style_parameters.split(';');
+            while let Some(parameter) = parameters.next() {
+                match parameter {
+                    "" | "0" => {
+                        bold = false;
+                        underline = false;
+                        color = None;
+                    }
+                    "1" => bold = true,
+                    "4" => underline = true,
+                    "22" => bold = false,
+                    "24" => underline = false,
+                    "38" => {
+                        color = rgb_color_parameter(style_parameters);
+                        parameters.nth(3);
+                    }
+                    "39" => color = None,
+                    _ => {}
+                }
+            }
+            if text.chars().any(|ch| !ch.is_whitespace()) {
+                assert!(bold && underline, "heading text lost its emphasis: {text:?}");
+                assert_eq!(color.as_ref(), Some(&expected_color), "heading text: {text:?}");
+            }
+        }
         Ok(())
     }
 

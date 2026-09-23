@@ -17,8 +17,8 @@ pub(crate) fn list_marker<'a>(
 ) -> ListMarkerDisplay<'a> {
     match list.kind {
         ListKind::Ordered { start } => {
-            // CommonMark caps ordered-list starts at 9 digits, so this saturation is
-            // unobservable in practice; it only replaces a misclassified overflow error.
+            // Parsed starts are capped at 9 digits; saturation also prevents overflow
+            // for manually constructed lists with larger starts.
             let offset = u64::try_from(index).unwrap_or(u64::MAX);
             ListMarkerDisplay::OrderedGenerated(start.saturating_add(offset))
         }

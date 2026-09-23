@@ -24,7 +24,7 @@ mod tests {
     #[test]
     fn drops_a_trailing_incomplete_multibyte_sequence() {
         let bytes = "日本".as_bytes();
-        // "日" is 3 bytes; cutting after 4 bytes leaves one stray continuation byte.
+        // "日" is 3 bytes; the fourth byte starts the incomplete "本" sequence.
         assert_eq!(utf8_complete_prefix(&bytes[..4]), "日");
         assert_eq!(utf8_complete_prefix(&bytes[..3]), "日");
     }

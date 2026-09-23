@@ -39,8 +39,7 @@ impl std::error::Error for PreviewError {
 
 /// Renders Markdown text as a terminal preview.
 ///
-/// This is the pure core of the use case: it performs no file-system access, so callers
-/// own the input text and the writer.
+/// Callers supply the input text and output writer; this function does not open files.
 ///
 /// # Errors
 ///
@@ -167,10 +166,12 @@ mod tests {
         let renderer = mp_renderer::Renderer::new(RenderOptions::default());
         let blocks =
             vec![Ok(paragraph("hello")), Err(PreviewError::Write(io::Error::other("boom")))];
-        let mut writer = LimitedWriter { remaining_writes: 1, bytes: Vec::new() };
+        let mut writer = LimitedWriter { remaining_bytes: 5, bytes: Vec::new(), failed: false };
         let result = render_stream(&renderer, blocks.into_iter(), &mut writer);
 
-        assert!(matches!(result, Err(PreviewError::Write(_))));
+        assert!(matches!(result, Err(PreviewError::Write(error)) if error.to_string() == "boom"));
+        assert_eq!(writer.bytes, b"hello");
+        assert!(writer.failed, "finish must encounter a write failure");
     }
 
     fn paragraph(text: &'static str) -> mp_ast::Block<'static> {
@@ -194,19 +195,25 @@ mod tests {
         }
     }
 
-    /// A writer that accepts a bounded number of writes, then fails every later write.
+    /// Accepts a byte budget so failures do not depend on how writes are split.
     struct LimitedWriter {
-        remaining_writes: usize,
+        remaining_bytes: usize,
         bytes: Vec<u8>,
+        failed: bool,
     }
 
     impl Write for LimitedWriter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            if self.remaining_writes == 0 {
+            if buffer.is_empty() {
+                return Ok(0);
+            }
+            if self.remaining_bytes == 0 {
+                self.failed = true;
                 return Err(io::Error::other("exhausted writer"));
             }
-            self.remaining_writes -= 1;
-            self.bytes.write(buffer)
+            let accepted = buffer.len().min(self.remaining_bytes);
+            self.remaining_bytes -= accepted;
+            self.bytes.write(&buffer[..accepted])
         }
 
         fn flush(&mut self) -> io::Result<()> {

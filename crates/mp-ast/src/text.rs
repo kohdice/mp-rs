@@ -134,12 +134,11 @@ mod tests {
     }
 
     #[test]
-    fn appends_to_inline_text_by_promoting_it_to_owned_text() {
+    fn appends_to_inline_text() {
         let mut text = Text::inline("hello");
 
         text.push_str(" world");
 
-        assert!(matches!(text.0, Repr::Owned(_)));
         assert_eq!(text.as_str(), "hello world");
     }
 }

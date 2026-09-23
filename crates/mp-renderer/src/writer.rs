@@ -3,48 +3,28 @@ use std::io::{self, Write};
 use crate::utf8::utf8_complete_prefix;
 use crate::wrap::display_width;
 
-/// A [`Write`] sink that discards its bytes and accumulates the unicode display width of
-/// the UTF-8 text written through it. Measuring a cell by rendering it through this
-/// adapter keeps width measurement and emission on one code path, so they cannot drift.
+/// Buffers one rendered cell so Unicode sequences split across writes are
+/// measured together. A sequence's width need not equal its fragments' widths.
 #[derive(Debug, Default)]
 pub(crate) struct WidthMeasuringWriter {
-    width: usize,
-    carry: Vec<u8>,
+    bytes: Vec<u8>,
 }
 
 impl WidthMeasuringWriter {
     pub(crate) fn width(&self) -> usize {
-        self.width
+        display_width(utf8_complete_prefix(&self.bytes))
     }
 }
 
 impl Write for WidthMeasuringWriter {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if self.carry.is_empty() {
-            // Common case: measure straight from the caller's buffer and stash only a
-            // trailing incomplete sequence (at most 3 bytes), avoiding a full copy.
-            let (valid_up_to, width) = utf8_prefix_width(buffer);
-            self.width += width;
-            self.carry.extend_from_slice(&buffer[valid_up_to..]);
-        } else {
-            self.carry.extend_from_slice(buffer);
-            let (valid_up_to, width) = utf8_prefix_width(&self.carry);
-            self.width += width;
-            self.carry.drain(..valid_up_to);
-        }
+        self.bytes.extend_from_slice(buffer);
         Ok(buffer.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
-}
-
-/// Returns the length of the longest UTF-8-complete prefix of `bytes` and its unicode
-/// display width; any trailing incomplete scalar sequence is excluded from both.
-fn utf8_prefix_width(bytes: &[u8]) -> (usize, usize) {
-    let text = utf8_complete_prefix(bytes);
-    (text.len(), display_width(text))
 }
 
 const ESC: u8 = 0x1b;

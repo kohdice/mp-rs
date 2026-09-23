@@ -350,8 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn streams_top_level_blocks_without_buffering_the_complete_document() -> Result<(), ParseError>
-    {
+    fn returns_top_level_blocks_with_blank_line_separators() -> Result<(), ParseError> {
         let blocks = blocks("# Title\n\nHello\n").collect::<Result<Vec<_>, _>>()?;
 
         assert_eq!(

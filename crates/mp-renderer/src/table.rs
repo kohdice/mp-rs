@@ -43,9 +43,9 @@ fn table_total_width(widths: &[usize]) -> usize {
 /// Shrinks the tallest columns toward the next-tallest level until the table
 /// fits in `available`, never dropping a column below the minimum width.
 ///
-/// Each step lowers a whole front of equally-tall columns at once, so the loop
-/// runs in time proportional to the number of columns rather than to the amount
-/// of overflow (which a single wide cell can make arbitrarily large).
+/// Lowering tied columns together bounds the number of iterations by the column
+/// count, rather than by an arbitrarily wide cell's overflow. For n columns this
+/// takes O(n²) time and O(1) additional space because each iteration scans them.
 fn shrink_to_fit(widths: &mut [usize], available: usize) {
     loop {
         let Some(overflow) = table_total_width(widths).checked_sub(available) else {
