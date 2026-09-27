@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser as ClapParser, ValueEnum};
-use mp_preview::{ColorMode, ParseError, PreviewError, RenderOptions};
+use mp_preview::{ColorMode, Options};
 
 /// Facts about the execution environment, detected once at the binary edge
 /// (`main.rs`) and passed down so the rest of the CLI stays free of
@@ -68,7 +68,6 @@ enum ColorPolicy {
 #[derive(Debug)]
 enum CliError {
     Read { path: PathBuf, source: io::Error },
-    Parse { path: PathBuf, source: ParseError },
     WriteStdout(io::Error),
 }
 
@@ -77,9 +76,6 @@ impl fmt::Display for CliError {
         match self {
             Self::Read { path, source } => {
                 write!(formatter, "unable to read '{}': {source}", path.display())
-            }
-            Self::Parse { path, source } => {
-                write!(formatter, "unable to parse '{}': {source}", path.display())
             }
             Self::WriteStdout(source) => write!(formatter, "unable to write stdout: {source}"),
         }
@@ -90,7 +86,6 @@ impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read { source, .. } => Some(source),
-            Self::Parse { source, .. } => Some(source),
             Self::WriteStdout(source) => Some(source),
         }
     }
@@ -107,15 +102,8 @@ where
 {
     let markdown = std::fs::read_to_string(path)
         .map_err(|source| CliError::Read { path: path.to_path_buf(), source })?;
-    let options = RenderOptions {
-        color: resolve_color_mode(color_policy, env),
-        width: env.stdout_width,
-        ..RenderOptions::default()
-    };
-    mp_preview::preview(&markdown, options, stdout).map_err(|error| match error {
-        PreviewError::Parse(source) => CliError::Parse { path: path.to_path_buf(), source },
-        PreviewError::Write(source) => CliError::WriteStdout(source),
-    })
+    let options = Options { width: env.stdout_width, color: resolve_color_mode(color_policy, env) };
+    mp_preview::preview(&markdown, &options, stdout).map_err(CliError::WriteStdout)
 }
 
 const fn resolve_color_mode(color_policy: ColorPolicy, env: Env) -> ColorMode {

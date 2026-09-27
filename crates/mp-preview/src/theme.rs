@@ -1,45 +1,27 @@
-use mp_ast::HeadingLevel;
-
-/// Number of heading levels a [`Palette`] assigns colors to, tied to
-/// [`HeadingLevel`] so the palette and the enum cannot drift apart.
-pub const HEADING_LEVEL_COUNT: usize = HeadingLevel::COUNT;
+//! Terminal colors: the solarized dark palette for every styled span except
+//! syntax-highlighted code bodies, whose colors come from the syntect theme in
+//! `highlight.rs`.
 
 /// A 24-bit RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rgb {
-    /// Red channel.
+pub(crate) struct Rgb {
     pub r: u8,
-    /// Green channel.
     pub g: u8,
-    /// Blue channel.
     pub b: u8,
 }
 
-/// Colors a [`crate::Renderer`] uses for each kind of content.
-///
-/// The default palette is solarized dark.
+/// Colors layout uses for each kind of content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Palette {
-    /// Body text.
+pub(crate) struct Palette {
     pub body: Rgb,
     /// De-emphasized decorations such as quote bars and URL displays.
     pub muted: Rgb,
-    /// List and task markers.
     pub list_marker: Rgb,
-    /// Inline code spans.
     pub inline_code: Rgb,
-    /// Code block fences.
     pub code_fence: Rgb,
-    /// Link text.
     pub link: Rgb,
-    /// Heading colors, indexed by heading depth (`H1` first).
-    pub heading_colors: [Rgb; HEADING_LEVEL_COUNT],
-}
-
-impl Default for Palette {
-    fn default() -> Self {
-        solarized::DARK_PALETTE
-    }
+    /// Indexed by heading level minus one (`H1` first).
+    pub heading_colors: [Rgb; 6],
 }
 
 pub(crate) mod solarized {
