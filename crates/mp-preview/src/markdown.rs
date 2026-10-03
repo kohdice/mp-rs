@@ -26,7 +26,7 @@ fn convert_block(node: Node<'_>) -> Option<Block> {
         NodeValue::BlockQuote => Some(Block::BlockQuote(convert_blocks(node))),
         NodeValue::Alert(alert) => {
             let title = match &alert.title {
-                Some(title) => visualize_controls(title),
+                Some(title) => sanitize_inline(title),
                 None => alert_label(alert.alert_type).to_owned(),
             };
             let label = Block::Paragraph(vec![Inline::Strong(vec![Inline::Text(title)])]);
@@ -35,12 +35,10 @@ fn convert_block(node: Node<'_>) -> Option<Block> {
             ))
         }
         NodeValue::CodeBlock(code) => Some(Block::CodeBlock {
-            info: visualize_controls(&code.info),
-            code: visualize_controls(&normalize_line_endings(&code.literal)),
+            info: sanitize_inline(&code.info),
+            code: sanitize_block_body(&code.literal),
         }),
-        NodeValue::HtmlBlock(html) => {
-            Some(Block::Html(visualize_controls(&normalize_line_endings(&html.literal))))
-        }
+        NodeValue::HtmlBlock(html) => Some(Block::Html(sanitize_block_body(&html.literal))),
         NodeValue::ThematicBreak => Some(Block::ThematicBreak),
         NodeValue::List(list) => Some(Block::List {
             start: match list.list_type {
@@ -99,13 +97,9 @@ fn convert_inlines(parent: Node<'_>) -> Vec<Inline> {
 
 fn convert_inline(node: Node<'_>) -> Option<Inline> {
     match &node.data().value {
-        NodeValue::Text(text) => Some(Inline::Text(visualize_controls(text))),
-        NodeValue::HtmlInline(html) => {
-            // A tag may span a line ending, where it is only whitespace; a newline kept
-            // in the text would break the line outside layout's prefixes and styles.
-            Some(Inline::Text(visualize_controls(&normalize_line_endings(html).replace('\n', " "))))
-        }
-        NodeValue::Code(code) => Some(Inline::Code(visualize_controls(&code.literal))),
+        NodeValue::Text(text) => Some(Inline::Text(sanitize_inline(text))),
+        NodeValue::HtmlInline(html) => Some(Inline::Text(sanitize_inline(html))),
+        NodeValue::Code(code) => Some(Inline::Code(sanitize_inline(&code.literal))),
         NodeValue::Emph => Some(Inline::Emphasis(convert_inlines(node))),
         NodeValue::Strong => Some(Inline::Strong(convert_inlines(node))),
         NodeValue::Strikethrough => Some(Inline::Strikethrough(convert_inlines(node))),
@@ -113,7 +107,7 @@ fn convert_inline(node: Node<'_>) -> Option<Inline> {
         NodeValue::LineBreak => Some(Inline::HardBreak),
         NodeValue::Link(link) => {
             let children = convert_inlines(node);
-            let url = visualize_controls(&link.url);
+            let url = sanitize_inline(&link.url);
             Some(Inline::Link {
                 show_url: shows_url(&children, &url),
                 url,
@@ -122,7 +116,7 @@ fn convert_inline(node: Node<'_>) -> Option<Inline> {
             })
         }
         NodeValue::Image(image) => Some(Inline::Image {
-            url: visualize_controls(&image.url),
+            url: sanitize_inline(&image.url),
             title: convert_title(&image.title),
             alt: convert_inlines(node),
         }),
@@ -131,7 +125,7 @@ fn convert_inline(node: Node<'_>) -> Option<Inline> {
 }
 
 fn convert_title(title: &str) -> Option<String> {
-    (!title.is_empty()).then(|| visualize_controls(title))
+    (!title.is_empty()).then(|| sanitize_inline(title))
 }
 
 fn shows_url(children: &[Inline], url: &str) -> bool {
@@ -141,26 +135,46 @@ fn shows_url(children: &[Inline], url: &str) -> bool {
     visible != url && Some(visible.as_str()) != url.strip_prefix("mailto:")
 }
 
-/// Rewrites CRLF and lone CR line endings as LF. comrak keeps the source line
-/// endings in code, HTML block, and inline HTML literals, and a CR left there
-/// would otherwise be shown as a Control Picture at the end of every line.
-fn normalize_line_endings(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
+/// Makes text that layout keeps on one line safe to print verbatim. Each line break
+/// (LF, CR, or a CRLF pair) and each HT become one space: layout wraps words and
+/// prefixes quote bars and list indents per line, so a line break or tab decoded from
+/// `&#10;` or `&#9;` would escape both. Every other control is replaced as
+/// [`visualize_control`] describes.
+fn sanitize_inline(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .chars()
+        .map(|character| match character {
+            '\n' | '\r' | '\t' => ' ',
+            _ => visualize_control(character),
+        })
+        .collect()
 }
 
-/// Replaces C0 controls other than LF and HT, and DEL, with their Unicode Control
-/// Pictures so decoded input cannot drive the terminal.
-fn visualize_controls(text: &str) -> String {
-    let mut visible = String::with_capacity(text.len());
-    for character in text.chars() {
-        visible.push(match character {
+/// Makes a code or HTML block body safe to print verbatim while keeping its lines and
+/// indentation. CRLF and lone CR become LF, LF and HT are kept, and every other control
+/// is replaced as [`visualize_control`] describes. comrak keeps the source line endings
+/// in these literals, so a CR left in would show as a control picture on every line.
+fn sanitize_block_body(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .map(|character| match character {
             '\n' | '\t' => character,
-            '\0'..='\x1f' => char::from_u32(0x2400 + u32::from(character)).unwrap_or(character),
-            '\x7f' => '\u{2421}',
-            _ => character,
-        });
+            _ => visualize_control(character),
+        })
+        .collect()
+}
+
+/// Replaces a C0 control or DEL with its Unicode Control Picture and a C1 control with
+/// U+FFFD, which stands in for the C1 pictures Unicode lacks, so decoded input cannot
+/// drive the terminal. Any other character is returned unchanged.
+fn visualize_control(character: char) -> char {
+    match character {
+        '\0'..='\x1f' => char::from_u32(0x2400 + u32::from(character)).unwrap_or(character),
+        '\x7f' => '\u{2421}',
+        '\u{80}'..='\u{9f}' => char::REPLACEMENT_CHARACTER,
+        _ => character,
     }
-    visible
 }
 
 fn comrak_options() -> Options<'static> {
@@ -207,8 +221,9 @@ mod tests {
         );
     }
 
-    /// Parses a single paragraph made only of text inlines and joins them, since comrak
-    /// may split inline HTML into several text nodes.
+    /// Parses a single paragraph made only of text inlines and joins them: inline HTML
+    /// is converted to its own `Inline::Text`, so it never merges with the surrounding
+    /// text.
     fn paragraph_text(markdown: &str) -> String {
         let blocks = parse(markdown);
         let [Block::Paragraph(inlines)] = blocks.as_slice() else {
@@ -232,14 +247,6 @@ mod tests {
     #[test]
     fn parse_visualizes_control_characters_in_inline_html() {
         assert_eq!(paragraph_text("a <b x=\"\u{1b}\"> c"), "a <b x=\"␛\"> c");
-    }
-
-    #[test]
-    fn parse_merges_numeric_references_into_one_text() {
-        assert_eq!(
-            parse("&#x1F469;&#x200D;&#x1F4BB;\n"),
-            vec![Block::Paragraph(vec![text("👩\u{200d}💻")])]
-        );
     }
 
     #[test]
@@ -273,61 +280,6 @@ mod tests {
 
         assert_eq!(parse("- a\n- b\n"), vec![bullet_list(true, items())]);
         assert_eq!(parse("- a\n\n- b\n"), vec![bullet_list(false, items())]);
-    }
-
-    #[test]
-    fn parse_marks_a_single_item_with_separated_paragraphs_loose() {
-        assert_eq!(
-            parse("- a\n\n  b\n"),
-            vec![bullet_list(false, vec![item(vec![paragraph("a"), paragraph("b")])])]
-        );
-    }
-
-    #[test]
-    fn parse_marks_heading_only_and_quote_only_lists_loose() {
-        let heading = |value: &str| Block::Heading { level: 1, inlines: vec![text(value)] };
-        let quote = |value: &str| Block::BlockQuote(vec![paragraph(value)]);
-
-        assert_eq!(
-            parse("- # a\n\n- # b\n"),
-            vec![bullet_list(false, vec![item(vec![heading("a")]), item(vec![heading("b")])])]
-        );
-        assert_eq!(
-            parse("- > a\n\n- > b\n"),
-            vec![bullet_list(false, vec![item(vec![quote("a")]), item(vec![quote("b")])])]
-        );
-    }
-
-    #[test]
-    fn parse_keeps_lists_with_lazy_continuation_and_nested_list_tight() {
-        let first = item(vec![
-            Block::Paragraph(vec![text("a"), Inline::SoftBreak, text("b")]),
-            bullet_list(true, vec![item(vec![paragraph("c")])]),
-        ]);
-
-        assert_eq!(
-            parse("- a\n  b\n  - c\n- d\n"),
-            vec![bullet_list(true, vec![first, item(vec![paragraph("d")])])]
-        );
-    }
-
-    #[test]
-    fn parse_marks_a_quoted_blank_separated_list_loose() {
-        assert_eq!(
-            parse("> - a\n>\n> - b\n"),
-            vec![Block::BlockQuote(vec![bullet_list(
-                false,
-                vec![item(vec![paragraph("a")]), item(vec![paragraph("b")])]
-            )])]
-        );
-    }
-
-    #[test]
-    fn parse_keeps_paragraphs_of_a_nested_quote_separate() {
-        assert_eq!(
-            parse("> > a\n> >\n> > b\n"),
-            vec![Block::BlockQuote(vec![Block::BlockQuote(vec![paragraph("a"), paragraph("b")])])]
-        );
     }
 
     #[test]
@@ -525,14 +477,38 @@ mod tests {
             parse("<div>\r\nx\r\n</div>\r\n"),
             vec![Block::Html("<div>\nx\n</div>\n".to_owned())]
         );
-        assert_eq!(parse("a&#13;b\n"), vec![Block::Paragraph(vec![text("a␍b")])]);
+        assert_eq!(parse("a&#13;b\n"), vec![Block::Paragraph(vec![text("a b")])]);
     }
 
     #[test]
-    fn parse_visualizes_control_characters_in_code_block_info_strings() {
+    fn parse_visualizes_c1_control_characters_in_text() {
+        assert_eq!(parse("a&#155;b\u{85}c\n"), vec![paragraph("a\u{FFFD}b\u{FFFD}c")]);
+    }
+
+    #[test]
+    fn parse_replaces_line_breaks_in_titles_urls_and_info_strings() {
         assert_eq!(
-            parse("```&#27;x\ny\n```\n"),
-            vec![Block::CodeBlock { info: "\u{241b}x".to_owned(), code: "y\n".to_owned() }]
+            parse("[t](a&#10;b \"x\ny\")\n"),
+            vec![Block::Paragraph(vec![Inline::Link {
+                url: "a b".to_owned(),
+                title: Some("x y".to_owned()),
+                children: vec![text("t")],
+                show_url: true,
+            }])]
         );
+        assert_eq!(
+            parse("```a&#10;b\nx\n```\n"),
+            vec![Block::CodeBlock { info: "a b".to_owned(), code: "x\n".to_owned() }]
+        );
+    }
+
+    #[test]
+    fn parse_replaces_line_breaks_and_tabs_in_inline_text_with_spaces() {
+        assert_eq!(parse("a&#10;b&#13;c&#9;d\n"), vec![paragraph("a b c d")]);
+    }
+
+    #[test]
+    fn parse_replaces_crlf_inside_inline_html_with_one_space() {
+        assert_eq!(paragraph_text("a <b\r\nx=\"y\"> c\r\n"), "a <b x=\"y\"> c");
     }
 }

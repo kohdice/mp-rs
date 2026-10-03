@@ -71,9 +71,12 @@ These are guarantees the code relies on; changing one requires updating its cons
   carry across lines.
 - **External libraries stay at the edges.** Only `markdown` names a comrak type and only
   `highlight` names a syntect type. The comrak arena never escapes `markdown::parse`.
-- **Text is safe once it leaves `markdown`.** C0 control characters other than newline and
-  tab, and DEL, are replaced with Unicode control pictures during conversion, including
-  characters decoded from references, so later stages can print text verbatim.
+- **Text is safe once it leaves `markdown`.** Inline text, inline code, URLs, titles, alert
+  titles, and code-fence info strings contain no line breaks or tabs: LF, CR, and HT become
+  one space. Code and HTML block bodies keep LF and HT, with CR and CRLF normalized to LF.
+  Everywhere, the remaining C0 control characters and DEL are replaced with Unicode control
+  pictures and C1 control characters with U+FFFD, including characters decoded from
+  references, so later stages can print text verbatim.
 - **Non-empty output ends with exactly one trailing newline.** `preview` appends the newline
   to every encoded block, and empty input writes nothing.
 - **Width handling is the library's job.** The binary only detects whether stdout is a

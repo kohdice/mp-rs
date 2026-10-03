@@ -139,7 +139,7 @@ impl Wrapper {
 
     fn push_text(&mut self, text: &str, style: Style) {
         let mut rest = text;
-        while let Some(index) = rest.find([' ', '\t']) {
+        while let Some(index) = rest.find(' ') {
             self.push_word_part(&rest[..index], style);
             self.place_word();
             if self.gap == 0 {

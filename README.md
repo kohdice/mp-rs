@@ -31,9 +31,8 @@ items, and blockquotes reflow at word boundaries, and tables shrink their widest
 below which a very wide table can still overflow. A word wider than the available width
 is split between characters, never inside one. Code and HTML blocks are never wrapped.
 Prefixes, indivisible wide characters, and thematic breaks (at least one column) can also
-exceed a narrow width. Reflow treats tabs as spaces and drops separator spaces at line
-edges. When stdout is piped or redirected, no width limit applies and the content keeps
-its natural width.
+exceed a narrow width. Reflow drops separator spaces at line edges. When stdout is piped
+or redirected, no width limit applies and the content keeps its natural width.
 
 ### Rendering
 
@@ -42,10 +41,11 @@ its natural width.
   by a blank line only when the list is loose.
 - Links show their URL in parentheses after the text, unless the text already is the URL.
 - Alerts render as blockquotes whose first line is the alert label or its custom title.
-- Tabs in code and HTML blocks expand to 4-column tab stops.
-- Control characters, including ones written as references such as `&#27;`, are shown as
-  control pictures such as `␛` so a document can never inject escape sequences into the
-  terminal.
+- Tabs in code and HTML blocks expand to 4-column tab stops; elsewhere a tab, or a line
+  break written as a reference such as `&#10;`, renders as one space.
+- Other control characters, including ones written as references such as `&#27;`, are
+  shown as control pictures such as `␛`, and C1 control characters such as `&#155;` as
+  `�`, so a document can never inject escape sequences into the terminal.
 
 ### Exit status
 
