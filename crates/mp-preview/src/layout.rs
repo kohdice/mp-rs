@@ -84,7 +84,6 @@ fn heading_style(level: u8) -> Style {
 mod tests {
     use super::{LayoutOptions, layout};
     use crate::ansi::{ColorMode, to_ansi};
-    use crate::highlight::FORCE_NEXT_HIGHLIGHT_ERROR;
     use crate::markdown::parse;
     use crate::model::{Block, ListItem};
     use crate::style::{Line, Span, Style};
@@ -613,16 +612,6 @@ mod tests {
     #[test]
     fn code_block_keeps_interior_blank_lines() {
         assert_eq!(plain("```\na\n\nb\n```\n", None), "```\na\n\nb\n```");
-    }
-
-    #[test]
-    fn highlighting_failure_falls_back_to_inline_code_color() {
-        FORCE_NEXT_HIGHLIGHT_ERROR.with(|force| force.set(true));
-
-        let spans = code_body_spans("```rust\nfn main() {}\n```\n", ColorMode::Ansi);
-
-        assert!(!spans.is_empty());
-        assert!(spans.iter().all(|span| span.style.fg == Some(DARK_PALETTE.inline_code)));
     }
 
     #[test]

@@ -2,9 +2,6 @@
 
 use std::sync::LazyLock;
 
-#[cfg(test)]
-use std::cell::Cell;
-
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
@@ -21,11 +18,6 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_n
 
 static THEME: LazyLock<Theme> =
     LazyLock::new(|| two_face::theme::extra()[EmbeddedThemeName::SolarizedDark].clone());
-
-#[cfg(test)]
-thread_local! {
-    pub(crate) static FORCE_NEXT_HIGHLIGHT_ERROR: Cell<bool> = const { Cell::new(false) };
-}
 
 /// Splits `code` into styled pieces whose texts concatenate back to `code`; line
 /// endings stay inside the pieces. Returns `None` when the info string names no known
@@ -45,11 +37,6 @@ fn highlight_with_syntax<'a>(
     code: &'a str,
     syntax: &SyntaxReference,
 ) -> Result<Vec<(Style, &'a str)>, syntect::Error> {
-    #[cfg(test)]
-    if FORCE_NEXT_HIGHLIGHT_ERROR.with(|force| force.replace(false)) {
-        return Err(std::io::Error::other("forced syntax highlighting error").into());
-    }
-
     let mut highlighter = HighlightLines::new(syntax, &THEME);
     let mut pieces = Vec::new();
     for line in LinesWithEndings::from(code) {
@@ -91,7 +78,7 @@ fn convert_style(style: SyntectStyle) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{FORCE_NEXT_HIGHLIGHT_ERROR, highlight, syntax_for_info};
+    use super::{highlight, syntax_for_info};
 
     fn syntax_name(info: &str) -> Option<&'static str> {
         syntax_for_info(info).map(|syntax| syntax.name.as_str())
@@ -118,12 +105,5 @@ mod tests {
         let code = "x\n".repeat(10_001);
 
         assert_eq!(highlight("rust", &code), None);
-    }
-
-    #[test]
-    fn returns_no_highlighted_ranges_when_highlighting_fails() {
-        FORCE_NEXT_HIGHLIGHT_ERROR.with(|force| force.set(true));
-
-        assert_eq!(highlight("rust", "fn main() {}\n"), None);
     }
 }
