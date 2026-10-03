@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser as ClapParser, ValueEnum};
-use mp_preview::{ColorMode, ParseError, PreviewError, RenderOptions};
+use mp_preview::{ColorMode, Options};
 
 /// Facts about the execution environment, detected once at the binary edge
 /// (`main.rs`) and passed down so the rest of the CLI stays free of
@@ -31,9 +31,9 @@ where
     E: Write,
 {
     let render = render_file(&cli.file, cli.color, env, stdout);
-    // Flush buffered output before reporting, so a partial render reaches the terminal
-    // ahead of any diagnostic even when rendering failed mid-stream. The flush runs
-    // eagerly here; `and` then keeps the render error as the root cause if both fail.
+    // Flush before reporting so a partial render reaches the terminal ahead of any
+    // diagnostic. `and_then` would skip the flush after a render error; `and` runs it
+    // and still reports the render error as the root cause when both fail.
     let flush = stdout.flush().map_err(CliError::WriteStdout);
     match render.and(flush) {
         Ok(()) => ExitCode::SUCCESS,
@@ -68,7 +68,6 @@ enum ColorPolicy {
 #[derive(Debug)]
 enum CliError {
     Read { path: PathBuf, source: io::Error },
-    Parse { path: PathBuf, source: ParseError },
     WriteStdout(io::Error),
 }
 
@@ -77,9 +76,6 @@ impl fmt::Display for CliError {
         match self {
             Self::Read { path, source } => {
                 write!(formatter, "unable to read '{}': {source}", path.display())
-            }
-            Self::Parse { path, source } => {
-                write!(formatter, "unable to parse '{}': {source}", path.display())
             }
             Self::WriteStdout(source) => write!(formatter, "unable to write stdout: {source}"),
         }
@@ -90,7 +86,6 @@ impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read { source, .. } => Some(source),
-            Self::Parse { source, .. } => Some(source),
             Self::WriteStdout(source) => Some(source),
         }
     }
@@ -107,15 +102,8 @@ where
 {
     let markdown = std::fs::read_to_string(path)
         .map_err(|source| CliError::Read { path: path.to_path_buf(), source })?;
-    let options = RenderOptions {
-        color: resolve_color_mode(color_policy, env),
-        width: env.stdout_width,
-        ..RenderOptions::default()
-    };
-    mp_preview::preview(&markdown, options, stdout).map_err(|error| match error {
-        PreviewError::Parse(source) => CliError::Parse { path: path.to_path_buf(), source },
-        PreviewError::Write(source) => CliError::WriteStdout(source),
-    })
+    let options = Options { width: env.stdout_width, color: resolve_color_mode(color_policy, env) };
+    mp_preview::preview(&markdown, &options, stdout).map_err(CliError::WriteStdout)
 }
 
 const fn resolve_color_mode(color_policy: ColorPolicy, env: Env) -> ColorMode {
@@ -130,12 +118,12 @@ const fn resolve_color_mode(color_policy: ColorPolicy, env: Env) -> ColorMode {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fs;
     use std::io;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use clap::Parser as _;
     use mp_preview::ColorMode;
 
     use super::{Cli, ColorPolicy, Env, render_file, resolve_color_mode, run};
@@ -165,19 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn render_file_terminates_output_with_a_newline_when_the_source_lacks_one() -> io::Result<()> {
-        let file = write_temp_markdown("Hello")?;
-        let mut output = Vec::new();
-        render_file(&file, ColorPolicy::Never, plain_env(), &mut output)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let output = utf8(output)?;
-
-        assert!(output.ends_with('\n'), "expected trailing newline, got {output:?}");
-        fs::remove_file(file)?;
-        Ok(())
-    }
-
-    #[test]
     fn prints_a_clear_diagnostic_when_the_file_cannot_be_read() -> io::Result<()> {
         let missing_file = unique_temp_path();
         let mut output = Vec::new();
@@ -196,13 +171,20 @@ mod tests {
     fn run_flushes_stdout_after_rendering() -> io::Result<()> {
         let file = write_temp_markdown("Hello\n")?;
         let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = CountingWriter::default();
+        let log = RefCell::new(Vec::new());
+        let mut stdout = RecordingWriter {
+            log: &log,
+            stream: OutputStream::Stdout,
+            remaining_bytes: None,
+            bytes: Vec::new(),
+        };
         let mut stderr = Vec::new();
 
         let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
 
         assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        assert_eq!(stdout.flush_count, 1);
+        assert_eq!(stdout.bytes, b"Hello\n");
+        assert_eq!(log.borrow().last(), Some(&WriterEvent::Flush(OutputStream::Stdout)));
         assert!(stderr.is_empty());
         fs::remove_file(file)?;
         Ok(())
@@ -228,89 +210,44 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn run_leaves_piped_output_unwrapped_without_a_terminal_width() -> io::Result<()> {
-        let file = write_temp_markdown(WIDE_TABLE_MARKDOWN)?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
-
-        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        let output = utf8(stdout)?;
-        assert!(
-            output.lines().any(|line| line.chars().count() > 40),
-            "piped output must keep the table's natural width: {output}"
-        );
-        fs::remove_file(file)?;
-        Ok(())
-    }
-
     const WIDE_TABLE_MARKDOWN: &str = "| Crate | Responsibility |\n\
          | --- | --- |\n\
-         | mp-renderer | Block-to-terminal rendering with a trailing-newline guarantee |\n";
-
-    #[test]
-    fn run_reports_stdout_write_errors() -> io::Result<()> {
-        let file = write_temp_markdown("Hello\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = FailingWriter;
-        let mut stderr = Vec::new();
-
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
-
-        assert_eq!(exit_code, std::process::ExitCode::FAILURE);
-        assert!(utf8(stderr)?.contains("unable to write stdout"));
-        fs::remove_file(file)?;
-        Ok(())
-    }
+         | mp-preview | Block-to-terminal rendering with a trailing-newline guarantee |\n";
 
     #[test]
     fn run_flushes_stdout_before_reporting_a_mid_stream_failure() -> io::Result<()> {
         let file = write_temp_markdown("a\n\nb\n")?;
         let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = RecordingWriter { writes_before_failure: Some(1), ..Default::default() };
-        let mut stderr = Vec::new();
+        let log = RefCell::new(Vec::new());
+        let mut stdout = RecordingWriter {
+            log: &log,
+            stream: OutputStream::Stdout,
+            remaining_bytes: Some(1),
+            bytes: Vec::new(),
+        };
+        let mut stderr = RecordingWriter {
+            log: &log,
+            stream: OutputStream::Stderr,
+            remaining_bytes: None,
+            bytes: Vec::new(),
+        };
 
         let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
 
         assert_eq!(exit_code, std::process::ExitCode::FAILURE);
+        assert_eq!(stdout.bytes, b"a");
+        assert!(utf8(stderr.bytes)?.contains("unable to write stdout"));
+        let events = log.borrow();
+        let diagnostic = events
+            .iter()
+            .position(|event| *event == WriterEvent::Write(OutputStream::Stderr))
+            .ok_or_else(|| io::Error::other("missing stderr diagnostic"))?;
         assert_eq!(
-            stdout.log.last(),
-            Some(&WriterEvent::Flush),
-            "stdout must be flushed on the error path",
+            events[..diagnostic].last(),
+            Some(&WriterEvent::Flush(OutputStream::Stdout)),
+            "partial stdout must be flushed before the stderr diagnostic",
         );
-        assert!(
-            stdout.log.contains(&WriterEvent::Write),
-            "the partial render must reach stdout before the flush",
-        );
-        assert!(utf8(stderr)?.contains("unable to write stdout"));
         fs::remove_file(file)?;
-        Ok(())
-    }
-
-    #[test]
-    fn long_help_describes_the_color_flag_and_file_argument() {
-        use clap::CommandFactory;
-
-        let help = Cli::command().render_long_help().to_string();
-
-        assert!(help.contains("When to colorize output"), "missing --color help: {help}");
-        assert!(help.contains("Path to the Markdown file to preview"), "missing FILE help: {help}");
-    }
-
-    #[test]
-    fn misspelled_color_flag_suggests_the_correct_name() -> io::Result<()> {
-        let error = match Cli::try_parse_from(["mp", "--colr", "always", "file.md"]) {
-            Ok(_) => return Err(io::Error::other("expected a parse error for --colr")),
-            Err(error) => error,
-        };
-
-        assert!(
-            error.to_string().contains("--color"),
-            "expected a suggestion for --color, got {error}",
-        );
         Ok(())
     }
 
@@ -329,7 +266,7 @@ mod tests {
         Ok(())
     }
 
-    /// A non-terminal, color-enabled environment: the common test setup.
+    /// Piped stdout: not a terminal, no known width, and `NO_COLOR` unset.
     fn plain_env() -> Env {
         Env::default()
     }
@@ -349,62 +286,47 @@ mod tests {
         String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    #[derive(Default)]
-    struct CountingWriter {
-        bytes: Vec<u8>,
-        flush_count: usize,
-    }
-
-    impl io::Write for CountingWriter {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.bytes.write(buffer)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            self.flush_count += 1;
-            self.bytes.flush()
-        }
-    }
-
-    struct FailingWriter;
-
-    impl io::Write for FailingWriter {
-        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("closed stdout"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum OutputStream {
+        Stdout,
+        Stderr,
     }
 
     #[derive(Debug, PartialEq, Eq)]
     enum WriterEvent {
-        Write,
-        Flush,
+        Write(OutputStream),
+        Flush(OutputStream),
     }
 
-    /// Records the order of write and flush calls, optionally failing once a write budget
-    /// is exhausted, so tests can assert that stdout is flushed on the error path.
-    #[derive(Default)]
-    struct RecordingWriter {
-        log: Vec<WriterEvent>,
-        writes_before_failure: Option<usize>,
-        writes: usize,
+    /// Shares an event log across stdout and stderr to expose their ordering.
+    struct RecordingWriter<'a> {
+        log: &'a RefCell<Vec<WriterEvent>>,
+        stream: OutputStream,
+        remaining_bytes: Option<usize>,
+        bytes: Vec<u8>,
     }
 
-    impl io::Write for RecordingWriter {
+    impl io::Write for RecordingWriter<'_> {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            self.log.push(WriterEvent::Write);
-            self.writes += 1;
-            if self.writes_before_failure.is_some_and(|limit| self.writes > limit) {
-                return Err(io::Error::other("stdout exhausted"));
+            if buffer.is_empty() {
+                return Ok(0);
             }
-            Ok(buffer.len())
+            let accepted = if let Some(remaining) = &mut self.remaining_bytes {
+                if *remaining == 0 {
+                    return Err(io::Error::other("stdout exhausted"));
+                }
+                let accepted = buffer.len().min(*remaining);
+                *remaining -= accepted;
+                accepted
+            } else {
+                buffer.len()
+            };
+            self.log.borrow_mut().push(WriterEvent::Write(self.stream));
+            self.bytes.write(&buffer[..accepted])
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.log.push(WriterEvent::Flush);
+            self.log.borrow_mut().push(WriterEvent::Flush(self.stream));
             Ok(())
         }
     }

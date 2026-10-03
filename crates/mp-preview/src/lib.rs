@@ -1,192 +1,142 @@
-//! The preview use case: composes parsing and rendering.
+//! Renders Markdown as styled terminal text.
 //!
-//! This is the only crate the `mp` binary depends on directly. [`preview`] renders
-//! Markdown text to a writer; callers own the file-system read so they can attach their
-//! own path-bearing error context.
+//! [`preview`] is the whole public surface: callers own reading the input so they can
+//! attach their own path-bearing error context, and choose the width and [`ColorMode`]
+//! through [`Options`].
 
-use std::fmt;
+mod ansi;
+mod highlight;
+mod layout;
+mod markdown;
+mod model;
+mod style;
+mod theme;
+
 use std::io::{self, Write};
 
-pub use mp_parser::ParseError;
-pub use mp_renderer::{CodeTheme, ColorMode, HEADING_LEVEL_COUNT, Palette, RenderOptions, Rgb};
+pub use ansi::ColorMode;
 
-/// Failure modes of the preview use case.
-#[derive(Debug)]
-pub enum PreviewError {
-    /// The Markdown event stream was structurally inconsistent.
-    Parse(mp_parser::ParseError),
-    /// The writer reported an I/O error while rendering.
-    Write(io::Error),
+use layout::lay_out_block;
+
+/// How [`preview`] lays out and encodes its output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Maximum display width in terminal columns; `None` disables wrapping.
+    pub width: Option<usize>,
+    /// Whether the output carries ANSI styling.
+    pub color: ColorMode,
 }
 
-impl fmt::Display for PreviewError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Parse(_) => formatter.write_str("unable to parse the Markdown document"),
-            Self::Write(_) => formatter.write_str("unable to write the rendered preview"),
-        }
-    }
-}
-
-impl std::error::Error for PreviewError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Write(source) => Some(source),
-            Self::Parse(source) => Some(source),
-        }
-    }
-}
-
-/// Renders Markdown text as a terminal preview.
+/// Renders `markdown` as a terminal preview into `out`.
 ///
-/// This is the pure core of the use case: it performs no file-system access, so callers
-/// own the input text and the writer.
+/// Empty input writes nothing; any other output ends with exactly one newline.
+/// Top-level blocks are separated by one blank line, and each is written to `out`
+/// before the next is laid out. A block that lays out to no lines, such as an empty
+/// heading, is skipped along with its separator.
 ///
 /// # Errors
 ///
-/// Returns [`PreviewError::Parse`] if the Markdown event stream is structurally
-/// inconsistent, or [`PreviewError::Write`] if the writer reports an I/O error.
-pub fn preview<W>(
-    markdown: &str,
-    options: RenderOptions,
-    writer: &mut W,
-) -> Result<(), PreviewError>
-where
-    W: Write,
-{
-    let renderer = mp_renderer::Renderer::new(options);
-    let blocks = mp_parser::blocks(markdown).map(|result| result.map_err(PreviewError::Parse));
-    render_stream(&renderer, blocks, writer)
-}
-
-/// Renders a stream of already-mapped blocks, terminating the output with a trailing
-/// newline.
-///
-/// Errors yielded by the iterator are propagated as-is; the parser→`PreviewError`
-/// mapping is the caller's responsibility, which lets tests drive the error path with
-/// constructible [`PreviewError`] variants.
-fn render_stream<'a, W, I>(
-    renderer: &mp_renderer::Renderer,
-    blocks: I,
-    writer: &mut W,
-) -> Result<(), PreviewError>
-where
-    W: Write,
-    I: Iterator<Item = Result<mp_ast::Block<'a>, PreviewError>>,
-{
-    let mut state = mp_renderer::RenderState::default();
-    for block in blocks {
-        let block = match block {
-            Ok(block) => block,
-            Err(error) => {
-                // Terminate any partial output so the trailing-newline invariant holds on the
-                // error path too. The stream error is the root cause and outranks a secondary
-                // write failure from `finish`, so its result is deliberately discarded.
-                let _ = renderer.finish(writer, &state);
-                return Err(error);
-            }
-        };
-        renderer.render_block(writer, &block, &mut state).map_err(PreviewError::Write)?;
+/// Returns the first error reported by `out`, leaving the blocks written before it in
+/// place. Parsing never fails.
+pub fn preview<W: Write>(markdown: &str, options: &Options, out: &mut W) -> io::Result<()> {
+    let mut wrote_block = false;
+    for block in &markdown::parse(markdown) {
+        let lines = lay_out_block(block, options.width, options.color, 0);
+        if lines.is_empty() {
+            continue;
+        }
+        let mut encoded = if wrote_block { String::from("\n") } else { String::new() };
+        wrote_block = true;
+        encoded.push_str(&ansi::to_ansi(&lines, options.color));
+        encoded.push('\n');
+        out.write_all(encoded.as_bytes())?;
     }
-    renderer.finish(writer, &state).map_err(PreviewError::Write)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::io;
+
+    use super::{Options, preview};
 
     #[test]
-    fn reexports_let_callers_build_a_palette_without_reaching_into_mp_renderer() {
-        let color = Rgb { r: 1, g: 2, b: 3 };
-        let palette =
-            Palette { heading_colors: [color; HEADING_LEVEL_COUNT], ..Palette::default() };
-
-        assert!(palette.heading_colors.iter().all(|&value| value == color));
-    }
-
-    #[test]
-    fn preview_renders_markdown_text_to_the_writer() -> Result<(), PreviewError> {
+    fn preview_writes_nothing_for_empty_input() -> io::Result<()> {
         let mut output = Vec::new();
-        preview("# Title\n\nHello\n", RenderOptions::default(), &mut output)?;
 
-        let rendered = String::from_utf8(output).map_err(|error| {
-            PreviewError::Write(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-        })?;
-        assert_eq!(rendered, "Title\n\nHello\n");
+        preview("", &Options::default(), &mut output)?;
+
+        assert!(output.is_empty(), "expected no bytes, got {output:?}");
         Ok(())
     }
 
     #[test]
-    fn preview_reports_writer_failures_as_write_errors() {
-        let mut writer = FailingWriter;
-        let result = preview("Hello\n", RenderOptions::default(), &mut writer);
-
-        assert!(matches!(result, Err(PreviewError::Write(_))));
-    }
-
-    #[test]
-    fn preview_error_exposes_the_underlying_cause_via_source() {
-        use std::error::Error;
-
-        let error = PreviewError::Write(io::Error::other("disk full"));
-
-        assert!(!error.to_string().is_empty());
-        let source = error.source();
-        assert!(source.is_some_and(|cause| cause.to_string().contains("disk full")));
-    }
-
-    #[test]
-    fn stream_errors_after_partial_output_still_terminate_with_a_newline()
-    -> Result<(), PreviewError> {
-        let renderer = mp_renderer::Renderer::new(RenderOptions::default());
-        let blocks =
-            vec![Ok(paragraph("hello")), Err(PreviewError::Write(io::Error::other("boom")))];
-        let mut output = Vec::new();
-        let result = render_stream(&renderer, blocks.into_iter(), &mut output);
-
-        assert!(matches!(result, Err(PreviewError::Write(_))));
-        assert_eq!(utf8(output)?, "hello\n");
+    fn preview_separates_top_level_blocks_with_one_blank_line() -> io::Result<()> {
+        assert_eq!(plain("# Title\n\n\n\nHello\n")?, "Title\n\nHello\n");
         Ok(())
     }
 
     #[test]
-    fn stream_errors_before_any_output_write_nothing() -> Result<(), PreviewError> {
-        let renderer = mp_renderer::Renderer::new(RenderOptions::default());
-        let blocks: Vec<Result<mp_ast::Block<'_>, PreviewError>> =
-            vec![Err(PreviewError::Write(io::Error::other("boom")))];
-        let mut output = Vec::new();
-        let result = render_stream(&renderer, blocks.into_iter(), &mut output);
-
-        assert!(matches!(result, Err(PreviewError::Write(_))));
-        assert_eq!(utf8(output)?, "");
+    fn preview_separates_blocks_even_without_a_source_blank_line() -> io::Result<()> {
+        assert_eq!(plain("```\nx\n```\nb\n")?, "```\nx\n```\n\nb\n");
         Ok(())
     }
 
     #[test]
-    fn stream_errors_outrank_finish_write_failures() {
-        let renderer = mp_renderer::Renderer::new(RenderOptions::default());
-        let blocks =
-            vec![Ok(paragraph("hello")), Err(PreviewError::Write(io::Error::other("boom")))];
-        let mut writer = LimitedWriter { remaining_writes: 1, bytes: Vec::new() };
-        let result = render_stream(&renderer, blocks.into_iter(), &mut writer);
-
-        assert!(matches!(result, Err(PreviewError::Write(_))));
+    fn preview_ends_non_empty_output_with_exactly_one_newline() -> io::Result<()> {
+        assert_eq!(plain("Hello")?, "Hello\n");
+        assert_eq!(plain("Hello\n\n\n")?, "Hello\n");
+        Ok(())
     }
 
-    fn paragraph(text: &'static str) -> mp_ast::Block<'static> {
-        mp_ast::Block::Paragraph(vec![mp_ast::Inline::Text(mp_ast::Text::borrowed(text))])
+    #[test]
+    fn preview_skips_empty_headings_between_blocks() -> io::Result<()> {
+        assert_eq!(plain("a\n\n#\n\nb\n")?, "a\n\nb\n");
+        Ok(())
     }
 
-    fn utf8(bytes: Vec<u8>) -> Result<String, PreviewError> {
-        String::from_utf8(bytes)
-            .map_err(|error| PreviewError::Write(io::Error::new(io::ErrorKind::InvalidData, error)))
+    #[test]
+    fn preview_visualizes_control_characters_from_references() -> io::Result<()> {
+        assert_eq!(plain("&#27;[2J&#27;[HHello\n")?, "\u{241b}[2J\u{241b}[HHello\n");
+        Ok(())
     }
 
-    struct FailingWriter;
+    #[test]
+    fn preview_keeps_quote_bars_when_text_contains_a_line_feed_reference() -> io::Result<()> {
+        assert_eq!(plain("> a&#10;b\n")?, "\u{2502} a b\n");
+        Ok(())
+    }
 
-    impl Write for FailingWriter {
-        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("closed writer"))
+    #[test]
+    fn preview_drops_whitespace_only_trailing_lines_of_an_unclosed_html_block() -> io::Result<()> {
+        assert_eq!(plain("<!--\nfoo\n  \n")?, "<!--\nfoo\n");
+        Ok(())
+    }
+
+    #[test]
+    fn preview_writes_earlier_blocks_before_later_ones_fail() {
+        let mut writer = FirstWriteOnly { bytes: Vec::new(), writes: 0 };
+
+        let result = preview("a\n\nb\n", &Options::default(), &mut writer);
+
+        assert!(result.is_err());
+        assert_eq!(writer.bytes, b"a\n");
+    }
+
+    /// Accepts its first `write` call in full and fails every later one.
+    struct FirstWriteOnly {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+
+    impl io::Write for FirstWriteOnly {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.writes > 1 {
+                return Err(io::Error::other("closed writer"));
+            }
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -194,23 +144,9 @@ mod tests {
         }
     }
 
-    /// A writer that accepts a bounded number of writes, then fails every later write.
-    struct LimitedWriter {
-        remaining_writes: usize,
-        bytes: Vec<u8>,
-    }
-
-    impl Write for LimitedWriter {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            if self.remaining_writes == 0 {
-                return Err(io::Error::other("exhausted writer"));
-            }
-            self.remaining_writes -= 1;
-            self.bytes.write(buffer)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            self.bytes.flush()
-        }
+    fn plain(markdown: &str) -> io::Result<String> {
+        let mut output = Vec::new();
+        preview(markdown, &Options::default(), &mut output)?;
+        String::from_utf8(output).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 }

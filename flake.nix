@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -12,33 +11,49 @@
 
   outputs =
     {
-      self,
       nixpkgs,
-      flake-utils,
       rust-overlay,
+      ...
     }:
-    flake-utils.lib.eachDefaultSystem (
-      system:
-      let
-        pkgs = import nixpkgs {
+    let
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+
+      forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+
+      nixpkgsFor = forAllSystems (
+        system:
+        import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
-        };
+        }
+      );
+    in
+    {
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgsFor.${system};
+          rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        in
+        {
+          default = pkgs.mkShell {
+            name = "mp";
 
-        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
-      in
-      {
-        devShells.default = pkgs.mkShell {
-          name = "mp";
+            packages = with pkgs; [
+              goreleaser
+              hyperfine
+              just
+              rustToolchain
+            ];
+          };
+        }
+      );
 
-          packages = with pkgs; [
-            goreleaser
-            hyperfine
-            rustToolchain
-          ];
-        };
-
-        formatter = pkgs.nixfmt;
-      }
-    );
+      formatter = forAllSystems (system: nixpkgsFor.${system}.nixfmt-tree);
+    };
 }

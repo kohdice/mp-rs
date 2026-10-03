@@ -39,3 +39,6 @@ Thumbs.db
 settings.local.json
 .mcp.json
 .plans/
+
+# Codex
+.codex/config.toml

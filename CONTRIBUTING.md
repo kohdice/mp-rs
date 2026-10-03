@@ -14,6 +14,7 @@ Together, we can make **mp-rs** even better!
 
 1. [Developer Guide](#developer-guide)
    - [Setup](#setup)
+   - [Project Layout](#project-layout)
    - [Build and Test](#build-and-test)
    - [Benchmarking](#benchmarking)
 2. [How to Contribute](#how-to-contribute)
@@ -35,17 +36,23 @@ direnv allow
 nix develop
 ```
 
+### Project Layout
+
+The workspace has two crates: `crates/mp` (the CLI binary) and `crates/mp-preview` (the
+rendering library). Crate responsibilities, the dependency graph, and the invariants the
+code relies on are documented in [ARCHITECTURE.md](./ARCHITECTURE.md).
+
 ### Build and Test
 
+Recipes live in the `justfile`; run `just --list` to see them all.
+
 ```bash
-cargo build                  # Build the whole workspace
-cargo test                   # Run all unit/integration tests
-cargo fmt --check            # Check formatting (rustfmt with rustfmt.toml)
-cargo lint                   # Alias for `clippy --workspace --all-targets -- -D warnings` (see .cargo/config.toml)
+just check                   # Format and lint
+just test                    # Run all unit and integration tests
 ```
 
-CI runs formatting, linting, build, and test checks for pushes and pull requests targeting `main` and `develop`.
-Make sure all of the commands above pass locally before pushing.
+CI runs `just check-ci` and `just test` for pushes to `main` and for non-draft pull requests.
+Make sure `just check` and `just test` pass locally before pushing.
 
 ### Benchmarking
 
@@ -96,7 +103,7 @@ Please follow these steps:
 
 1. Fork the repository and create a new branch.
 2. Make your changes and write clear, descriptive commit messages.
-3. Run `cargo test`, `cargo fmt --check`, and `cargo lint` locally to ensure nothing is broken.
+3. Run `just check` and `just test` locally to ensure nothing is broken.
 4. Submit a pull request and include:
    - A detailed description of your changes.
    - A reference to any related issues (e.g., "Fixes #443").
