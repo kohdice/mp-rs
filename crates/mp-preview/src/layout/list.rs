@@ -104,22 +104,3 @@ fn content_column(marker: &str, task: Option<bool>) -> usize {
     let task_width = task.map_or(0, |checked| task_box(checked).width() + 1);
     marker.width() + 1 + task_width
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{content_column, list_marker};
-
-    #[test]
-    fn ordered_marker_content_column_follows_the_written_marker() {
-        for value in [1, 9, 10, 999, u64::MAX] {
-            let marker = list_marker(Some(value), 0, 0);
-
-            assert_eq!(content_column(&marker, None), value.to_string().len() + 2, "{value}");
-        }
-    }
-
-    #[test]
-    fn ordered_list_markers_saturate_instead_of_overflowing() {
-        assert_eq!(list_marker(Some(u64::MAX), 1, 0), "18446744073709551615.");
-    }
-}

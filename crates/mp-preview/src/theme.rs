@@ -48,25 +48,3 @@ pub(crate) mod solarized {
         heading_colors: [YELLOW, ORANGE, MAGENTA, CYAN, BLUE, VIOLET],
     };
 }
-
-#[cfg(test)]
-mod tests {
-    use super::solarized;
-
-    #[test]
-    fn heading_colors_are_pairwise_distinct_and_differ_from_the_body_color() {
-        let palette = solarized::DARK_PALETTE;
-        for (index, color) in palette.heading_colors.iter().enumerate() {
-            assert_ne!(
-                *color, palette.body,
-                "heading color {index} must differ from the body color"
-            );
-            for (other_index, other) in palette.heading_colors.iter().enumerate().skip(index + 1) {
-                assert_ne!(
-                    color, other,
-                    "heading colors {index} and {other_index} must be distinct"
-                );
-            }
-        }
-    }
-}

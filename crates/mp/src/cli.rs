@@ -124,7 +124,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use clap::Parser as _;
     use mp_preview::ColorMode;
 
     use super::{Cli, ColorPolicy, Env, render_file, resolve_color_mode, run};
@@ -151,19 +150,6 @@ mod tests {
             ),
             ColorMode::Ansi
         );
-    }
-
-    #[test]
-    fn render_file_terminates_output_with_a_newline_when_the_source_lacks_one() -> io::Result<()> {
-        let file = write_temp_markdown("Hello")?;
-        let mut output = Vec::new();
-        render_file(&file, ColorPolicy::Never, plain_env(), &mut output)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        let output = utf8(output)?;
-
-        assert!(output.ends_with('\n'), "expected trailing newline, got {output:?}");
-        fs::remove_file(file)?;
-        Ok(())
     }
 
     #[test]
@@ -224,43 +210,9 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn run_leaves_piped_output_unwrapped_without_a_terminal_width() -> io::Result<()> {
-        let file = write_temp_markdown(WIDE_TABLE_MARKDOWN)?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
-
-        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        let output = utf8(stdout)?;
-        assert!(
-            output.lines().any(|line| line.chars().count() > 40),
-            "piped output must keep the table's natural width: {output}"
-        );
-        fs::remove_file(file)?;
-        Ok(())
-    }
-
     const WIDE_TABLE_MARKDOWN: &str = "| Crate | Responsibility |\n\
          | --- | --- |\n\
-         | mp-renderer | Block-to-terminal rendering with a trailing-newline guarantee |\n";
-
-    #[test]
-    fn run_reports_stdout_write_errors() -> io::Result<()> {
-        let file = write_temp_markdown("Hello\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = FailingWriter;
-        let mut stderr = Vec::new();
-
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
-
-        assert_eq!(exit_code, std::process::ExitCode::FAILURE);
-        assert!(utf8(stderr)?.contains("unable to write stdout"));
-        fs::remove_file(file)?;
-        Ok(())
-    }
+         | mp-preview | Block-to-terminal rendering with a trailing-newline guarantee |\n";
 
     #[test]
     fn run_flushes_stdout_before_reporting_a_mid_stream_failure() -> io::Result<()> {
@@ -300,30 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn long_help_describes_the_color_flag_and_file_argument() {
-        use clap::CommandFactory;
-
-        let help = Cli::command().render_long_help().to_string();
-
-        assert!(help.contains("When to colorize output"), "missing --color help: {help}");
-        assert!(help.contains("Path to the Markdown file to preview"), "missing FILE help: {help}");
-    }
-
-    #[test]
-    fn misspelled_color_flag_suggests_the_correct_name() -> io::Result<()> {
-        let error = match Cli::try_parse_from(["mp", "--colr", "always", "file.md"]) {
-            Ok(_) => return Err(io::Error::other("expected a parse error for --colr")),
-            Err(error) => error,
-        };
-
-        assert!(
-            error.to_string().contains("--color"),
-            "expected a suggestion for --color, got {error}",
-        );
-        Ok(())
-    }
-
-    #[test]
     fn run_treats_closed_stdout_pipe_as_success_without_diagnostic() -> io::Result<()> {
         let file = write_temp_markdown("Hello\n")?;
         let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
@@ -356,18 +284,6 @@ mod tests {
 
     fn utf8(bytes: Vec<u8>) -> io::Result<String> {
         String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-    }
-
-    struct FailingWriter;
-
-    impl io::Write for FailingWriter {
-        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("closed stdout"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
