@@ -18,7 +18,6 @@ fn main() -> std::process::ExitCode {
     let stderr = std::io::stderr();
     let mut stderr = stderr.lock();
 
-    // `NO_COLOR` set to any non-empty value disables color (per no-color.org).
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
 
     mp::run(&cli, &mut stdout, &mut stderr, mp::Env { no_color, stdout_is_terminal, stdout_width })

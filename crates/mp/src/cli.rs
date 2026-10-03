@@ -31,9 +31,9 @@ where
     E: Write,
 {
     let render = render_file(&cli.file, cli.color, env, stdout);
-    // Flush buffered output before reporting, so a partial render reaches the terminal
-    // ahead of any diagnostic even when rendering failed mid-stream. The flush runs
-    // eagerly here; `and` then keeps the render error as the root cause if both fail.
+    // Flush before reporting so a partial render reaches the terminal ahead of any
+    // diagnostic. `and_then` would skip the flush after a render error; `and` runs it
+    // and still reports the render error as the root cause when both fail.
     let flush = stdout.flush().map_err(CliError::WriteStdout);
     match render.and(flush) {
         Ok(()) => ExitCode::SUCCESS,
@@ -338,7 +338,7 @@ mod tests {
         Ok(())
     }
 
-    /// A non-terminal, color-enabled environment: the common test setup.
+    /// Piped stdout: not a terminal, no known width, and `NO_COLOR` unset.
     fn plain_env() -> Env {
         Env::default()
     }
