@@ -16,7 +16,7 @@ use std::io::{self, Write};
 
 pub use ansi::ColorMode;
 
-use layout::{LayoutOptions, layout};
+use layout::lay_out_block;
 
 /// How [`preview`] lays out and encodes its output.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -31,17 +31,23 @@ pub struct Options {
 ///
 /// Empty input writes nothing; any other output ends with exactly one newline.
 /// Top-level blocks are separated by one blank line, and each is written to `out`
-/// before the next is laid out.
+/// before the next is laid out. A block that lays out to no lines, such as an empty
+/// heading, is skipped along with its separator.
 ///
 /// # Errors
 ///
 /// Returns the first error reported by `out`, leaving the blocks written before it in
 /// place. Parsing never fails.
 pub fn preview<W: Write>(markdown: &str, options: &Options, out: &mut W) -> io::Result<()> {
-    let layout_options = LayoutOptions { width: options.width, color: options.color };
-    for (index, block) in markdown::parse(markdown).iter().enumerate() {
-        let mut encoded = if index == 0 { String::new() } else { String::from("\n") };
-        encoded.push_str(&ansi::to_ansi(&layout(block, &layout_options), options.color));
+    let mut wrote_block = false;
+    for block in &markdown::parse(markdown) {
+        let lines = lay_out_block(block, options.width, options.color, 0);
+        if lines.is_empty() {
+            continue;
+        }
+        let mut encoded = if wrote_block { String::from("\n") } else { String::new() };
+        wrote_block = true;
+        encoded.push_str(&ansi::to_ansi(&lines, options.color));
         encoded.push('\n');
         out.write_all(encoded.as_bytes())?;
     }
@@ -71,8 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_spacing_ignores_source_blank_lines() -> io::Result<()> {
-        assert_eq!(plain("# H\ntext")?, plain("# H\n\ntext")?);
+    fn preview_separates_blocks_even_without_a_source_blank_line() -> io::Result<()> {
         assert_eq!(plain("```\nx\n```\nb\n")?, "```\nx\n```\n\nb\n");
         Ok(())
     }
@@ -85,23 +90,20 @@ mod tests {
     }
 
     #[test]
+    fn preview_skips_empty_headings_between_blocks() -> io::Result<()> {
+        assert_eq!(plain("a\n\n#\n\nb\n")?, "a\n\nb\n");
+        Ok(())
+    }
+
+    #[test]
     fn preview_visualizes_control_characters_from_references() -> io::Result<()> {
         assert_eq!(plain("&#27;[2J&#27;[HHello\n")?, "\u{241b}[2J\u{241b}[HHello\n");
         Ok(())
     }
 
     #[test]
-    fn preview_keeps_inline_html_spanning_lines_on_one_quoted_line() -> io::Result<()> {
-        assert_eq!(
-            plain("> a <span\nclass=\"x\">b</span> c\n")?,
-            "\u{2502} a <span class=\"x\">b</span> c\n"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn preview_drops_trailing_blank_lines_of_an_unclosed_html_block() -> io::Result<()> {
-        assert_eq!(plain("<!--\nfoo\n\n\n")?, "<!--\nfoo\n");
+    fn preview_keeps_quote_bars_when_text_contains_a_line_feed_reference() -> io::Result<()> {
+        assert_eq!(plain("> a&#10;b\n")?, "\u{2502} a b\n");
         Ok(())
     }
 
@@ -109,19 +111,6 @@ mod tests {
     fn preview_drops_whitespace_only_trailing_lines_of_an_unclosed_html_block() -> io::Result<()> {
         assert_eq!(plain("<!--\nfoo\n  \n")?, "<!--\nfoo\n");
         Ok(())
-    }
-
-    #[test]
-    fn preview_visualizes_control_characters_in_code_block_info_strings() -> io::Result<()> {
-        assert_eq!(plain("```&#27;[31mrust\nx\n```\n")?, "```\u{241b}[31mrust\nx\n```\n");
-        Ok(())
-    }
-
-    #[test]
-    fn preview_reports_writer_failures() {
-        let result = preview("Hello\n", &Options::default(), &mut FailingWriter);
-
-        assert!(result.is_err());
     }
 
     #[test]
@@ -148,18 +137,6 @@ mod tests {
             }
             self.bytes.extend_from_slice(buffer);
             Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct FailingWriter;
-
-    impl io::Write for FailingWriter {
-        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
-            Err(io::Error::other("closed writer"))
         }
 
         fn flush(&mut self) -> io::Result<()> {

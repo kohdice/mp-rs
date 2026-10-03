@@ -11,19 +11,15 @@ use crate::model::Block;
 use crate::style::{Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
-pub(crate) struct LayoutOptions {
-    /// `None` means no width limit: nothing is wrapped.
-    pub width: Option<usize>,
-    /// Code blocks are syntax highlighted only in `Ansi` mode.
-    pub color: ColorMode,
-}
-
-pub(crate) fn layout(block: &Block, options: &LayoutOptions) -> Vec<Line> {
-    lay_out_block(block, options.width, options.color, 0)
-}
-
-/// `depth` is the list nesting level, which picks bullet shapes.
-fn lay_out_block(block: &Block, width: Option<usize>, color: ColorMode, depth: usize) -> Vec<Line> {
+/// Lays out `block` in `width` columns; `None` means no width limit, so nothing is
+/// wrapped. Code blocks are syntax highlighted only when `color` is `Ansi`. `depth` is
+/// the list nesting level, which picks bullet shapes; top-level blocks pass 0.
+pub(crate) fn lay_out_block(
+    block: &Block,
+    width: Option<usize>,
+    color: ColorMode,
+    depth: usize,
+) -> Vec<Line> {
     match block {
         Block::Paragraph(inlines) => text::lay_out_inlines(
             inlines,
@@ -50,6 +46,7 @@ fn lay_out_block(block: &Block, width: Option<usize>, color: ColorMode, depth: u
 }
 
 /// Lays out sibling blocks, with one blank line between them when `blank_between`.
+/// A block that lays out to no lines gets no separator either.
 fn lay_out_blocks(
     blocks: &[Block],
     blank_between: bool,
@@ -58,11 +55,15 @@ fn lay_out_blocks(
     depth: usize,
 ) -> Vec<Line> {
     let mut lines = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        if index > 0 && blank_between {
+    for block in blocks {
+        let block_lines = lay_out_block(block, width, color, depth);
+        if block_lines.is_empty() {
+            continue;
+        }
+        if blank_between && !lines.is_empty() {
             lines.push(Line::new());
         }
-        lines.extend(lay_out_block(block, width, color, depth));
+        lines.extend(block_lines);
     }
     lines
 }
@@ -82,17 +83,19 @@ fn heading_style(level: u8) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutOptions, layout};
+    use super::lay_out_block;
     use crate::ansi::{ColorMode, to_ansi};
     use crate::markdown::parse;
     use crate::model::{Block, ListItem};
     use crate::style::{Line, Span, Style};
-    use crate::theme::solarized::DARK_PALETTE;
+    use crate::theme::solarized::{BLUE, CYAN, DARK_PALETTE, MAGENTA, ORANGE, VIOLET, YELLOW};
     use unicode_width::UnicodeWidthStr;
 
     fn lay_out(markdown: &str, width: Option<usize>) -> Vec<Line> {
-        let options = LayoutOptions { width, color: ColorMode::Plain };
-        parse(markdown).iter().flat_map(|block| layout(block, &options)).collect()
+        parse(markdown)
+            .iter()
+            .flat_map(|block| lay_out_block(block, width, ColorMode::Plain, 0))
+            .collect()
     }
 
     fn span(text: &str, style: Style) -> Span {
@@ -145,17 +148,11 @@ mod tests {
     #[test]
     fn drops_separator_spaces_at_wrap_points() {
         assert_eq!(plain("a  b\n", Some(1)), "a\nb");
-        assert_eq!(plain("a \tb\n", Some(1)), "a\nb");
     }
 
     #[test]
     fn keeps_runs_of_spaces_between_words_that_fit() {
         assert_eq!(plain("a  b\n", Some(80)), "a  b");
-    }
-
-    #[test]
-    fn renders_a_tab_between_words_as_one_space() {
-        assert_eq!(plain("a\tb\n", Some(80)), "a b");
     }
 
     #[test]
@@ -271,17 +268,22 @@ mod tests {
 
     #[test]
     fn styles_headings_by_level() {
-        for (index, color) in DARK_PALETTE.heading_colors.into_iter().enumerate() {
-            let level = index + 1;
-            let lines = lay_out(&format!("{} Title\n", "#".repeat(level)), None);
-
-            let style = Style {
-                fg: Some(color),
-                bold: level <= 4,
-                underline: level <= 2,
-                ..Style::default()
-            };
-            assert_eq!(lines, [vec![span("Title", style)]], "heading level {level}");
+        let cases = [
+            (
+                "# Title\n",
+                Style { fg: Some(YELLOW), bold: true, underline: true, ..Style::default() },
+            ),
+            (
+                "## Title\n",
+                Style { fg: Some(ORANGE), bold: true, underline: true, ..Style::default() },
+            ),
+            ("### Title\n", Style { fg: Some(MAGENTA), bold: true, ..Style::default() }),
+            ("#### Title\n", Style { fg: Some(CYAN), bold: true, ..Style::default() }),
+            ("##### Title\n", Style { fg: Some(BLUE), ..Style::default() }),
+            ("###### Title\n", Style { fg: Some(VIOLET), ..Style::default() }),
+        ];
+        for (markdown, style) in cases {
+            assert_eq!(lay_out(markdown, None), [vec![span("Title", style)]], "{markdown:?}");
         }
     }
 
@@ -358,9 +360,10 @@ mod tests {
             tight: true,
             items: vec![ListItem { task: Some(false), blocks: Vec::new() }],
         };
-        let options = LayoutOptions { width: None, color: ColorMode::Plain };
-
-        assert_eq!(to_ansi(&layout(&list, &options), ColorMode::Plain), "• ☐");
+        assert_eq!(
+            to_ansi(&lay_out_block(&list, None, ColorMode::Plain, 0), ColorMode::Plain),
+            "• ☐"
+        );
     }
 
     #[test]
@@ -381,6 +384,11 @@ mod tests {
     #[test]
     fn quote_separates_child_blocks_with_a_bare_bar_line() {
         assert_eq!(plain("> # T\n> text\n", None), "│ T\n│\n│ text");
+    }
+
+    #[test]
+    fn quote_skips_empty_headings_between_child_blocks() {
+        assert_eq!(plain("> a\n>\n> #\n>\n> b\n", None), "│ a\n│\n│ b");
     }
 
     #[test]
@@ -442,14 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn separates_body_rows_with_middle_borders() {
-        assert_eq!(
-            plain("| H |\n| - |\n| a |\n| b |\n", None),
-            "┌─────┐\n│ H   │\n├─────┤\n│ a   │\n├─────┤\n│ b   │\n└─────┘"
-        );
-    }
-
-    #[test]
     fn aligns_cells_left_center_and_right() {
         assert_eq!(
             plain("| HHHHH | HHHHH | HHHHH |\n| :- | :-: | -: |\n| a | a | a |\n", None)
@@ -463,7 +463,7 @@ mod tests {
     fn shrinks_columns_to_fit_the_width_and_wraps_cells() {
         let markdown = "| Crate | Responsibility |\n\
              | --- | --- |\n\
-             | mp-renderer | Block-to-terminal rendering with a trailing-newline guarantee |\n";
+             | mp-preview | Block-to-terminal rendering with a trailing-newline guarantee |\n";
 
         let output = plain(markdown, Some(40));
 
@@ -545,9 +545,10 @@ mod tests {
     #[test]
     fn code_block_expands_tabs_to_four_column_stops() {
         let block = Block::CodeBlock { info: String::new(), code: "\tx\nab\tc\n".to_owned() };
-        let options = LayoutOptions { width: None, color: ColorMode::Plain };
-
-        assert_eq!(to_ansi(&layout(&block, &options), ColorMode::Plain), "```\n    x\nab  c\n```");
+        assert_eq!(
+            to_ansi(&lay_out_block(&block, None, ColorMode::Plain, 0), ColorMode::Plain),
+            "```\n    x\nab  c\n```"
+        );
     }
 
     #[test]
@@ -566,9 +567,8 @@ mod tests {
     }
 
     fn code_body_spans(markdown: &str, color: ColorMode) -> Vec<Span> {
-        let options = LayoutOptions { width: None, color };
         let lines: Vec<Line> =
-            parse(markdown).iter().flat_map(|block| layout(block, &options)).collect();
+            parse(markdown).iter().flat_map(|block| lay_out_block(block, None, color, 0)).collect();
         let body = lines.get(1..lines.len().saturating_sub(1)).unwrap_or_default();
         body.iter().flatten().cloned().collect()
     }

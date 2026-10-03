@@ -13,8 +13,12 @@ const TITLE_SEPARATOR: &str = " — ";
 const IMAGE_OPEN: &str = "[img: ";
 const IMAGE_CLOSE: &str = "]";
 
-/// Lays out inlines in `width` columns, or unwrapped when `width` is `None`.
+/// Lays out inlines in `width` columns, or unwrapped when `width` is `None`. No inlines
+/// lay out to no lines, so an empty heading or paragraph contributes nothing.
 pub(crate) fn lay_out_inlines(inlines: &[Inline], style: Style, width: Option<usize>) -> Vec<Line> {
+    if inlines.is_empty() {
+        return Vec::new();
+    }
     let segments = flatten(inlines, style, width.is_none());
     match width {
         Some(width) => wrap(&segments, width),
