@@ -67,10 +67,8 @@ pub(super) enum Shape {
 
 #[derive(Debug)]
 pub(super) struct Edge {
-    /// Index into [`Flowchart::nodes`].
-    pub from: usize,
-    /// Index into [`Flowchart::nodes`].
-    pub to: usize,
+    pub from: End,
+    pub to: End,
     pub stroke: Stroke,
     /// The marker drawn where the link leaves the source, if any.
     pub tail: Option<Marker>,
@@ -79,6 +77,33 @@ pub(super) struct Edge {
     pub label: Option<String>,
     /// The fewest layers the link spans: one, plus one for each extra `-`, `=` or `.`.
     pub length: usize,
+}
+
+/// One end of a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum End {
+    /// Index into [`Flowchart::nodes`].
+    Node(usize),
+    /// Index into [`Flowchart::subgraphs`]: the link attaches to the subgraph's frame,
+    /// as upstream allows with the `flowchart` graph type.
+    Subgraph(usize),
+}
+
+impl End {
+    /// The node at this end, unless it is a subgraph.
+    pub(super) fn node(self) -> Option<usize> {
+        match self {
+            Self::Node(node) => Some(node),
+            Self::Subgraph(_) => None,
+        }
+    }
+}
+
+impl Edge {
+    /// The nodes at both ends, unless either end is a subgraph.
+    pub(super) fn nodes(&self) -> Option<(usize, usize)> {
+        Some((self.from.node()?, self.to.node()?))
+    }
 }
 
 /// A `subgraph … end` block, drawn as a titled frame.
@@ -158,11 +183,10 @@ pub(super) fn parse(source: &str) -> Result<Flowchart, Failure> {
     if let Some((line, ..)) = builder.open {
         return Err(syntax_error(line, "subgraph is not closed with \"end\""));
     }
+    builder.resolve_subgraph_ids()?;
     // Mermaid draws an empty subgraph as a frame of its own, but without members there
     // is no layer to place it on.
-    if builder.refers_to_a_subgraph()
-        || builder.chart.subgraphs.iter().any(|subgraph| subgraph.members.is_empty())
-    {
+    if builder.chart.subgraphs.iter().any(|subgraph| subgraph.members.is_empty()) {
         return Err(Failure::Unsupported);
     }
     Ok(builder.chart)
@@ -296,8 +320,8 @@ impl<'a> Builder<'a> {
                         ));
                     }
                     self.chart.edges.push(Edge {
-                        from,
-                        to,
+                        from: End::Node(from),
+                        to: End::Node(to),
                         stroke,
                         tail,
                         head,
@@ -336,23 +360,48 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Whether a link starts or ends at, or a subgraph lists as a member, a node whose
-    /// id is also a subgraph's: Mermaid takes such a reference to mean the subgraph,
-    /// drawing a link to its frame or nesting its frame inside the other, neither of
-    /// which is drawn.
-    fn refers_to_a_subgraph(&self) -> bool {
-        let mut is_referenced = vec![false; self.chart.nodes.len()];
-        let ends = self.chart.edges.iter().flat_map(|edge| [edge.from, edge.to]);
-        let members =
-            self.chart.subgraphs.iter().flat_map(|subgraph| subgraph.members.iter().copied());
-        for node in ends.chain(members) {
-            if let Some(referenced) = is_referenced.get_mut(node) {
-                *referenced = true;
+    /// Turns every reference to an id that is also a subgraph's, declared before or
+    /// after it, into a reference to the subgraph, as Mermaid reads it: a link end
+    /// becomes [`End::Subgraph`] and the node declared for the id is dropped. A
+    /// subgraph listed as a member of another would nest its frame inside the other,
+    /// which is not drawn.
+    fn resolve_subgraph_ids(&mut self) -> Result<(), Failure> {
+        let mut named = vec![None; self.chart.nodes.len()];
+        for (subgraph, id) in self.subgraph_ids.iter().enumerate() {
+            if let Some(&node) = self.index_of.get(id)
+                && let Some(slot) = named.get_mut(node)
+            {
+                *slot = Some(subgraph);
             }
         }
-        self.subgraph_ids.iter().any(|id| {
-            self.index_of.get(id).is_some_and(|&node| is_referenced.get(node) == Some(&true))
-        })
+        let nested = self.chart.subgraphs.iter().flat_map(|subgraph| &subgraph.members);
+        if nested.clone().any(|&member| named.get(member).copied().flatten().is_some()) {
+            return Err(Failure::Unsupported);
+        }
+        // The index each node keeps once the nodes naming subgraphs are dropped.
+        let mut renumbered = Vec::with_capacity(named.len());
+        let mut kept = 0;
+        for names in &named {
+            renumbered.push(kept);
+            kept += usize::from(names.is_none());
+        }
+        let resolve = |end: End| match end {
+            End::Node(node) => match named.get(node).copied().flatten() {
+                Some(subgraph) => Some(End::Subgraph(subgraph)),
+                None => Some(End::Node(*renumbered.get(node)?)),
+            },
+            End::Subgraph(_) => Some(end),
+        };
+        for edge in &mut self.chart.edges {
+            edge.from = resolve(edge.from).ok_or(Failure::Unsupported)?;
+            edge.to = resolve(edge.to).ok_or(Failure::Unsupported)?;
+        }
+        for member in self.chart.subgraphs.iter_mut().flat_map(|subgraph| &mut subgraph.members) {
+            *member = *renumbered.get(*member).ok_or(Failure::Unsupported)?;
+        }
+        let mut names = named.iter();
+        self.chart.nodes.retain(|_| names.next().is_some_and(Option::is_none));
+        Ok(())
     }
 
     /// Reads node references joined by `&` at the start of `text`, and returns their

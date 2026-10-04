@@ -1690,13 +1690,26 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_link_to_a_subgraph_id_falls_back_without_a_reason_line() {
-        for body in [
-            "flowchart LR\n    A --> s\n    subgraph s\n    B\n    end\n",
-            "flowchart LR\n    subgraph s\n    B\n    end\n    A --> s\n",
-        ] {
-            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
-        }
+    fn mermaid_link_into_a_subgraph_ends_at_its_frame() {
+        let output = mermaid("flowchart LR\n    A --> s\n    subgraph s\n    B\n    end\n");
+        let (Some((top, left, bottom, _)), Some((_, _, a_right))) =
+            (frame_of(&output, "s"), box_of(&output, "A"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        assert_eq!(box_of(&output, "s"), None, "{output}");
+        assert_eq!(arrows.len(), 1, "{output}");
+        assert!(
+            arrows
+                .iter()
+                .all(|&(row, col, c)| c == '►' && col + 1 == left && top < row && row < bottom),
+            "{output}"
+        );
+        assert!(a_right < left, "{output}");
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
     }
 
     #[test]
@@ -1780,10 +1793,163 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_link_to_a_quoted_subgraph_id_falls_back_without_a_reason_line() {
-        let body = "flowchart LR\n    subgraph \"s\"\n    B\n    end\n    A --> s\n";
+    fn mermaid_link_to_a_subgraph_declared_later_renders_the_same() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> s\n    subgraph s\n    B\n    end\n"),
+            mermaid("flowchart LR\n    subgraph s\n    B\n    end\n    A --> s\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_link_out_of_a_subgraph_starts_at_its_frame() {
+        let output = mermaid("flowchart LR\n    subgraph s\n    B\n    end\n    s --> C\n");
+        let (Some((_, _, _, right)), Some((c_row, c_left, _))) =
+            (frame_of(&output, "s"), box_of(&output, "C"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert_eq!(box_of(&output, "s"), None, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 1, "{output}");
+        assert_eq!(glyph_at(&output, c_row, c_left - 1), Some('►'), "{output}");
+        assert!(is_line_glyph(glyph_at(&output, c_row, right + 1)), "{output}");
+        assert!(c_left > right, "{output}");
+        assert!(boxes_intact(&output, &["B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_into_a_subgraph_places_every_member_after_the_source() {
+        let output = mermaid("flowchart LR\n    A --> s\n    subgraph s\n    B\n    C\n    end\n");
+        let (Some((top, left, bottom, right)), Some(a), Some(b), Some(c)) = (
+            frame_of(&output, "s"),
+            box_of(&output, "A"),
+            box_of(&output, "B"),
+            box_of(&output, "C"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        for (row, box_left, box_right) in [b, c] {
+            assert!(box_left > a.2, "{output}");
+            assert!(top < row && row < bottom && left < box_left && box_right < right, "{output}");
+        }
+        assert_eq!(count_glyph(&output, '►'), 1, "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_out_of_a_subgraph_places_the_target_after_every_member() {
+        let output = mermaid("flowchart LR\n    subgraph s\n    B --> C\n    end\n    s --> D\n");
+        let (Some((.., right)), Some((.., c_right)), Some((_, d_left, _))) =
+            (frame_of(&output, "s"), box_of(&output, "C"), box_of(&output, "D"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert!(d_left > c_right && d_left > right, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_link_into_a_subgraph_enters_its_top_border_beside_the_title() {
+        let output = mermaid("flowchart TD\n    A --> s\n    subgraph s\n    B\n    end\n");
+        let Some((top, left, _, right)) = crossed_frame_of(&output, "s") else {
+            panic!("missing frame in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+        let Some(title) = title_cells(&output, top, left, "s") else {
+            panic!("missing title in\n{output}");
+        };
+
+        assert_eq!(arrows.len(), 1, "{output}");
+        assert!(
+            arrows.iter().all(|&(row, col, c)| {
+                c == '▼'
+                    && row + 1 == top
+                    && left < col
+                    && col < right
+                    && !title.contains(&col)
+                    && glyph_at(&output, top, col) == Some('─')
+            }),
+            "{output}"
+        );
+        assert_eq!(
+            words(output.lines().nth(top).unwrap_or_default()).filter(|&word| word == "s").count(),
+            1,
+            "{output}"
+        );
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_between_two_subgraphs_joins_their_frames() {
+        let output = mermaid(
+            "flowchart LR\n    subgraph one\n    A\n    end\n    subgraph two\n    B\n    end\n    one --> two\n",
+        );
+        let (Some(one), Some(two)) = (frame_of(&output, "one"), frame_of(&output, "two")) else {
+            panic!("missing frame in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+
+        assert_eq!(box_of(&output, "one"), None, "{output}");
+        assert_eq!(box_of(&output, "two"), None, "{output}");
+        assert_eq!(arrows.len(), 1, "{output}");
+        assert!(arrows.iter().all(|&(_, col, c)| c == '►' && col + 1 == two.1), "{output}");
+        assert!(one.3 < two.1, "{output}");
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_label_on_a_link_into_a_subgraph_is_shown() {
+        let output = mermaid("flowchart LR\n    A -->|yes| s\n    subgraph s\n    B\n    end\n");
+
+        assert_eq!(whole_words(&output, "yes"), 1, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 1, "{output}");
+        assert_eq!(box_of(&output, "s"), None, "{output}");
+    }
+
+    #[test]
+    fn mermaid_subgraph_links_that_cannot_be_placed_fall_back_without_a_reason_line() {
+        for body in [
+            "flowchart LR\n    subgraph s\n    A\n    end\n    A --> s\n",
+            "flowchart LR\n    A --> s\n    s --> A\n    subgraph s\n    B\n    end\n",
+            "flowchart LR\n    A --> s\n    subgraph s\n    end\n",
+        ] {
+            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
+        }
+    }
+
+    const UPSTREAM_SUBGRAPH_EDGES_EXAMPLE: &str = "flowchart TB\n    c1-->a2\n    subgraph one\n    a1-->a2\n    end\n    subgraph two\n    b1-->b2\n    end\n    subgraph three\n    c1-->c2\n    end\n    one --> two\n    three --> two\n    two --> c2\n";
+
+    #[test]
+    fn mermaid_upstream_subgraph_edges_example_falls_back_until_cycles_through_subgraphs_are_drawn()
+    {
+        let body = UPSTREAM_SUBGRAPH_EDGES_EXAMPLE;
 
         assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+    }
+
+    #[test]
+    fn mermaid_upstream_subgraph_edges_example_without_its_cycle_renders_every_link() {
+        let body = UPSTREAM_SUBGRAPH_EDGES_EXAMPLE.replace("    two --> c2\n", "");
+        let output = mermaid(&body);
+
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        for title in ["one", "two", "three"] {
+            assert!(crossed_frame_of(&output, title).is_some(), "{title} in\n{output}");
+            assert_eq!(box_of(&output, title), None, "{title} in\n{output}");
+        }
+        assert!(boxes_intact(&output, &["a1", "a2", "b1", "b2", "c1", "c2"]), "{output}");
+        assert_eq!(arrowheads(&output).len(), 6, "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_to_a_quoted_subgraph_id_attaches_to_its_frame() {
+        let quoted = mermaid("flowchart LR\n    subgraph \"s\"\n    B\n    end\n    A --> s\n");
+        let bare = mermaid("flowchart LR\n    subgraph s\n    B\n    end\n    A --> s\n");
+
+        assert_eq!(quoted, bare);
+        assert_eq!(box_of(&quoted, "s"), None, "{quoted}");
+        assert!(frame_of(&quoted, "s").is_some(), "{quoted}");
     }
 
     #[test]

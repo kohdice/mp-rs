@@ -49,9 +49,9 @@ or redirected, no width limit applies and the content keeps its natural width.
   subroutine, cylinder, circle, double-circle, hexagon, parallelogram, trapezoid and
   asymmetric nodes, `@{ shape: … }` with a `label`, for those shapes, solid, dotted and
   thick links with arrow, circle and cross ends, longer links, edge labels, `&` groups,
-  and one level of `subgraph … end`. Styling statements such as `style` and `classDef`,
-  and a `direction` statement outside a subgraph, are accepted and ignored, as in
-  Mermaid. Every link meets a box at a cell of its own, so a box with several links on
+  one level of `subgraph … end`, and links to and from subgraphs. Styling statements
+  such as `style` and `classDef`, and a `direction` statement outside a subgraph, are
+  accepted and ignored, as in Mermaid. Every link meets a box at a cell of its own, so a box with several links on
   one side is drawn taller (`LR`, `RL`) or wider (`TD`, `BT`) than its label needs.
   When the diagram is wider than the terminal, spacing is tightened; if it still does
   not fit, it renders as the plain code block.
@@ -62,7 +62,7 @@ or redirected, no width limit applies and the content keeps its natural width.
   applies to diagrams over Mermaid's limits of 50 000 characters or 500 edges. Other
   diagram types and features not supported yet (nested subgraphs, empty subgraphs,
   `direction` inside a subgraph, the ellipse `(- -)`, images and the other `@{ shape }`
-  names, and multi-line `@{ }`), and subgraphs whose frame would cover a node or frame
+  names, multi-line `@{ }`, and a link to a subgraph that closes a cycle), and subgraphs whose frame would cover a node or frame
   outside them, such as a non-member placed between members, render as the plain code
   block without that line.
 - Other control characters, including ones written as references such as `&#27;`, are

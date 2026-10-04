@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use unicode_width::UnicodeWidthStr;
 
 use super::outline::outline;
-use super::parse::{Direction, Flowchart, Node};
+use super::parse::{Direction, Edge, End, Flowchart, Node};
 use super::signed;
 
 /// Cells a self loop runs through beyond its box, both along the flow and across it;
@@ -244,8 +244,13 @@ pub(super) fn grow_boxes(chart: &mut Flowchart) -> Option<()> {
     let mut leaving = vec![0; chart.nodes.len()];
     for (edge, &reversed) in chart.edges.iter().zip(&reversed) {
         let (from, to) = if reversed { (edge.to, edge.from) } else { (edge.from, edge.to) };
-        *leaving.get_mut(from)? += 1;
-        if from != to {
+        // The end at a frame meets no box.
+        if let End::Node(from) = from {
+            *leaving.get_mut(from)? += 1;
+        }
+        if let End::Node(to) = to
+            && from != End::Node(to)
+        {
             *entering.get_mut(to)? += 1;
         }
     }
@@ -332,21 +337,49 @@ const MAX_PASSING_SLOTS: usize = 10_000;
 /// links spanning several layers would need more than [`MAX_PASSING_SLOTS`] slots.
 pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Option<Layered> {
     let reversed = cycle_closing_edges(chart)?;
-    let ends = chart
-        .edges
-        .iter()
-        .zip(&reversed)
-        .map(|(edge, &reversed)| if reversed { (edge.to, edge.from) } else { (edge.from, edge.to) })
-        .collect::<Vec<_>>();
-    let mut layer_of = longest_path_layers(chart, &ends)?;
+    let mut layer_of =
+        longest_path_layers(chart.nodes.len(), &layering_constraints(chart, &reversed)?)?;
     let node_count = chart.nodes.len();
+    // The first and last layers of each subgraph's members, where links to and from it
+    // meet its frame.
+    let member_layers = chart
+        .subgraphs
+        .iter()
+        .map(|subgraph| {
+            let layers = subgraph.members.iter().map(|&member| layer_of.get(member).copied());
+            let layers = layers.collect::<Option<Vec<_>>>()?;
+            Some((*layers.iter().min()?, *layers.iter().max()?))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    // For each slot past the nodes that is the end of a link at a frame rather than a
+    // passing slot: the subgraph, and whether the link enters it.
+    let mut frame_end: HashMap<usize, (usize, bool)> = HashMap::new();
     let mut paths = Vec::with_capacity(chart.edges.len());
-    for &(start, end) in &ends {
+    for (edge, &reversed) in chart.edges.iter().zip(&reversed) {
+        let mut slot_at = |end: End, entering: bool| -> Option<usize> {
+            match end {
+                End::Node(node) => Some(node),
+                End::Subgraph(subgraph) => {
+                    let (first, last) = *member_layers.get(subgraph)?;
+                    frame_end.insert(layer_of.len(), (subgraph, entering));
+                    layer_of.push(if entering { first } else { last });
+                    Some(layer_of.len() - 1)
+                }
+            }
+        };
+        let (from, to) = if reversed { (edge.to, edge.from) } else { (edge.from, edge.to) };
+        let (start, end) = (slot_at(from, false)?, slot_at(to, true)?);
         if start == end {
             paths.push(vec![start]);
             continue;
         }
         let (from, to) = (*layer_of.get(start)?, *layer_of.get(end)?);
+        // The layering keeps a frame after the links into it and before the links out of
+        // it, so only a link between two nodes can have its ends in one layer: a self
+        // loop, handled above.
+        if from >= to {
+            return None;
+        }
         // A link spanning several layers gets a slot in every layer it passes.
         let mut path = vec![start];
         for layer in from + 1..to {
@@ -361,8 +394,12 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     }
     let layer_count = layer_of.iter().max().map_or(0, |last| last + 1);
     let mut members = vec![Vec::new(); layer_count];
+    // The ends of links at frames, by layer: they take no room in their layer's stack
+    // and are placed on the frame's border once its members in that layer are.
+    let mut frame_ends = vec![Vec::new(); layer_count];
     for (slot, &layer) in layer_of.iter().enumerate() {
-        members.get_mut(layer)?.push(slot);
+        let stack = if frame_end.contains_key(&slot) { &mut frame_ends } else { &mut members };
+        stack.get_mut(layer)?.push(slot);
     }
     let mut parents = vec![Vec::new(); layer_of.len()];
     let mut children = vec![Vec::new(); layer_of.len()];
@@ -391,14 +428,21 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         group_subgraph_members(layer, &subgraph_of)?;
     }
     let mut loops = vec![0_usize; node_count];
-    for edge in chart.edges.iter().filter(|edge| edge.from == edge.to) {
-        *loops.get_mut(edge.from)? += 1;
+    for (from, _) in chart.edges.iter().filter_map(Edge::nodes).filter(|(from, to)| from == to) {
+        *loops.get_mut(from)? += 1;
     }
     let mut position = vec![0; layer_of.len()];
     for layer in &members {
         for (index, &slot) in layer.iter().enumerate() {
             *position.get_mut(slot)? = index;
         }
+    }
+    // An end at a frame lies among its subgraph's members in its layer.
+    for (&slot, &(subgraph, _)) in &frame_end {
+        let layer = members.get(*layer_of.get(slot)?)?;
+        let first_member =
+            layer.iter().position(|&member| subgraph_of.get(member) == Some(&Some(subgraph)));
+        *position.get_mut(slot)? = first_member.unwrap_or(0);
     }
     // A passing slot is one cell across the flow, entered and left at that cell. A self
     // loop runs through the cells after its box.
@@ -433,7 +477,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     let mut starts = vec![0; layer_of.len()];
     let mut ports = vec![0; layer_of.len()];
     let mut exits: Vec<Vec<isize>> = vec![Vec::new(); layer_of.len()];
-    for layer in &members {
+    for (layer_index, layer) in members.iter().enumerate() {
         // The first cell after the previous slot, or after the frame closing behind it.
         let mut end = None;
         // The subgraph of the previous slot, and the first cell of its frame.
@@ -530,6 +574,50 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             *starts.get_mut(slot)? = start;
             *ports.get_mut(slot)? = start + offset;
             *exits.get_mut(slot)? = leaving;
+        }
+        // The links meeting one border of a frame in this layer take cells of their own
+        // across the span of its members here, spread about its centre as on a box
+        // border and ordered by their other ends.
+        let mut borders: Vec<((usize, bool), Vec<usize>)> = Vec::new();
+        for &slot in frame_ends.get(layer_index)? {
+            let border = *frame_end.get(&slot)?;
+            match borders.iter_mut().find(|(other, _)| *other == border) {
+                Some((_, ends)) => ends.push(slot),
+                None => borders.push((border, vec![slot])),
+            }
+        }
+        for ((subgraph, entering), ends) in borders {
+            let spans = layer
+                .iter()
+                .filter(|&&member| subgraph_of.get(member) == Some(&Some(subgraph)))
+                .map(|&member| {
+                    let start = *starts.get(member)?;
+                    let size = axis.box_cross_size(chart.nodes.get(member)?);
+                    Some((start, start + signed(size)? - 1))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let low = spans.iter().map(|&(low, _)| low).min()?;
+            let high = spans.iter().map(|&(_, high)| high).max()?;
+            let others = ends
+                .iter()
+                .map(|&end| {
+                    if entering {
+                        let (&parent, &link) =
+                            parents.get(end)?.first().zip(link_of.get(end)?.first())?;
+                        exits.get(parent)?.get(link).copied()
+                    } else {
+                        let &child = children.get(end)?.first()?;
+                        signed(*position.get(child)?)
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let span = usize::try_from(high - low).ok()?;
+            for (&end, cell) in ends.iter().zip(port_cells(axis, &others, &(0..=span), span / 2)?) {
+                let at = low + signed(cell)?;
+                *starts.get_mut(end)? = at;
+                *ports.get_mut(end)? = at;
+                *exits.get_mut(end)? = vec![at; children.get(end)?.len()];
+            }
         }
     }
 
@@ -652,8 +740,12 @@ fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<bool>> {
         Done,
     }
     let mut outgoing = vec![Vec::new(); chart.nodes.len()];
+    // Only links between nodes can close a cycle that reversing one of them breaks;
+    // a link to or from a frame keeps its direction.
     for (index, edge) in chart.edges.iter().enumerate() {
-        outgoing.get_mut(edge.from)?.push(index);
+        if let Some((from, _)) = edge.nodes() {
+            outgoing.get_mut(from)?.push(index);
+        }
     }
     let mut visits = vec![Visit::New; chart.nodes.len()];
     let mut closing = vec![false; chart.edges.len()];
@@ -675,7 +767,7 @@ fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<bool>> {
             if let Some(top) = stack.last_mut() {
                 top.1 += 1;
             }
-            let to = chart.edges.get(index)?.to;
+            let (_, to) = chart.edges.get(index)?.nodes()?;
             match *visits.get(to)? {
                 Visit::New => {
                     *visits.get_mut(to)? = Visit::Open;
@@ -689,14 +781,48 @@ fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<bool>> {
     Some(closing)
 }
 
-/// The layer of each node, given each edge's `ends` in layout order: at least the
-/// edge's length after the layer of its first end. `None` when the edges form a cycle.
-fn longest_path_layers(chart: &Flowchart, ends: &[(usize, usize)]) -> Option<Vec<usize>> {
-    let count = chart.nodes.len();
+/// The pairs of nodes `(from, to, length)` whose layers the links impose: each link
+/// between nodes in layout order, `reversed` closing a cycle; a link into a subgraph
+/// puts every member after the source, a link out of one puts the target after every
+/// member, and a link between two puts every member of the second after every member
+/// of the first. `None` when a link joins a subgraph to itself or to one of its own
+/// members, which has no layout here.
+fn layering_constraints(
+    chart: &Flowchart,
+    reversed: &[bool],
+) -> Option<Vec<(usize, usize, usize)>> {
+    let nodes_at = |end: End| -> Option<Vec<usize>> {
+        match end {
+            End::Node(node) => Some(vec![node]),
+            End::Subgraph(subgraph) => Some(chart.subgraphs.get(subgraph)?.members.clone()),
+        }
+    };
+    let mut constraints = Vec::new();
+    for (edge, &reversed) in chart.edges.iter().zip(reversed) {
+        if let Some((from, to)) = edge.nodes() {
+            let (from, to) = if reversed { (to, from) } else { (from, to) };
+            constraints.push((from, to, edge.length));
+            continue;
+        }
+        for from in nodes_at(edge.from)? {
+            for to in nodes_at(edge.to)? {
+                if from == to {
+                    return None;
+                }
+                constraints.push((from, to, edge.length));
+            }
+        }
+    }
+    Some(constraints)
+}
+
+/// The layer of each of `count` nodes, given `constraints` `(from, to, length)`: `to` at
+/// least `length` layers after `from`. `None` when the constraints form a cycle.
+fn longest_path_layers(count: usize, constraints: &[(usize, usize, usize)]) -> Option<Vec<usize>> {
     let mut unplaced_parents = vec![0_usize; count];
     let mut children = vec![Vec::new(); count];
-    for (edge, &(from, to)) in chart.edges.iter().zip(ends).filter(|(_, (from, to))| from != to) {
-        children.get_mut(from)?.push((to, edge.length));
+    for &(from, to, length) in constraints.iter().filter(|(from, to, _)| from != to) {
+        children.get_mut(from)?.push((to, length));
         *unplaced_parents.get_mut(to)? += 1;
     }
     let mut layer_of = vec![0_usize; count];

@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 use super::layout::{
     Axis, Layered, SELF_LOOP_CELLS, TITLE_CORNER_OFFSET, frame_width, port_cells, title_offset,
 };
-use super::parse::{Direction, Edge, Flowchart, Node, Subgraph};
+use super::parse::{Direction, Edge, End, Flowchart, Node, Subgraph};
 use super::signed;
 
 /// A drawing before it is oriented on screen.
@@ -150,8 +150,8 @@ pub(super) fn route<'a>(
     // A self loop runs through the cells after its box along the flow, so the tracks
     // after its layer start that much later rather than merging with it.
     let mut loop_cells = vec![0; layered.layer_count];
-    for edge in chart.edges.iter().filter(|edge| edge.from == edge.to) {
-        *loop_cells.get_mut(slots.get(edge.from)?.layer)? = SELF_LOOP_CELLS;
+    for (node, _) in chart.edges.iter().filter_map(Edge::nodes).filter(|(from, to)| from == to) {
+        *loop_cells.get_mut(slots.get(node)?.layer)? = SELF_LOOP_CELLS;
     }
 
     let gaps: Vec<usize> = track_counts
@@ -240,8 +240,10 @@ pub(super) fn route<'a>(
             .subgraphs
             .iter()
             .zip(&memberships)
-            .filter_map(|(subgraph, is_member)| {
+            .enumerate()
+            .filter_map(|(index, (subgraph, is_member))| {
                 Some((
+                    index,
                     is_member.as_slice(),
                     frame_bounds(subgraph, is_member, scene, chart.direction, clear_links)?,
                 ))
@@ -304,24 +306,38 @@ pub(super) fn route<'a>(
             return None;
         }
     }
-    let bounds = framed.into_iter().map(|(_, frame)| frame).collect::<Vec<_>>();
     // Frames reaching past the first cells along or across the flow move everything
     // else on by as much.
-    let (main_shift, cross_shift) = bounds
-        .iter()
-        .fold((0, 0), |(main, cross), frame| (main.max(-frame.main.0), cross.max(-frame.cross.0)));
+    let (main_shift, cross_shift) = framed.iter().fold((0, 0), |(main, cross), (.., frame)| {
+        (main.max(-frame.main.0), cross.max(-frame.cross.0))
+    });
     shift(&mut scene, unsigned(main_shift)?, unsigned(cross_shift)?);
     let moved =
         |(low, high): (isize, isize), by: isize| Some(unsigned(low + by)?..=unsigned(high + by)?);
-    for frame in bounds {
+    let mut frame_of = vec![None; chart.subgraphs.len()];
+    for (index, _, frame) in framed {
         let main = moved(frame.main, main_shift)?;
         let cross = moved(frame.cross, cross_shift)?;
+        *frame_of.get_mut(index)? = Some(main.clone());
         scene.frames.push(PlacedFrame {
             title: frame.title,
             title_offset: frame.title_offset,
             main,
             cross,
         });
+    }
+    // A link to or from a subgraph was routed to a cell among its members; it ends in
+    // the cell just outside the frame's border instead, where its marker goes, as at a
+    // box.
+    for link in &mut scene.links {
+        if let End::Subgraph(subgraph) = link.edge.to {
+            let main = frame_of.get(subgraph)?.as_ref()?;
+            link.points.last_mut()?.0 = main.start().checked_sub(1)?;
+        }
+        if let End::Subgraph(subgraph) = link.edge.from {
+            let main = frame_of.get(subgraph)?.as_ref()?;
+            link.points.first_mut()?.0 = main.end() + 1;
+        }
     }
     Some(scene)
 }
@@ -368,7 +384,7 @@ fn frame_bounds<'a>(
     clear_links: bool,
 ) -> Option<FrameBounds<'a>> {
     let axis = direction.axis();
-    let is_member = |node: usize| is_member.get(node) == Some(&true);
+    let is_member = |end: End| end.node().is_some_and(|node| is_member.get(node) == Some(&true));
     let boxes =
         subgraph.members.iter().filter_map(|&member| scene.boxes.get(member)).map(|placed| {
             (
@@ -468,14 +484,18 @@ fn top_border_crossings(
 /// Whether a frame shares a cell with a box that is not one of its members or with
 /// another frame, which would show that box, or the other frame's boxes, as belonging
 /// to its subgraph.
-fn frames_overlap(framed: &[(&[bool], FrameBounds<'_>)], scene: &Scene<'_>, axis: Axis) -> bool {
+fn frames_overlap(
+    framed: &[(usize, &[bool], FrameBounds<'_>)],
+    scene: &Scene<'_>,
+    axis: Axis,
+) -> bool {
     let meet = |(low_a, high_a): (isize, isize), (low_b, high_b): (isize, isize)| {
         low_a <= high_b && low_b <= high_a
     };
     let covers = |frame: &FrameBounds<'_>, main: (isize, isize), cross: (isize, isize)| {
         meet(frame.main, main) && meet(frame.cross, cross)
     };
-    framed.iter().enumerate().any(|(index, (is_member, frame))| {
+    framed.iter().enumerate().any(|(index, (_, is_member, frame))| {
         let covers_a_stranger = scene.boxes.iter().enumerate().any(|(node, placed)| {
             let span =
                 |start: usize, size: usize| Some((signed(start)?, signed(start + size)? - 1));
@@ -488,7 +508,7 @@ fn frames_overlap(framed: &[(&[bool], FrameBounds<'_>)], scene: &Scene<'_>, axis
             || framed
                 .iter()
                 .skip(index + 1)
-                .any(|(_, other)| covers(frame, other.main, other.cross))
+                .any(|(.., other)| covers(frame, other.main, other.cross))
     })
 }
 
@@ -747,14 +767,19 @@ fn entry_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<V
 fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<usize>> {
     let slots = &layered.slots;
     let mut leaving = vec![Vec::new(); chart.nodes.len()];
+    let mut exits = vec![0; layered.paths.len()];
     for (edge, path) in layered.paths.iter().enumerate() {
+        let first = *path.first()?;
         let towards = match path.get(1) {
             Some(&next) => (false, slots.get(next)?.port),
             None => (true, 0),
         };
-        leaving.get_mut(*path.first()?)?.push((towards, edge));
+        match leaving.get_mut(first) {
+            Some(leaving) => leaving.push((towards, edge)),
+            // A link leaving a frame starts at its single cell on the frame's border.
+            None => *exits.get_mut(edge)? = slots.get(first)?.port,
+        }
     }
-    let mut exits = vec![0; layered.paths.len()];
     for ((node, slot), leaving) in chart.nodes.iter().zip(slots).zip(&leaving) {
         let others: Vec<_> = leaving.iter().map(|&(towards, _)| towards).collect();
         let port = slot.port.checked_sub(slot.cross)?;
