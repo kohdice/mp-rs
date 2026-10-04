@@ -482,10 +482,14 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_unsupported_node_shapes_fall_back_without_a_reason_line() {
-        for node in ["A([x])", "A[(x)]", "A[/x/]", "A@{ shape: rect }"] {
-            let body = format!("flowchart LR\n    {node}\n");
-            assert_eq!(mermaid(&body), format!("```mermaid\n{body}```"), "{node}");
+    fn mermaid_deferred_node_shapes_fall_back_without_a_reason_line() {
+        for body in [
+            "flowchart LR\n    A(-x-)\n",
+            "flowchart LR\n    A@{ shape: cloud }\n",
+            "flowchart LR\n    A@{ icon: \"fa:bell\" }\n",
+            "flowchart LR\n    A@{\n    shape: rect\n    }\n",
+        ] {
+            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
         }
     }
 
@@ -549,6 +553,92 @@ mod tests {
     #[test]
     fn mermaid_diamond_node_uses_slanted_corners() {
         assert_eq!(mermaid("flowchart LR\n    A{Ok?}\n"), "╱─────╲\n│ Ok? │\n╲─────╱");
+    }
+
+    #[test]
+    fn mermaid_stadium_node_has_round_ends() {
+        assert_eq!(mermaid("flowchart LR\n    A([Done])\n"), "╭──────╮\n( Done )\n╰──────╯");
+    }
+
+    #[test]
+    fn mermaid_lr_link_into_a_stadium_ends_before_its_round_end() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> B([Done])\n"),
+            "┌───┐     ╭──────╮\n│ A │────►( Done )\n└───┘     ╰──────╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_subroutine_node_has_double_sides() {
+        assert_eq!(mermaid("flowchart LR\n    A[[Done]]\n"), "┌┬──────┬┐\n││ Done ││\n└┴──────┴┘");
+    }
+
+    #[test]
+    fn mermaid_hexagon_node_has_pointed_sides() {
+        assert_eq!(mermaid("flowchart LR\n    A{{Done}}\n"), " ╱────╲\n< Done >\n ╲────╱");
+    }
+
+    #[test]
+    fn mermaid_asymmetric_node_has_a_notched_left_side() {
+        assert_eq!(mermaid("flowchart LR\n    A>Done]\n"), "╲───────┐\n > Done │\n╱───────┘");
+    }
+
+    #[test]
+    fn mermaid_parallelogram_nodes_lean_the_way_their_slashes_do() {
+        assert_eq!(mermaid("flowchart LR\n    A[/Done/]\n"), " ┌─────┐\n╱ Done ╱\n└─────┘");
+        assert_eq!(mermaid("flowchart LR\n    A[\\Done\\]\n"), "┌─────┐\n╲ Done ╲\n └─────┘");
+    }
+
+    #[test]
+    fn mermaid_trapezoid_nodes_widen_towards_their_base() {
+        assert_eq!(mermaid("flowchart LR\n    A[/Done\\]\n"), " ┌────┐\n╱ Done ╲\n└──────┘");
+        assert_eq!(mermaid("flowchart LR\n    A[\\Done/]\n"), "┌──────┐\n╲ Done ╱\n └────┘");
+    }
+
+    #[test]
+    fn mermaid_circle_nodes_bulge_at_the_label_row() {
+        assert_eq!(mermaid("flowchart LR\n    A((Done))\n"), " ╭────╮\n( Done )\n ╰────╯");
+        assert_eq!(mermaid("flowchart LR\n    A(((Done)))\n"), " ╭╭────╮╮\n(( Done ))\n ╰╰────╯╯");
+    }
+
+    #[test]
+    fn mermaid_quoted_labels_in_two_character_brackets_keep_bracket_characters() {
+        let stadium = mermaid("flowchart LR\n    A([\"x])y\"])\n");
+        assert!(stadium.lines().any(|line| line == "( x])y )"), "{stadium}");
+        let hexagon = mermaid("flowchart LR\n    A{{\"a}}b\"}}\n");
+        assert!(hexagon.lines().any(|line| line == "< a}}b >"), "{hexagon}");
+    }
+
+    #[test]
+    fn mermaid_td_link_into_a_shaped_node_points_at_its_top_border() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A --> B{{Done}}\n"),
+            "  ┌───┐\n  │ A │\n  └───┘\n    │\n    │\n    ▼\n ╱────╲\n< Done >\n ╲────╱"
+        );
+    }
+
+    #[test]
+    fn mermaid_example_document_flowcharts_with_stadium_nodes_render() {
+        let output = plain(include_str!("../../../examples/EXAMPLE.md"), None);
+        assert!(output.lines().any(|line| line.contains("( Done )")), "{output}");
+        assert!(output.lines().any(|line| line.contains("( ANSI output )")), "{output}");
+        assert!(!output.contains("E --> G([Done])"), "{output}");
+        assert!(!output.contains("Render --> Out([ANSI output])"), "{output}");
+    }
+
+    #[test]
+    fn mermaid_unclosed_two_character_brackets_are_syntax_errors() {
+        for node in [
+            "A([x)", "A([x]", "A[[x]", "A[(x)", "A((x)", "A(((x))", "A{{x}", "A>x", "A[/x]",
+            "A[\\x",
+        ] {
+            let body = format!("flowchart LR\n    {node}\n");
+            assert_eq!(
+                mermaid(&body),
+                format!("mermaid: line 2: unclosed node label\n```mermaid\n{body}```"),
+                "{node}"
+            );
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 mod draw;
 mod layout;
+mod outline;
 mod parse;
 mod route;
 

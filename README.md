@@ -45,8 +45,9 @@ or redirected, no width limit applies and the content keeps its natural width.
   break written as a reference such as `&#10;`, renders as one space.
 - A ```` ```mermaid ```` block holding a `flowchart` or `graph` diagram renders as boxes
   joined by box-drawing lines, in place of the code block. Supported: all five
-  directions (`TD`, `TB`, `BT`, `LR`, `RL`), rectangle, rounded and diamond nodes, solid,
-  dotted and thick links with arrow, circle and cross ends, longer links, edge labels,
+  directions (`TD`, `TB`, `BT`, `LR`, `RL`), rectangle, rounded, diamond, stadium,
+  subroutine, circle, double-circle, hexagon, parallelogram, trapezoid and asymmetric
+  nodes, solid, dotted and thick links with arrow, circle and cross ends, longer links, edge labels,
   `&` groups, and one level of `subgraph … end`. Styling statements such as `style` and
   `classDef`, and a `direction` statement outside a subgraph, are accepted and ignored,
   as in Mermaid. When the diagram is wider than the terminal,
@@ -57,7 +58,8 @@ or redirected, no width limit applies and the content keeps its natural width.
   above it naming the problem, such as `mermaid: line 2: unclosed node label`; this also
   applies to diagrams over Mermaid's limits of 50 000 characters or 500 edges. Other
   diagram types and features not supported yet (nested subgraphs, empty subgraphs,
-  `direction` inside a subgraph, other node shapes), and subgraphs whose frame would
+  `direction` inside a subgraph, the cylinder `[( )]` and ellipse `(- -)` node shapes,
+  `@{ shape: … }`), and subgraphs whose frame would
   cover a node or frame outside them, such as a non-member placed between members,
   render as the plain code block without that line.
 - Other control characters, including ones written as references such as `&#27;`, are

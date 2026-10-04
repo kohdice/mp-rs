@@ -5,6 +5,7 @@ use std::ops::RangeInclusive;
 
 use unicode_width::UnicodeWidthStr;
 
+use super::outline::outline;
 use super::parse::{Direction, Flowchart, Node};
 use super::signed;
 
@@ -115,9 +116,9 @@ pub(super) struct Spacing {
     pub sibling_gap: usize,
 }
 
-/// The label plus one space of padding and a border on each side.
+/// The label plus the cells its shape takes around it.
 pub(super) fn box_width(node: &Node) -> usize {
-    node.label.width() + 4
+    node.label.width() + outline(node.shape).padding()
 }
 
 /// The fewest screen rows from a subgraph frame's top or bottom border to its boxes,

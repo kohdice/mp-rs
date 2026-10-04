@@ -8,7 +8,8 @@ use crate::theme::Rgb;
 use crate::theme::solarized::DARK_PALETTE;
 
 use super::layout::{Axis, box_width};
-use super::parse::{Direction, Marker, Node, Shape, Stroke};
+use super::outline::{Row, outline};
+use super::parse::{Direction, Marker, Node, Stroke};
 use super::route::Scene;
 
 const LINE: Style = plain_style(DARK_PALETTE.muted);
@@ -162,21 +163,33 @@ fn draw_subgraph_frame<'a>(
 }
 
 fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node) {
-    let right = left + box_width(node) - 1;
-    let [top_left, top_right, bottom_left, bottom_right] = match node.shape {
-        Shape::Rectangle => ["┌", "┐", "└", "┘"],
-        Shape::Rounded => ["╭", "╮", "╰", "╯"],
-        Shape::Diamond => ["╱", "╲", "╲", "╱"],
-    };
-    canvas.put(top, left, top_left, LINE);
-    canvas.put(top, right, top_right, LINE);
-    canvas.put(top + 2, left, bottom_left, LINE);
-    canvas.put(top + 2, right, bottom_right, LINE);
-    for col in left + 1..right {
-        canvas.put(top, col, "─", LINE);
-        canvas.put(top + 2, col, "─", LINE);
+    let width = box_width(node);
+    let outline = outline(node.shape);
+    for (row, outline_row) in [(top, outline.top), (top + 2, outline.bottom)] {
+        if let Some((start, end)) = draw_row_ends(canvas, row, left, width, outline_row) {
+            for col in start..end {
+                canvas.put(row, col, "─", LINE);
+            }
+        }
     }
-    canvas.put(top + 1, left, "│", LINE);
-    canvas.put(top + 1, left + 2, &node.label, TEXT);
-    canvas.put(top + 1, right, "│", LINE);
+    draw_row_ends(canvas, top + 1, left, width, outline.label);
+    canvas.put(top + 1, left + outline.label_offset(), &node.label, TEXT);
+}
+
+/// Draws the end glyphs of `row` on a box `width` cells wide from `left`, and returns
+/// the cells between them.
+fn draw_row_ends(
+    canvas: &mut Canvas<'_>,
+    row: usize,
+    left: usize,
+    width: usize,
+    outline_row: Row,
+) -> Option<(usize, usize)> {
+    let [inset_left, inset_right] = outline_row.inset;
+    let [end_left, end_right] = outline_row.ends;
+    let start = left + inset_left;
+    let right_start = (left + width).checked_sub(inset_right + end_right.width())?;
+    canvas.put(row, start, end_left, LINE);
+    canvas.put(row, right_start, end_right, LINE);
+    Some((start + end_left.width(), right_start))
 }

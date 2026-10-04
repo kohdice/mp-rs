@@ -37,6 +37,26 @@ pub(super) enum Shape {
     Rounded,
     /// `A{label}`.
     Diamond,
+    /// `A([label])`.
+    Stadium,
+    /// `A[[label]]`.
+    Subroutine,
+    /// `A{{label}}`.
+    Hexagon,
+    /// `A>label]`.
+    Asymmetric,
+    /// `A[/label/]`, leaning right.
+    LeanRight,
+    /// `A[\label\]`, leaning left.
+    LeanLeft,
+    /// `A[/label\]`, wider at the bottom.
+    Trapezoid,
+    /// `A[\label/]`, wider at the top.
+    InvTrapezoid,
+    /// `A((label))`.
+    Circle,
+    /// `A(((label)))`.
+    DoubleCircle,
 }
 
 #[derive(Debug)]
@@ -81,14 +101,30 @@ pub(super) enum Marker {
     Cross,
 }
 
-/// The opening and closing brackets around a node label, and the shape they give.
-const BRACKETS: [(char, char, Shape); 3] =
-    [('[', ']', Shape::Rectangle), ('(', ')', Shape::Rounded), ('{', '}', Shape::Diamond)];
+/// The opening brackets of a node label, each with the closing brackets it may end with
+/// and the shape each pair gives. An opener comes before the shorter openers it starts
+/// with.
+const BRACKETS: [(&str, &[(&str, Shape)]); 11] = [
+    ("(((", &[(")))", Shape::DoubleCircle)]),
+    ("((", &[("))", Shape::Circle)]),
+    ("[/", &[("/]", Shape::LeanRight), ("\\]", Shape::Trapezoid)]),
+    ("[\\", &[("\\]", Shape::LeanLeft), ("/]", Shape::InvTrapezoid)]),
+    ("{{", &[("}}", Shape::Hexagon)]),
+    ("([", &[("])", Shape::Stadium)]),
+    ("[[", &[("]]", Shape::Subroutine)]),
+    ("[", &[("]", Shape::Rectangle)]),
+    ("(", &[(")", Shape::Rounded)]),
+    ("{", &[("}", Shape::Diamond)]),
+    (">", &[("]", Shape::Asymmetric)]),
+];
 
-/// Openers of Mermaid node shapes that have no text drawing: stadium, subroutine,
-/// cylinder, circle, hexagon, parallelograms and trapezoids, and `@{ shape: … }`. They
+/// Openers of upstream node shapes that are not drawn yet — the cylinder, the ellipse
+/// and `@{ shape: … }` — with the closer that must follow on the same line, if any. A
+/// node using one falls back to the code block, unless that closer is missing, which is
+/// a syntax error as for any other bracket; `@{` may also close on a later line. They
 /// are checked before `BRACKETS`, whose single-character openers they start with.
-const UNSUPPORTED_SHAPE_OPENERS: [&str; 8] = ["([", "[[", "[(", "((", "{{", "[/", "[\\", "@{"];
+const UNSUPPORTED_SHAPE_OPENERS: [(&str, Option<&str>); 3] =
+    [("[(", Some(")]")), ("(-", Some("-)")), ("@{", None)];
 
 /// Mermaid's default `flowchart.maxEdges`.
 const MAX_EDGES: usize = 500;
@@ -236,7 +272,7 @@ impl<'a> Builder<'a> {
             };
             let (label, after_link) = match after_link.trim_start().strip_prefix('|') {
                 Some(after_pipe) => {
-                    let (label, after_label) = bracket_label(after_pipe, '|')
+                    let (label, after_label) = bracket_label(after_pipe, "|")
                         .ok_or_else(|| syntax_error(line, "unclosed edge label"))?;
                     (Some(label.trim()), after_label.trim_start())
                 }
@@ -283,7 +319,7 @@ impl<'a> Builder<'a> {
         let (id, after_id) = quoted.unwrap_or_else(|| split_id(text));
         let (id, title) = match after_id.trim_start().strip_prefix('[') {
             Some(after_open) => {
-                let (title, _) = bracket_label(after_open, ']')
+                let (title, _) = bracket_label(after_open, "]")
                     .ok_or_else(|| syntax_error(line, "unclosed subgraph title"))?;
                 (id, title)
             }
@@ -346,15 +382,28 @@ impl<'a> Builder<'a> {
         {
             open.members.push(index);
         }
-        if UNSUPPORTED_SHAPE_OPENERS.iter().any(|opener| rest.starts_with(opener)) {
+        if let Some((after_open, close)) = UNSUPPORTED_SHAPE_OPENERS
+            .into_iter()
+            .find_map(|(open, close)| Some((rest.strip_prefix(open)?, close)))
+        {
+            if close.is_some_and(|close| bracket_label(after_open, close).is_none()) {
+                return Err(syntax_error(line, "unclosed node label"));
+            }
             return Err(Failure::Unsupported);
         }
         let bracketed = BRACKETS
             .into_iter()
-            .find_map(|(open, close, shape)| Some((rest.strip_prefix(open)?, close, shape)));
+            .find_map(|(open, closers)| Some((rest.strip_prefix(open)?, closers)));
         let rest = match bracketed {
-            Some((after_open, close, shape)) => {
-                let (label, after_label) = bracket_label(after_open, close)
+            Some((after_open, closers)) => {
+                let (label, shape, after_label) = closers
+                    .iter()
+                    .filter_map(|&(close, shape)| {
+                        let (label, after_label) = bracket_label(after_open, close)?;
+                        Some((label, shape, after_label))
+                    })
+                    // The closer found first ends the label.
+                    .min_by_key(|(label, ..)| label.len())
                     .ok_or_else(|| syntax_error(line, "unclosed node label"))?;
                 if let Some(node) = self.chart.nodes.get_mut(index) {
                     node.label = spaced(label);
@@ -505,7 +554,7 @@ fn split_id(text: &str) -> (&str, &str) {
 /// Splits `text`, which follows an opening bracket, into the label and the text after
 /// the `close` bracket. A label in double quotes may contain brackets; the quotes are
 /// not part of it.
-fn bracket_label(text: &str, close: char) -> Option<(&str, &str)> {
+fn bracket_label<'a>(text: &'a str, close: &str) -> Option<(&'a str, &'a str)> {
     match text.strip_prefix('"') {
         Some(quoted) => {
             let (label, after_quote) = quoted.split_once('"')?;
