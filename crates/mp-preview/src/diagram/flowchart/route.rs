@@ -7,7 +7,7 @@ use std::ops::RangeInclusive;
 use unicode_width::UnicodeWidthStr;
 
 use super::layout::{
-    Axis, Layered, SELF_LOOP_CELLS, TITLE_CORNER_OFFSET, entry_cells, frame_width, title_offset,
+    Axis, Layered, SELF_LOOP_CELLS, TITLE_CORNER_OFFSET, frame_width, port_cells, title_offset,
 };
 use super::parse::{Direction, Edge, Flowchart, Node, Subgraph};
 use super::signed;
@@ -118,14 +118,16 @@ pub(super) fn route<'a>(
         *size = (*size).max(axis.box_main_size(node));
     }
     let entries = entry_ports(chart, layered, axis)?;
+    let exits = exit_ports(chart, layered, axis)?;
 
     let mut turns = vec![false; slots.len()];
     let mut label_width = vec![0; layered.layer_count];
-    for (((edge, path), entries), &reversed) in
-        chart.edges.iter().zip(paths).zip(&entries).zip(&layered.reversed)
+    for ((((edge, path), entries), &reversed), &exit) in
+        chart.edges.iter().zip(paths).zip(&entries).zip(&layered.reversed).zip(&exits)
     {
-        for (&from, &entry) in path.iter().zip(entries) {
-            if slots.get(from)?.port != entry {
+        for (segment, (&from, &entry)) in path.iter().zip(entries).enumerate() {
+            let leave = if segment == 0 { exit } else { slots.get(from)?.port };
+            if leave != entry {
                 *turns.get_mut(from)? = true;
             }
         }
@@ -191,15 +193,15 @@ pub(super) fn route<'a>(
                 cross: slot.cross,
             });
         }
-        for (((edge, path), entries), &reversed) in
-            chart.edges.iter().zip(paths).zip(&entries).zip(&layered.reversed)
+        for ((((edge, path), entries), &reversed), &exit_cell) in
+            chart.edges.iter().zip(paths).zip(&entries).zip(&layered.reversed).zip(&exits)
         {
             let (&first, &last) = (path.first()?, path.last()?);
             let first_slot = slots.get(first)?;
             if first == last {
                 let node = chart.nodes.get(first)?;
                 let main = *layer_start.get(first_slot.layer)?;
-                let points = self_loop(axis, node, main, first_slot.cross, first_slot.port);
+                let points = self_loop(axis, node, main, first_slot.cross, exit_cell);
                 scene.links.push(Route { edge, points });
                 continue;
             }
@@ -207,16 +209,17 @@ pub(super) fn route<'a>(
                 Some(node) => layer_start.get(first_slot.layer)? + axis.box_main_size(node),
                 None => gap_start(first_slot.layer)?,
             };
-            let mut points = vec![(out, first_slot.port)];
-            for (&from_index, &entry) in path.iter().zip(entries) {
+            let mut points = vec![(out, exit_cell)];
+            for (segment, (&from_index, &entry)) in path.iter().zip(entries).enumerate() {
                 let from = slots.get(from_index)?;
-                if from.port != entry {
+                let leave = if segment == 0 { exit_cell } else { from.port };
+                if leave != entry {
                     let track = gap_start(from.layer)?
                         + exit.get(from.layer)?
                         + 1
                         + loop_cells.get(from.layer)?
                         + track_of.get(from_index)?;
-                    points.extend([(track, from.port), (track, entry)]);
+                    points.extend([(track, leave), (track, entry)]);
                 }
             }
             let entry = *entries.last()?;
@@ -499,6 +502,10 @@ fn shift(scene: &mut Scene<'_>, main: usize, cross: usize) {
         point.0 += main;
         point.1 += cross;
     }
+    for frame in &mut scene.frames {
+        frame.main = frame.main.start() + main..=frame.main.end() + main;
+        frame.cross = frame.cross.start() + cross..=frame.cross.end() + cross;
+    }
 }
 
 fn unsigned(value: isize) -> Option<usize> {
@@ -512,7 +519,11 @@ pub(super) fn place_labels(scene: &mut Scene<'_>, axis: Axis) {
     if scene.links.iter().all(|link| link.edge.label.is_none()) {
         return;
     }
-    let mut occupied = occupied_cells(scene, axis);
+    let mut occupied: HashSet<(isize, isize)> = occupied_cells(scene, axis)
+        .into_iter()
+        .filter_map(|(main, cross)| Some((signed(main)?, signed(cross)?)))
+        .collect();
+    let mut placed = Vec::new();
     for link in &scene.links {
         let Some(text) = &link.edge.label else { continue };
         let width = text.width();
@@ -520,20 +531,27 @@ pub(super) fn place_labels(scene: &mut Scene<'_>, axis: Axis) {
         let Some(preferred) = candidates.clone().next() else { continue };
         // Text runs along the flow in a horizontal layout and across it in a vertical
         // one; `offset` counts cells in that direction from the cell before the label.
-        let cell = |(main, cross): (usize, usize), offset: usize| match axis {
-            Axis::Horizontal => Some(((main + offset).checked_sub(1)?, cross)),
-            Axis::Vertical => Some((main, (cross + offset).checked_sub(1)?)),
+        let cell = |(main, cross): (isize, isize), offset: isize| match axis {
+            Axis::Horizontal => (main + offset - 1, cross),
+            Axis::Vertical => (main, cross + offset - 1),
         };
+        let Some(width) = signed(width) else { continue };
         let start = candidates
-            .find(|&start| {
-                (0..=width + 1)
-                    .filter_map(|offset| cell(start, offset))
-                    .all(|at| !occupied.contains(&at))
-            })
+            .find(|&start| (0..=width + 1).all(|offset| !occupied.contains(&cell(start, offset))))
             .unwrap_or(preferred);
-        occupied.extend((1..=width).filter_map(|offset| cell(start, offset)));
-        let (main, cross) = start;
-        scene.labels.push(PlacedLabel { text, main, cross });
+        occupied.extend((1..=width).map(|offset| cell(start, offset)));
+        placed.push((text, start));
+    }
+    // A label left of a line near the drawing's first column moves everything else on
+    // across the flow, as a frame reaching past it does.
+    let cross_shift = placed.iter().map(|&(_, (_, cross))| -cross).max().unwrap_or(0).max(0);
+    if let Some(by) = unsigned(cross_shift) {
+        shift(scene, 0, by);
+    }
+    for (text, (main, cross)) in placed {
+        if let (Some(main), Some(cross)) = (unsigned(main), unsigned(cross + cross_shift)) {
+            scene.labels.push(PlacedLabel { text, main, cross });
+        }
     }
 }
 
@@ -575,14 +593,16 @@ fn occupied_cells(scene: &Scene<'_>, axis: Axis) -> HashSet<(usize, usize)> {
 /// along the flow, from the target backwards, a run crossing a frame's border counting
 /// as separate runs on either side of it. In a horizontal layout the label is
 /// centred on the run, or starts at the first column when centring it would start
-/// before that, on the row above it and then on the row below; in a vertical
-/// one it starts two columns right of the run, on the run's middle row.
+/// before that, on the row above it and then on the row below; in a vertical one it
+/// starts two columns right of the run and then ends two columns left of it, each on
+/// the run's middle row and then on its other rows. A place left of the drawing's
+/// first column has a negative cell across the flow.
 fn label_candidates(
     points: &[(usize, usize)],
     width: usize,
     axis: Axis,
     frames: &[PlacedFrame<'_>],
-) -> impl Iterator<Item = (usize, usize)> + Clone {
+) -> impl Iterator<Item = (isize, isize)> + Clone {
     let last = points.len().saturating_sub(1);
     points.windows(2).enumerate().rev().flat_map(move |(index, pair)| {
         let runs = match pair {
@@ -605,14 +625,33 @@ fn label_candidates(
             _ => Vec::new(),
         };
         runs.into_iter().flat_map(move |(low, high, cross)| {
-            let places = match axis {
+            let places: Vec<(usize, isize)> = match axis {
                 Axis::Horizontal => {
                     let start = (low + high + 1).saturating_sub(width) / 2;
-                    [cross.checked_sub(1).map(|above| (start, above)), Some((start, cross + 1))]
+                    let rows = [cross.checked_sub(1), Some(cross + 1)];
+                    rows.into_iter()
+                        .flatten()
+                        .filter_map(|row| Some((start, signed(row)?)))
+                        .collect()
                 }
-                Axis::Vertical => [(low <= high).then(|| ((low + high) / 2, cross + 2)), None],
+                Axis::Vertical if low <= high => {
+                    let middle = (low + high) / 2;
+                    let rows =
+                        [middle].into_iter().chain((low..=high).filter(move |&row| row != middle));
+                    let (Some(line), Some(width)) = (signed(cross), signed(width)) else {
+                        return Vec::new();
+                    };
+                    [line + 2, line - 1 - width]
+                        .into_iter()
+                        .flat_map(|start| rows.clone().map(move |row| (row, start)))
+                        .collect()
+                }
+                Axis::Vertical => Vec::new(),
             };
-            places.into_iter().flatten()
+            places
+                .into_iter()
+                .filter_map(|(main, cross)| Some((signed(main)?, cross)))
+                .collect::<Vec<_>>()
         })
     })
 }
@@ -692,15 +731,39 @@ fn entry_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<V
         layered.paths.iter().map(|path| vec![0; path.len().saturating_sub(1)]).collect();
     for (slot_index, arrivals) in arrivals.iter().enumerate() {
         let slot = slots.get(slot_index)?;
-        let width = chart.nodes.get(slot_index).map_or(1, |node| axis.box_cross_size(node));
+        // A passing slot is a single cell.
+        let cells = chart.nodes.get(slot_index).map_or(0..=0, |node| axis.port_range(node));
         // Arrivals are listed by edge, so equal sources keep the order of their edges.
         let sources: Vec<usize> = arrivals.iter().map(|&(port, ..)| port).collect();
-        let cells = entry_cells(axis, &sources, width, slot.port.checked_sub(slot.cross)?)?;
+        let cells = port_cells(axis, &sources, &cells, slot.port.checked_sub(slot.cross)?)?;
         for (&(_, edge, segment), cell) in arrivals.iter().zip(cells) {
             *entries.get_mut(edge)?.get_mut(segment)? = slot.cross + cell;
         }
     }
     Some(entries)
+}
+
+/// For each edge, the cell across the flow where it leaves the first slot of its path.
+fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<usize>> {
+    let slots = &layered.slots;
+    let mut leaving = vec![Vec::new(); chart.nodes.len()];
+    for (edge, path) in layered.paths.iter().enumerate() {
+        let towards = match path.get(1) {
+            Some(&next) => (false, slots.get(next)?.port),
+            None => (true, 0),
+        };
+        leaving.get_mut(*path.first()?)?.push((towards, edge));
+    }
+    let mut exits = vec![0; layered.paths.len()];
+    for ((node, slot), leaving) in chart.nodes.iter().zip(slots).zip(&leaving) {
+        let others: Vec<_> = leaving.iter().map(|&(towards, _)| towards).collect();
+        let port = slot.port.checked_sub(slot.cross)?;
+        let cells = port_cells(axis, &others, &axis.port_range(node), port)?;
+        for (&(_, edge), cell) in leaving.iter().zip(cells) {
+            *exits.get_mut(edge)? = slot.cross + cell;
+        }
+    }
+    Some(exits)
 }
 
 /// A loop that leaves the box through the middle of its far border along the flow,

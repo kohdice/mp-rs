@@ -28,7 +28,8 @@ fn signed(value: usize) -> Option<isize> {
 /// the first drawing at most `width` columns wide and [`MAX_CELLS`] in size;
 /// unsupported when none fits.
 pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
-    let chart = parse::parse(source)?;
+    let mut chart = parse::parse(source)?;
+    layout::grow_boxes(&mut chart).ok_or(Failure::Unsupported)?;
     if chart.nodes.is_empty() {
         return Err(Failure::Unsupported);
     }

@@ -894,11 +894,147 @@ mod tests {
         assert!(c.1 > a.2 && c.1 > b.2, "{output}");
         assert!(is_line_glyph(glyph_at(&output, a.0, a.2 + 1)), "{output}");
         assert!(is_line_glyph(glyph_at(&output, b.0, b.2 + 1)), "{output}");
-        assert!(
-            (c.0 - 1..=c.0 + 1).any(|row| glyph_at(&output, row, c.1 - 1) == Some('►')),
-            "{output}"
-        );
+        let rows = |label| box_bounds(&output, label).map(|(top, _, bottom, _)| bottom - top + 1);
+        assert_eq!(rows("C"), Some(5), "{output}");
+        assert_eq!(rows("A"), Some(3), "{output}");
+        assert_eq!(rows("B"), Some(3), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+        assert_eq!(glyph_at(&output, c.0 - 1, c.1 - 1), Some('►'), "{output}");
+        assert_eq!(glyph_at(&output, c.0 + 1, c.1 - 1), Some('►'), "{output}");
+        assert_ne!(glyph_at(&output, c.0, c.1 - 1), Some('►'), "{output}");
         assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_three_links_into_one_box_enter_on_separate_rows() {
+        let output = mermaid("flowchart LR\n    A --> D\n    B --> D\n    C --> D\n");
+        let Some((top, left, bottom, _)) = box_bounds(&output, "D") else {
+            panic!("missing box in\n{output}");
+        };
+        let Some((row, ..)) = box_of(&output, "D") else { panic!("missing box in\n{output}") };
+
+        assert_eq!(bottom - top + 1, 5, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 3, "{output}");
+        for entry in row - 1..=row + 1 {
+            assert_eq!(glyph_at(&output, entry, left - 1), Some('►'), "{output}");
+        }
+        assert!(boxes_intact(&output, &["A", "B", "C", "D"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_fan_out_leaves_the_box_from_separate_cells() {
+        let output = mermaid("flowchart TD\n    A[Source node] --> B[Left]\n    A --> C[Right]\n");
+        let Some((row, left, right)) = box_of(&output, "Source node") else {
+            panic!("missing box in\n{output}");
+        };
+        let below: Vec<(usize, char)> = (left..=right)
+            .filter_map(|col| Some((col, glyph_at(&output, row + 2, col)?)))
+            .filter(|&(_, c)| is_line_glyph(Some(c)))
+            .collect();
+
+        assert_eq!(below.len(), 2, "{output}");
+        assert!(below.iter().all(|&(col, c)| c == '│' && col != left && col != right), "{output}");
+        assert_ne!(below.first().map(|&(col, _)| col), below.get(1).map(|&(col, _)| col));
+        assert_eq!(count_glyph(&output, '▼'), 2, "{output}");
+        assert!(boxes_intact(&output, &["Source node", "Left", "Right"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_exits_are_ordered_like_their_targets() {
+        let output = mermaid("flowchart TD\n    A[Source node] --> B[Left]\n    A --> C[Right]\n");
+
+        assert_eq!(count_glyph(&output, '┼'), 0, "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 2, "{output}");
+        assert!(boxes_intact(&output, &["Source node", "Left", "Right"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_children_spread_under_their_exits() {
+        let output = mermaid("flowchart TD\n    A[Source node] --> B[Left]\n    A --> C[Right]\n");
+        let [Some(a), Some(b), Some(c)] =
+            ["Source node", "Left", "Right"].map(|label| box_of(&output, label))
+        else {
+            panic!("missing box in\n{output}");
+        };
+        let below: Vec<usize> =
+            (a.1..=a.2).filter(|&col| is_line_glyph(glyph_at(&output, a.0 + 2, col))).collect();
+        let arrow_over = |(row, left, right): (usize, usize, usize)| {
+            (left..=right).find(|&col| glyph_at(&output, row - 2, col) == Some('▼'))
+        };
+        let zigzag = output.lines().enumerate().any(|(row, line)| {
+            let mut col = 0;
+            line.chars().any(|c| {
+                let at = col;
+                col += c.width().unwrap_or(0);
+                c == '└' && glyph_at(&output, row + 1, at) == Some('┐')
+            })
+        });
+
+        assert_eq!(below.len(), 2, "{output}");
+        assert!(below.iter().all(|&col| glyph_at(&output, a.0 + 2, col) == Some('│')), "{output}");
+        assert!(arrow_over(b).is_some_and(|col| below.first().is_some_and(|&exit| col <= exit)));
+        assert!(arrow_over(c).is_some_and(|col| below.last().is_some_and(|&exit| col >= exit)));
+        assert!(!zigzag, "{output}");
+        assert!(boxes_intact(&output, &["Source node", "Left", "Right"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_back_edge_head_has_its_own_cell() {
+        let output =
+            mermaid("flowchart TD\n    B{Ready?} -->|yes| C\n    B -->|no| D\n    D --> B\n");
+        let Some((row, left, right)) = box_of(&output, "Ready?") else {
+            panic!("missing box in\n{output}");
+        };
+        let below: Vec<(usize, char)> = (left..=right)
+            .filter_map(|col| Some((col, glyph_at(&output, row + 2, col)?)))
+            .collect();
+        let Some(head) = below.iter().find(|&&(_, c)| c == '▲').map(|&(col, _)| col) else {
+            panic!("missing back edge head in\n{output}");
+        };
+
+        assert_eq!(below.iter().filter(|&&(_, c)| c == '▲').count(), 1, "{output}");
+        assert!(below.iter().any(|&(col, c)| col != head && is_line_glyph(Some(c))), "{output}");
+        assert_eq!(whole_words(&output, "yes"), 1, "{output}");
+        assert_eq!(whole_words(&output, "no"), 1, "{output}");
+        assert!(boxes_intact(&output, &["Ready?", "C", "D"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_tail_marker_has_its_own_cell() {
+        let output = mermaid("flowchart TD\n    A[Source node] <--> B[Left]\n    A --> C[Right]\n");
+        let Some((row, left, right)) = box_of(&output, "Source node") else {
+            panic!("missing box in\n{output}");
+        };
+        let below: Vec<(usize, char)> = (left..=right)
+            .filter_map(|col| Some((col, glyph_at(&output, row + 2, col)?)))
+            .collect();
+        let column_of = |glyph: char| {
+            let found: Vec<usize> =
+                below.iter().filter(|&&(_, c)| c == glyph).map(|&(col, _)| col).collect();
+            (found.len() == 1).then(|| found.first().copied()).flatten()
+        };
+
+        let (Some(tail), Some(exit)) = (column_of('▲'), column_of('│')) else {
+            panic!("expected one ▲ and one │ below the box in\n{output}");
+        };
+        assert_ne!(tail, exit, "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 2, "{output}");
+        assert!(boxes_intact(&output, &["Source node", "Left", "Right"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_self_loop_and_exit_use_different_cells() {
+        let output = mermaid("flowchart TD\n    A[Source node] --> A\n    A --> B\n");
+        let Some((row, left, right)) = box_of(&output, "Source node") else {
+            panic!("missing box in\n{output}");
+        };
+        let below: Vec<usize> =
+            (left..=right).filter(|&col| glyph_at(&output, row + 2, col) == Some('│')).collect();
+
+        assert_eq!(below.len(), 2, "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 1, "{output}");
+        assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
+        assert!(boxes_intact(&output, &["Source node", "B"]), "{output}");
     }
 
     #[test]
@@ -1091,7 +1227,12 @@ mod tests {
         let [Some(a), Some(c)] = ["A", "C"].map(|label| box_of(&output, label)) else {
             panic!("missing box in\n{output}");
         };
-        let Some(loop_col) = (a.0 + 1..output.lines().count()).find_map(|row| {
+        let Some((_, _, a_bottom, _)) = box_bounds(&output, "A") else {
+            panic!("missing box in\n{output}");
+        };
+        // The self loop runs down beside A from A's bottom border on; above it, A's
+        // exits leave from rows of their own.
+        let Some(loop_col) = (a_bottom..output.lines().count()).find_map(|row| {
             (a.2 + 1..)
                 .take_while(|&col| glyph_at(&output, row, col).is_some())
                 .find(|&col| glyph_at(&output, row, col) == Some('│'))

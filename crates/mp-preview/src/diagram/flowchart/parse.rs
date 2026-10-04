@@ -27,6 +27,10 @@ pub(super) enum Direction {
 pub(super) struct Node {
     pub label: String,
     pub shape: Shape,
+    /// Cells the box is grown by across the flow on each side of its label, so that
+    /// every link end on one of its borders has a cell of its own; set by
+    /// [`grow_boxes`](super::layout::grow_boxes).
+    pub spread: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,7 +379,11 @@ impl<'a> Builder<'a> {
             return Err(syntax_error(line, "\"end\" cannot be a node id"));
         }
         let index = *self.index_of.entry(id).or_insert_with(|| {
-            self.chart.nodes.push(Node { label: id.to_owned(), shape: Shape::Rectangle });
+            self.chart.nodes.push(Node {
+                label: id.to_owned(),
+                shape: Shape::Rectangle,
+                spread: 0,
+            });
             self.chart.nodes.len() - 1
         });
         if let Some((_, open, members)) = &mut self.open

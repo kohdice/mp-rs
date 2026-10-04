@@ -51,8 +51,10 @@ or redirected, no width limit applies and the content keeps its natural width.
   thick links with arrow, circle and cross ends, longer links, edge labels, `&` groups,
   and one level of `subgraph … end`. Styling statements such as `style` and `classDef`,
   and a `direction` statement outside a subgraph, are accepted and ignored, as in
-  Mermaid. When the diagram is wider than the terminal, spacing is tightened; if it
-  still does not fit, it renders as the plain code block.
+  Mermaid. Every link meets a box at a cell of its own, so a box with several links on
+  one side is drawn taller (`LR`, `RL`) or wider (`TD`, `BT`) than its label needs.
+  When the diagram is wider than the terminal, spacing is tightened; if it still does
+  not fit, it renders as the plain code block.
   A diagram whose drawing would exceed an internal size limit also renders as the plain
   code block.
 - A Mermaid block that is not valid Mermaid renders as the plain code block with one line

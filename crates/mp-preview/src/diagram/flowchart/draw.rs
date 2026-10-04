@@ -69,7 +69,7 @@ pub(super) fn draw(scene: &Scene<'_>, direction: Direction) -> Vec<Line> {
     for placed in &scene.boxes {
         let (top, left) =
             frame.top_left(placed.main, placed.cross, axis.box_main_size(placed.node));
-        draw_box(&mut canvas, top, left, placed.node);
+        draw_box(&mut canvas, top, left, placed.node, axis);
     }
     for placed in &scene.frames {
         let (row_a, col_a) = frame.cell(*placed.main.start(), *placed.cross.start());
@@ -162,10 +162,18 @@ fn draw_subgraph_frame<'a>(
     canvas.put(top, start + 1 + title.width(), " ", TEXT);
 }
 
-fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node) {
-    let width = box_width(node);
+/// Draws `node`'s box with its top-left cell at `(top, left)`, grown by its spread on
+/// both sides of the label across the flow of `axis`: extra rows of sides above and
+/// below the label row in a horizontal layout, extra columns of border either side of
+/// the label in a vertical one.
+fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node, axis: Axis) {
+    let (extra_rows, extra_cols) = match axis {
+        Axis::Horizontal => (node.spread, 0),
+        Axis::Vertical => (0, node.spread),
+    };
+    let width = box_width(node) + 2 * extra_cols;
     let outline = outline(node.shape);
-    let bottom = top + outline.height() - 1;
+    let bottom = top + outline.height() + 2 * extra_rows - 1;
     let rim = outline.rim.map(|rim| (top + 1, rim));
     for (row, outline_row) in [(top, outline.top), (bottom, outline.bottom)].into_iter().chain(rim)
     {
@@ -175,9 +183,22 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
             }
         }
     }
-    let label_row = top + outline.label_row();
+    let label_row = top + outline.label_row() + extra_rows;
+    // The rows the box grew by carry its sides on, as plain lines where the label row
+    // has the shape's own glyphs.
+    let side = Row { inset: outline.label.inset, ends: outline.label.ends.map(plain_side) };
+    for row in label_row - extra_rows..=label_row + extra_rows {
+        if row != label_row {
+            draw_row_ends(canvas, row, left, width, side);
+        }
+    }
     draw_row_ends(canvas, label_row, left, width, outline.label);
-    canvas.put(label_row, left + outline.label_offset(), &node.label, TEXT);
+    canvas.put(label_row, left + outline.label_offset() + extra_cols, &node.label, TEXT);
+}
+
+/// A run of `│` as wide as the side glyphs `end`.
+fn plain_side(end: &str) -> &'static str {
+    if end.width() > 1 { "││" } else { "│" }
 }
 
 /// Draws the end glyphs of `row` on a box `width` cells wide from `left`, and returns
