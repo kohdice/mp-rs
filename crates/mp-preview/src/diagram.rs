@@ -301,6 +301,24 @@ mod tests {
         })
     }
 
+    /// Whether the box `(label row, left, right)`, as [`box_of`] gives it, lies strictly
+    /// inside the frame `(top, left, bottom, right)`.
+    fn box_inside_frame(
+        (row, box_left, box_right): (usize, usize, usize),
+        (top, left, bottom, right): (usize, usize, usize, usize),
+    ) -> bool {
+        top < row && row < bottom && left < box_left && box_right < right
+    }
+
+    /// Whether the frame `inner` lies strictly inside the frame `outer`, both given as
+    /// `(top, left, bottom, right)`.
+    fn frame_inside_frame(
+        (top, left, bottom, right): (usize, usize, usize, usize),
+        (outer_top, outer_left, outer_bottom, outer_right): (usize, usize, usize, usize),
+    ) -> bool {
+        outer_top < top && outer_left < left && bottom < outer_bottom && right < outer_right
+    }
+
     /// The bounds of the frame titled `title` when all four borders are whole: `┌─ title ─`
     /// continued by `─` up to `┐`, `│` down both sides, or `┼` where a link crosses, and
     /// `└─…─┘` along the bottom.
@@ -1426,10 +1444,69 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_non_member_between_subgraph_members_falls_back_without_a_reason_line() {
-        let body = "flowchart LR\n    A --> B --> C\n    subgraph s\n    A\n    C\n    end\n";
+    fn mermaid_non_member_between_subgraph_members_is_placed_outside_the_frame() {
+        let output =
+            mermaid("flowchart LR\n    A --> B --> C\n    subgraph s\n    A\n    C\n    end\n");
+        let (Some(frame), Some(a), Some(b), Some(c)) = (
+            intact_crossed_frame(&output, "s"),
+            box_of(&output, "A"),
+            box_of(&output, "B"),
+            box_of(&output, "C"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
 
-        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        assert!(box_inside_frame(a, frame), "{output}");
+        assert!(box_inside_frame(c, frame), "{output}");
+        assert!(box_outside_frame(&output, "B", frame), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+        assert!(a.2 < b.1 && b.1 < c.1, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_non_member_declared_before_a_member_in_a_spanned_layer_stays_outside() {
+        let output = mermaid(
+            "flowchart LR\n    A --> B\n    B --> Y\n    B --> D\n    subgraph s\n    B\n    D\n    end\n",
+        );
+        let (Some(frame), Some(b), Some(d)) =
+            (crossed_frame_of(&output, "s"), box_of(&output, "B"), box_of(&output, "D"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        assert!(box_inside_frame(b, frame), "{output}");
+        assert!(box_inside_frame(d, frame), "{output}");
+        assert!(box_outside_frame(&output, "A", frame), "{output}");
+        assert!(box_outside_frame(&output, "Y", frame), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 3, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "Y", "D"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_non_member_between_subgraph_members_is_placed_outside_the_frame() {
+        let output =
+            mermaid("flowchart TD\n    A --> B --> C\n    subgraph s\n    A\n    C\n    end\n");
+        let (Some(frame), Some(a), Some(c), Some(a_bounds), Some(b_bounds), Some(c_bounds)) = (
+            intact_crossed_frame(&output, "s"),
+            box_of(&output, "A"),
+            box_of(&output, "C"),
+            box_bounds(&output, "A"),
+            box_bounds(&output, "B"),
+            box_bounds(&output, "C"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        assert!(box_inside_frame(a, frame), "{output}");
+        assert!(box_inside_frame(c, frame), "{output}");
+        assert!(box_outside_frame(&output, "B", frame), "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 2, "{output}");
+        assert!(a_bounds.2 < b_bounds.0 && b_bounds.0 < c_bounds.0, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
     }
 
     #[test]
@@ -1518,28 +1595,432 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_empty_subgraph_falls_back_without_a_reason_line() {
-        for body in [
-            "flowchart LR\n    subgraph s\n    end\n    A --> B\n",
-            "flowchart LR\n    A --> B\n    subgraph s\n    style A fill:#f9f\n    end\n",
-        ] {
-            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+    fn mermaid_empty_subgraph_renders_as_a_titled_frame() {
+        assert_eq!(mermaid("flowchart LR\n    subgraph s\n    end\n"), "┌─ s ─┐\n│     │\n└─────┘");
+    }
+
+    #[test]
+    fn mermaid_empty_subgraph_beside_other_nodes_keeps_them_intact() {
+        // A subgraph holding only an ignored statement is empty.
+        let output =
+            mermaid("flowchart LR\n    A --> B\n    subgraph s\n    style A fill:#f9f\n    end\n");
+        let Some(frame) = intact_frame(&output, "s") else {
+            panic!("missing or broken frame in\n{output}");
+        };
+
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        assert!(box_outside_frame(&output, "A", frame), "{output}");
+        assert!(box_outside_frame(&output, "B", frame), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 1, "{output}");
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_subgraph_with_its_own_direction_lays_out_its_members_that_way() {
+        assert_eq!(
+            mermaid("flowchart LR\n    subgraph s\n    direction TB\n    A --> B\n    end\n"),
+            "┌─ s ───┐\n│ ┌───┐ │\n│ │ A │ │\n│ └───┘ │\n│   │   │\n│   │   │\n│   ▼   │\n│ ┌───┐ │\n│ │ B │ │\n│ └───┘ │\n└───────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_is_read_like_tb_inside_a_subgraph() {
+        assert_eq!(
+            mermaid("flowchart LR\n    subgraph s\n    direction TD\n    A --> B\n    end\n"),
+            mermaid("flowchart LR\n    subgraph s\n    direction TB\n    A --> B\n    end\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_link_into_a_unit_subgraph_ends_at_its_frame() {
+        let output = mermaid(
+            "flowchart LR\n    X --> s\n    subgraph s\n    direction TB\n    A --> B\n    end\n",
+        );
+        let (Some((top, left, bottom, _)), Some(x), Some(a), Some(b)) = (
+            intact_frame(&output, "s"),
+            box_of(&output, "X"),
+            box_of(&output, "A"),
+            box_of(&output, "B"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let into: Vec<_> = arrowheads(&output).into_iter().filter(|&(.., c)| c == '►').collect();
+
+        assert_eq!(into.len(), 1, "{output}");
+        assert!(
+            into.iter().all(|&(row, col, _)| col + 1 == left && top < row && row < bottom),
+            "{output}"
+        );
+        assert!(a.1 == b.1 && a.0 < b.0, "{output}");
+        assert!(x.2 < left, "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 1, "{output}");
+        assert!(boxes_intact(&output, &["X", "A", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_out_of_a_unit_subgraph_starts_at_its_frame() {
+        let output = mermaid(
+            "flowchart LR\n    subgraph s\n    direction TB\n    A --> B\n    end\n    s --> Y\n",
+        );
+        let (Some((.., right)), Some((y_row, y_left, _))) =
+            (intact_frame(&output, "s"), box_of(&output, "Y"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let into: Vec<_> = arrowheads(&output).into_iter().filter(|&(.., c)| c == '►').collect();
+
+        assert_eq!(into, vec![(y_row, y_left - 1, '►')], "{output}");
+        assert!(is_line_glyph(glyph_at(&output, y_row, right + 1)), "{output}");
+        assert!(y_left > right, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "Y"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_subgraph_direction_is_ignored_when_a_member_links_outside() {
+        let output = mermaid(
+            "flowchart LR\n    subgraph s\n    direction TB\n    A --> B\n    end\n    X --> A\n",
+        );
+        let (Some(frame), Some(a), Some(b)) =
+            (intact_crossed_frame(&output, "s"), box_of(&output, "A"), box_of(&output, "B"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert!(is_lr_chain(&output, &["X", "A", "B"]), "{output}");
+        assert!(box_inside_frame(a, frame) && box_inside_frame(b, frame), "{output}");
+        assert!(box_outside_frame(&output, "X", frame), "{output}");
+    }
+
+    #[test]
+    fn mermaid_subgraph_direction_is_kept_when_only_its_id_links_outside() {
+        let output = mermaid(
+            "flowchart LR\n    subgraph subgraph1\n    direction TB\n    top1 --> bottom1\n    end\n    subgraph subgraph2\n    direction TB\n    top2 --> bottom2\n    end\n    outside --> subgraph1\n    outside ---> top2\n",
+        );
+        let find = |title: &str| {
+            intact_frame(&output, title).or_else(|| intact_crossed_frame(&output, title))
+        };
+        let (Some(one), Some(two)) = (find("subgraph1"), find("subgraph2")) else {
+            panic!("missing frame in\n{output}");
+        };
+        let (Some(top1), Some(bottom1), Some(top2), Some(bottom2), Some(outside)) = (
+            box_of(&output, "top1"),
+            box_of(&output, "bottom1"),
+            box_of(&output, "top2"),
+            box_of(&output, "bottom2"),
+            box_of(&output, "outside"),
+        ) else {
+            panic!("missing box in\n{output}");
+        };
+        let into_one = arrowheads(&output)
+            .into_iter()
+            .filter(|&(row, col, c)| c == '►' && col + 1 == one.1 && one.0 < row && row < one.2)
+            .count();
+
+        // A TB child is centred under its parent, so boxes of different widths share
+        // their centre column rather than their left border. A box of even width has no
+        // middle cell; the layout takes the one right of the middle, `left + width / 2`.
+        let centre = |(_, left, right): (usize, usize, usize)| (left + right).div_ceil(2);
+        assert!(centre(top1) == centre(bottom1) && top1.0 < bottom1.0, "{output}");
+        assert!(top2.0 == bottom2.0 && top2.2 < bottom2.1, "{output}");
+        assert!(outside.2 < one.1 && outside.2 < two.1, "{output}");
+        assert_eq!(into_one, 1, "{output}");
+        assert!(
+            boxes_intact(&output, &["outside", "top1", "bottom1", "top2", "bottom2"]),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn mermaid_nested_unit_subgraphs_each_follow_their_own_direction() {
+        let output = mermaid(
+            "flowchart LR\n    subgraph TOP\n    direction TB\n    subgraph B1\n    direction RL\n    i1 -->f1\n    end\n    subgraph B2\n    direction BT\n    i2 -->f2\n    end\n    end\n    A --> TOP --> B\n    B1 --> B2\n",
+        );
+        let (Some(top), Some(b1), Some(b2)) =
+            (frame_of(&output, "TOP"), frame_of(&output, "B1"), frame_of(&output, "B2"))
+        else {
+            panic!("missing frame in\n{output}");
+        };
+        let labels = ["A", "B", "i1", "f1", "i2", "f2"];
+        let Some([a, b, i1, f1, i2, f2]) = labels
+            .iter()
+            .map(|label| box_bounds(&output, label))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|bounds| <[_; 6]>::try_from(bounds).ok())
+        else {
+            panic!("missing box in\n{output}");
+        };
+        let (Some(f1_row), Some(i1_row)) = (box_of(&output, "f1"), box_of(&output, "i1")) else {
+            panic!("missing box in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+        let with = |glyph: char| -> Vec<(usize, usize)> {
+            arrows.iter().filter(|&&(.., c)| c == glyph).map(|&(row, col, _)| (row, col)).collect()
+        };
+
+        assert!(frame_inside_frame(b1, top) && frame_inside_frame(b2, top), "{output}");
+        assert!(b1.2 < b2.0, "{output}");
+        assert!(f1.3 < i1.1 && f1_row.0 == i1_row.0, "{output}");
+        assert_eq!(with('◄'), vec![(f1_row.0, f1.3 + 1)], "{output}");
+        assert!(f2.0 < i2.0 && f2.1 == i2.1, "{output}");
+        let up = with('▲');
+        assert_eq!(up.len(), 1, "{output}");
+        assert!(
+            up.iter().all(|&(row, col)| row == f2.2 + 1 && f2.1 < col && col < f2.3),
+            "{output}"
+        );
+        assert!(a.3 < top.1 && top.1 < top.3 && top.3 < b.1, "{output}");
+        let down = with('▼');
+        assert_eq!(down.len(), 1, "{output}");
+        assert!(down.iter().all(|&(row, _)| row + 1 == b2.0), "{output}");
+        let mut right = with('►');
+        right.sort_unstable_by_key(|&(_, col)| col);
+        assert_eq!(right.len(), 2, "{output}");
+        assert!(right.first().is_some_and(|&(_, col)| col + 1 == top.1), "{output}");
+        assert!(right.last().is_some_and(|&(_, col)| col + 1 == b.1), "{output}");
+        assert_eq!(arrows.len(), 5, "{output}");
+        assert!(boxes_intact(&output, &["i1", "f1", "i2", "f2"]), "{output}");
+        // The titles `B1` and `B2` contain `B`, which `boxes_intact` requires to occur once.
+        for (top, left, bottom, right) in [a, b] {
+            assert_eq!(glyph_at(&output, top, left), Some('┌'), "{output}");
+            assert_eq!(glyph_at(&output, top, right), Some('┐'), "{output}");
+            assert_eq!(glyph_at(&output, bottom, left), Some('└'), "{output}");
+            assert_eq!(glyph_at(&output, bottom, right), Some('┘'), "{output}");
         }
     }
 
     #[test]
-    fn mermaid_nested_subgraph_and_inner_direction_fall_back_without_a_reason_line() {
+    fn mermaid_nested_subgraph_draws_a_frame_inside_a_frame() {
+        assert_eq!(
+            mermaid("flowchart LR\n    subgraph a\n    subgraph b\n    A\n    end\n    end\n"),
+            "┌─ a ───────┐\n│ ┌─ b ───┐ │\n│ │ ┌───┐ │ │\n│ │ │ A │ │ │\n│ │ └───┘ │ │\n│ └───────┘ │\n└───────────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_nested_subgraph_member_belongs_to_both_frames() {
+        let output = mermaid(
+            "flowchart LR\n    subgraph a\n    X\n    subgraph b\n    A\n    end\n    end\n",
+        );
+        let (Some(a), Some(b), Some(x), Some(inner)) = (
+            intact_frame(&output, "a"),
+            intact_frame(&output, "b"),
+            box_of(&output, "X"),
+            box_of(&output, "A"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert!(frame_inside_frame(b, a), "{output}");
+        assert!(box_inside_frame(inner, b), "{output}");
+        assert!(box_inside_frame(x, a), "{output}");
+        assert!(box_outside_frame(&output, "X", b), "{output}");
+        assert!(boxes_intact(&output, &["X", "A"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_from_outside_into_a_nested_member_crosses_both_frames() {
+        let output = mermaid(
+            "flowchart LR\n    S --> A\n    subgraph a\n    subgraph b\n    A\n    end\n    end\n",
+        );
+        let (Some(a), Some(b), Some((row, left, _))) = (
+            intact_crossed_frame(&output, "a"),
+            intact_crossed_frame(&output, "b"),
+            box_of(&output, "A"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert_eq!(arrowheads(&output), vec![(row, left - 1, '►')], "{output}");
+        assert_eq!(glyph_at(&output, row, a.1), Some('┼'), "{output}");
+        assert_eq!(glyph_at(&output, row, b.1), Some('┼'), "{output}");
+        assert!(box_outside_frame(&output, "S", a), "{output}");
+        assert!(box_outside_frame(&output, "S", b), "{output}");
+        assert!(boxes_intact(&output, &["S", "A"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_to_a_nested_subgraph_id_ends_at_the_inner_frame() {
+        let output = mermaid(
+            "flowchart LR\n    S --> b\n    subgraph a\n    subgraph b\n    A\n    end\n    end\n",
+        );
+        let (Some(a), Some((top, left, bottom, _))) =
+            (crossed_frame_of(&output, "a"), crossed_frame_of(&output, "b"))
+        else {
+            panic!("missing frame in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+
+        assert_eq!(box_of(&output, "b"), None, "{output}");
+        assert_eq!(arrows.len(), 1, "{output}");
+        assert!(
+            arrows.iter().all(|&(row, col, c)| {
+                c == '►'
+                    && col + 1 == left
+                    && top < row
+                    && row < bottom
+                    && glyph_at(&output, row, a.1) == Some('┼')
+            }),
+            "{output}"
+        );
+        assert!(boxes_intact(&output, &["S", "A"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_to_an_outer_subgraph_places_inner_members_after_the_source() {
+        let output = mermaid(
+            "flowchart LR\n    S --> a\n    subgraph a\n    X\n    subgraph b\n    A\n    end\n    end\n",
+        );
+        let (Some((_, left, ..)), Some(s), Some(x), Some(inner)) = (
+            crossed_frame_of(&output, "a"),
+            box_of(&output, "S"),
+            box_of(&output, "X"),
+            box_of(&output, "A"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+
+        assert_eq!(arrows.len(), 1, "{output}");
+        assert!(arrows.iter().all(|&(_, col, c)| c == '►' && col + 1 == left), "{output}");
+        assert!(x.1 > s.2 && inner.1 > s.2, "{output}");
+        assert!(boxes_intact(&output, &["S", "X", "A"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_three_levels_of_nesting_draw_three_frames() {
+        let output = mermaid(
+            "flowchart TD\n    subgraph a\n    subgraph b\n    subgraph c\n    A\n    end\n    end\n    end\n",
+        );
+        let (Some(a), Some(b), Some(c), Some(inner)) = (
+            intact_frame(&output, "a"),
+            intact_frame(&output, "b"),
+            intact_frame(&output, "c"),
+            box_of(&output, "A"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+
+        assert!(frame_inside_frame(c, b), "{output}");
+        assert!(frame_inside_frame(b, a), "{output}");
+        assert!(box_inside_frame(inner, c), "{output}");
+        assert!(boxes_intact(&output, &["A"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_link_across_nested_frames_crosses_the_inner_top_border() {
+        let output = mermaid(
+            "flowchart TD\n    subgraph a\n    X --> A\n    subgraph b\n    A\n    end\n    end\n",
+        );
+        let (Some(b), Some(_), Some((a_top, a_left, _, a_right))) = (
+            intact_crossed_frame(&output, "b"),
+            intact_frame(&output, "a"),
+            box_bounds(&output, "A"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+
+        assert_eq!(arrows.len(), 1, "{output}");
+        assert!(
+            arrows.iter().all(|&(row, col, c)| {
+                c == '▼'
+                    && row + 1 == a_top
+                    && a_left < col
+                    && col < a_right
+                    && glyph_at(&output, b.0, col) == Some('┼')
+            }),
+            "{output}"
+        );
+        assert_eq!(
+            words(output.lines().nth(b.0).unwrap_or_default()).filter(|&word| word == "b").count(),
+            1,
+            "{output}"
+        );
+        assert!(boxes_intact(&output, &["X", "A"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_example_document_nested_subgraph_flowchart_renders() {
+        let document = plain(include_str!("../../../examples/EXAMPLE.md"), None);
+        let output = mermaid(
+            "flowchart TD\n    subgraph services [ServicesLayer]\n    Svc1[Receive request] --> Svc2[Validate payload]\n    subgraph adapters [AdaptersLayer]\n    A1[DB adapter] --> A2[Cache adapter]\n    end\n    Svc2 --> A1\n    end\n    A2 --> Out([Done])\n",
+        );
+        let (Some(services), Some(adapters)) = (
+            crossed_frame_of(&output, "ServicesLayer"),
+            crossed_frame_of(&output, "AdaptersLayer"),
+        ) else {
+            panic!("missing frame in\n{output}");
+        };
+        let inside =
+            |label: &str, frame| box_of(&output, label).is_some_and(|b| box_inside_frame(b, frame));
+        let done_row = output.lines().position(|line| line.contains("( Done )"));
+
+        assert!(!document.contains("subgraph adapters [AdaptersLayer]"), "{document}");
+        assert!(
+            document.contains("ServicesLayer") && document.contains("AdaptersLayer"),
+            "{document}"
+        );
+        assert!(frame_inside_frame(adapters, services), "{output}");
+        for label in ["Receive request", "Validate payload"] {
+            assert!(inside(label, services), "{label} in\n{output}");
+            assert!(box_outside_frame(&output, label, adapters), "{label} in\n{output}");
+        }
+        for label in ["DB adapter", "Cache adapter"] {
+            assert!(inside(label, adapters), "{label} in\n{output}");
+        }
+        assert!(done_row.is_some_and(|row| row > services.2), "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 4, "{output}");
+        assert!(
+            boxes_intact(
+                &output,
+                &["Receive request", "Validate payload", "DB adapter", "Cache adapter"]
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn mermaid_direction_before_a_word_that_names_no_direction_is_a_syntax_error() {
         for body in [
-            "flowchart LR\n    subgraph a\n    subgraph b\n    A\n    end\n    end\n",
-            "flowchart LR\n    subgraph a\n    direction TD\n    A\n    end\n",
+            "flowchart LR\n    subgraph s\n    direction XY\n    A\n    end\n",
+            "flowchart LR\n    A\n    direction XY\n",
         ] {
-            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+            assert_eq!(
+                mermaid(body),
+                format!("mermaid: line 3: expected a link\n```mermaid\n{body}```"),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_direction_before_a_link_is_a_node_like_mermaid() {
+        for body in [
+            "flowchart LR\n    direction --> A\n",
+            "flowchart LR\n    subgraph s\n    direction --> A\n    end\n",
+        ] {
+            let output = mermaid(body);
+
+            assert!(boxes_intact(&output, &["direction", "A"]), "{body}\n{output}");
+            assert_eq!(arrowheads(&output).len(), 1, "{body}\n{output}");
         }
     }
 
     #[test]
     fn mermaid_top_level_direction_statement_is_ignored_like_mermaid() {
         assert_eq!(mermaid("flowchart LR\n    direction TB\n    A --> B\n"), mermaid(LR_A_TO_B));
+    }
+
+    #[test]
+    fn mermaid_direction_without_a_direction_word_is_a_node_like_mermaid() {
+        for body in [
+            "flowchart LR\n    direction\n",
+            "flowchart LR\n    subgraph s\n    direction\n    end\n",
+        ] {
+            let output = mermaid(body);
+
+            assert!(box_of(&output, "direction").is_some(), "{body}\n{output}");
+        }
     }
 
     #[test]
@@ -1908,38 +2389,223 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_subgraph_links_that_cannot_be_placed_fall_back_without_a_reason_line() {
-        for body in [
-            "flowchart LR\n    subgraph s\n    A\n    end\n    A --> s\n",
-            "flowchart LR\n    A --> s\n    s --> A\n    subgraph s\n    B\n    end\n",
-            "flowchart LR\n    A --> s\n    subgraph s\n    end\n",
-        ] {
-            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
-        }
+    fn mermaid_link_from_a_member_to_its_own_subgraph_falls_back_without_a_reason_line() {
+        let body = "flowchart LR\n    subgraph s\n    A\n    end\n    A --> s\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
+    }
+
+    #[test]
+    fn mermaid_subgraph_listed_in_two_blocks_that_do_not_nest_falls_back() {
+        let body = "flowchart LR\n    subgraph a\n    x\n    end\n    subgraph b\n    x\n    end\n    subgraph x\n    C\n    end\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
+    }
+
+    #[test]
+    fn mermaid_subgraphs_listed_in_each_other_fall_back() {
+        let body = "flowchart LR\n    subgraph a\n    b\n    end\n    subgraph b\n    a\n    end\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
+    }
+
+    #[test]
+    fn mermaid_link_from_a_member_of_a_directed_subgraph_to_another_subgraph_falls_back() {
+        let body = "flowchart LR\n    subgraph s\n    direction TB\n    A\n    end\n    subgraph t\n    B\n    end\n    A --> t\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
+    }
+
+    #[test]
+    fn mermaid_links_into_an_empty_subgraph_top_down_enter_its_top_border_apart() {
+        // The number of arrowheads just above the top border of frame `s`, and the
+        // frame's width.
+        let entries = |body: &str| {
+            let output = mermaid(body);
+            let (top, left, _, right) = intact_crossed_frame(&output, "s")?;
+            let arrows = (left + 1..right)
+                .filter(|&col| glyph_at(&output, top - 1, col) == Some('▼'))
+                .count();
+            Some((arrows, right - left))
+        };
+        let one = entries("flowchart TD\n    A --> s\n    subgraph s\n    end\n");
+        let two = entries("flowchart TD\n    A --> s\n    B --> s\n    subgraph s\n    end\n");
+
+        let (Some((1, one_width)), Some((2, two_width))) = (one, two) else {
+            panic!("{one:?} {two:?}");
+        };
+        assert!(one_width < two_width, "{one_width} {two_width}");
+    }
+
+    #[test]
+    fn mermaid_cycle_through_a_subgraph_end_draws_the_later_link_backwards() {
+        let output =
+            mermaid("flowchart LR\n    A --> s\n    s --> A\n    subgraph s\n    B\n    end\n");
+        let (Some((top, left, bottom, _)), Some((a_top, _, a_bottom, a_right))) =
+            (intact_frame(&output, "s"), box_bounds(&output, "A"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let heads = |glyph: char| -> Vec<(usize, usize)> {
+            arrowheads(&output)
+                .into_iter()
+                .filter(|&(.., c)| c == glyph)
+                .map(|(row, col, _)| (row, col))
+                .collect()
+        };
+        let (into, back) = (heads('►'), heads('◄'));
+
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        assert!(a_right < left, "{output}");
+        assert_eq!(into.len(), 1, "{output}");
+        assert!(
+            into.iter().all(|&(row, col)| col + 1 == left && top < row && row < bottom),
+            "{output}"
+        );
+        assert_eq!(back.len(), 1, "{output}");
+        assert!(
+            back.iter().all(|&(row, col)| col == a_right + 1 && a_top <= row && row <= a_bottom),
+            "{output}"
+        );
+        assert_eq!(a_bottom - a_top, 4, "{output}");
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_link_into_an_empty_subgraph_ends_at_its_frame() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> s\n    subgraph s\n    end\n"),
+            "┌───┐     ┌─ s ─┐\n│ A │────►│     │\n└───┘     └─────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_link_into_an_empty_subgraph_points_at_its_top_border() {
+        let output = mermaid("flowchart TD\n    A --> s\n    subgraph s\n    end\n");
+        let Some((top, left, bottom, right)) = intact_crossed_frame(&output, "s") else {
+            panic!("missing or broken frame in\n{output}");
+        };
+        let Some(title) = title_cells(&output, top, left, "s") else {
+            panic!("missing title in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+
+        assert_eq!(arrows.len(), 1, "{output}");
+        assert!(
+            arrows.iter().all(|&(row, col, c)| {
+                c == '▼'
+                    && row + 1 == top
+                    && left < col
+                    && col < right
+                    && !title.contains(&col)
+                    && glyph_at(&output, top, col) == Some('─')
+            }),
+            "{output}"
+        );
+        assert_eq!(bottom - top, 2, "{output}");
+        assert!(boxes_intact(&output, &["A"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_links_into_an_empty_subgraph_enter_on_rows_of_their_own() {
+        let output = mermaid("flowchart LR\n    A --> s\n    B --> s\n    subgraph s\n    end\n");
+        let Some((top, left, bottom, _)) = intact_crossed_frame(&output, "s") else {
+            panic!("missing or broken frame in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+
+        assert_eq!(arrows.len(), 2, "{output}");
+        assert!(
+            arrows
+                .iter()
+                .all(|&(row, col, c)| c == '►' && col + 1 == left && top < row && row < bottom),
+            "{output}"
+        );
+        assert_ne!(arrows.first().map(|arrow| arrow.0), arrows.last().map(|arrow| arrow.0));
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
     }
 
     const UPSTREAM_SUBGRAPH_EDGES_EXAMPLE: &str = "flowchart TB\n    c1-->a2\n    subgraph one\n    a1-->a2\n    end\n    subgraph two\n    b1-->b2\n    end\n    subgraph three\n    c1-->c2\n    end\n    one --> two\n    three --> two\n    two --> c2\n";
 
     #[test]
-    fn mermaid_upstream_subgraph_edges_example_falls_back_until_cycles_through_subgraphs_are_drawn()
-    {
-        let body = UPSTREAM_SUBGRAPH_EDGES_EXAMPLE;
-
-        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
-    }
-
-    #[test]
-    fn mermaid_upstream_subgraph_edges_example_without_its_cycle_renders_every_link() {
-        let body = UPSTREAM_SUBGRAPH_EDGES_EXAMPLE.replace("    two --> c2\n", "");
-        let output = mermaid(&body);
+    fn mermaid_upstream_subgraph_edges_example_renders_every_link() {
+        let output = mermaid(UPSTREAM_SUBGRAPH_EDGES_EXAMPLE);
+        let (Some(one), Some(two), Some(three), Some((_, c2_left, c2_bottom, c2_right))) = (
+            crossed_frame_of(&output, "one"),
+            crossed_frame_of(&output, "two"),
+            crossed_frame_of(&output, "three"),
+            box_bounds(&output, "c2"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let arrows = arrowheads(&output);
+        let up: Vec<_> = arrows.iter().filter(|&&(.., c)| c == '▲').collect();
 
         assert!(!output.starts_with("mermaid:"), "{output}");
         for title in ["one", "two", "three"] {
-            assert!(crossed_frame_of(&output, title).is_some(), "{title} in\n{output}");
             assert_eq!(box_of(&output, title), None, "{title} in\n{output}");
         }
         assert!(boxes_intact(&output, &["a1", "a2", "b1", "b2", "c1", "c2"]), "{output}");
-        assert_eq!(arrowheads(&output).len(), 6, "{output}");
+        assert_eq!(arrows.len(), 7, "{output}");
+        assert_eq!(up.len(), 1, "{output}");
+        assert!(
+            up.iter()
+                .all(|&&(row, col, _)| row == c2_bottom + 1 && c2_left < col && col < c2_right),
+            "{output}"
+        );
+        assert!(two.0 > three.0 && two.0 > one.0, "{output}");
+    }
+
+    #[test]
+    fn mermaid_node_cycle_reverses_the_last_declared_link() {
+        let output = mermaid("flowchart LR\n    A --> B\n    C --> A\n    B --> C\n");
+        let (Some(a), Some(b), Some(c)) =
+            (box_of(&output, "A"), box_of(&output, "B"), box_of(&output, "C"))
+        else {
+            panic!("missing box in\n{output}");
+        };
+        let back: Vec<_> = arrowheads(&output).into_iter().filter(|&(.., g)| g == '◄').collect();
+
+        assert!(!is_lr_chain(&output, &["A", "B", "C"]), "{output}");
+        assert!(c.1 < a.1 && a.1 < b.1, "{output}");
+        assert_eq!(back.len(), 1, "{output}");
+        assert!(back.iter().all(|&(_, col, _)| col == c.2 + 1), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_reversed_link_out_of_a_subgraph_starts_at_the_frame_border_facing_its_target() {
+        let output = mermaid(
+            "flowchart TD\n    A --> s\n    subgraph s\n    B --> C\n    end\n    s --> A\n",
+        );
+        let frame = intact_frame(&output, "s").or_else(|| intact_crossed_frame(&output, "s"));
+        let (Some((top, _, bottom, _)), Some((_, a_left, a_bottom, a_right))) =
+            (frame, box_bounds(&output, "A"))
+        else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let up: Vec<_> = arrowheads(&output).into_iter().filter(|&(.., g)| g == '▲').collect();
+        let width = widest(&output);
+        let marked = |row: usize| -> Vec<char> {
+            (0..width)
+                .filter_map(|col| glyph_at(&output, row, col))
+                .filter(|&c| is_line_glyph(Some(c)) || "►◄▲▼".contains(c))
+                .collect()
+        };
+        let mut above = marked(top - 1);
+        above.sort_unstable();
+
+        assert_eq!(up.len(), 1, "{output}");
+        assert!(
+            up.iter().all(|&(row, col, _)| row == a_bottom + 1 && a_left < col && col < a_right),
+            "{output}"
+        );
+        assert!(top > a_bottom, "{output}");
+        assert_eq!(above, vec!['│', '▼'], "{output}");
+        assert!(marked(bottom + 1).iter().all(|&c| !is_line_glyph(Some(c))), "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 2, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
     }
 
     #[test]
@@ -2105,12 +2771,17 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_subgraph_id_referenced_inside_another_subgraph_falls_back_without_a_reason_line() {
+    fn mermaid_listing_a_subgraph_id_inside_another_nests_it() {
+        let nested =
+            mermaid("flowchart LR\n    subgraph a\n    subgraph b\n    X\n    end\n    end\n");
         for body in [
             "flowchart LR\n    subgraph a\n    b\n    end\n    subgraph b\n    X\n    end\n",
             "flowchart LR\n    subgraph b\n    X\n    end\n    subgraph a\n    b\n    end\n",
         ] {
-            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+            let output = mermaid(body);
+
+            assert_eq!(output, nested, "{body}");
+            assert_eq!(box_of(&output, "b"), None, "{output}");
         }
     }
 

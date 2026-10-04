@@ -49,7 +49,9 @@ or redirected, no width limit applies and the content keeps its natural width.
   subroutine, cylinder, circle, double-circle, hexagon, parallelogram, trapezoid and
   asymmetric nodes, `@{ shape: … }` with a `label`, for those shapes, solid, dotted and
   thick links with arrow, circle and cross ends, longer links, edge labels, `&` groups,
-  one level of `subgraph … end`, and links to and from subgraphs. Styling statements
+  nested `subgraph … end` blocks, `direction` inside a subgraph (ignored, as in Mermaid,
+  when one of its nodes links outside), and links to and from subgraphs; a link that
+  closes a cycle is drawn backwards. Styling statements
   such as `style` and `classDef`, and a `direction` statement outside a subgraph, are
   accepted and ignored, as in Mermaid. Every link meets a box at a cell of its own, so a box with several links on
   one side is drawn taller (`LR`, `RL`) or wider (`TD`, `BT`) than its label needs.
@@ -60,11 +62,8 @@ or redirected, no width limit applies and the content keeps its natural width.
 - A Mermaid block that is not valid Mermaid renders as the plain code block with one line
   above it naming the problem, such as `mermaid: line 2: unclosed node label`; this also
   applies to diagrams over Mermaid's limits of 50 000 characters or 500 edges. Other
-  diagram types and features not supported yet (nested subgraphs, empty subgraphs,
-  `direction` inside a subgraph, the ellipse `(- -)`, images and the other `@{ shape }`
-  names, multi-line `@{ }`, and a link to a subgraph that closes a cycle), and subgraphs whose frame would cover a node or frame
-  outside them, such as a non-member placed between members, render as the plain code
-  block without that line.
+  diagram types and features not supported yet (the ellipse `(- -)`, images and the other
+  `@{ shape }` names, and multi-line `@{ }`) render as the plain code block without that line.
 - Other control characters, including ones written as references such as `&#27;`, are
   shown as control pictures such as `␛`, and C1 control characters such as `&#155;` as
   `�`, so a document can never inject escape sequences into the terminal.

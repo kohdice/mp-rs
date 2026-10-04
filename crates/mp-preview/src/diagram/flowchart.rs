@@ -6,6 +6,7 @@ mod layout;
 mod outline;
 mod parse;
 mod route;
+mod unit;
 
 use crate::diagram::Failure;
 use crate::style::Line;
@@ -24,11 +25,18 @@ fn signed(value: usize) -> Option<isize> {
     isize::try_from(value).ok()
 }
 
+/// Parses `source` and draws it as [`render_chart`] does; a syntax error comes from
+/// parsing.
+pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
+    render_chart(parse::parse(source)?, width)
+}
+
 /// Lays the chart out with the default spacing and then tighter spacings, stopping at
 /// the first drawing at most `width` columns wide and [`MAX_CELLS`] in size;
-/// unsupported when none fits.
-pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
-    let mut chart = parse::parse(source)?;
+/// unsupported when none fits. A subgraph laid out in a direction of its own is drawn
+/// first and placed as one box.
+fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Line>, Failure> {
+    let mut chart = unit::embed_units(chart)?;
     layout::grow_boxes(&mut chart).ok_or(Failure::Unsupported)?;
     if chart.nodes.is_empty() {
         return Err(Failure::Unsupported);

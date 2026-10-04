@@ -9,7 +9,7 @@ use crate::theme::solarized::DARK_PALETTE;
 
 use super::layout::{Axis, box_width};
 use super::outline::{Row, outline};
-use super::parse::{Direction, Marker, Node, Stroke};
+use super::parse::{Body, Direction, Marker, Node, Stroke};
 use super::route::Scene;
 
 const LINE: Style = plain_style(DARK_PALETTE.muted);
@@ -165,14 +165,31 @@ fn draw_subgraph_frame<'a>(
 /// Draws `node`'s box with its top-left cell at `(top, left)`, grown by its spread on
 /// both sides of the label across the flow of `axis`: extra rows of sides above and
 /// below the label row in a horizontal layout, extra columns of border either side of
-/// the label in a vertical one.
+/// the label in a vertical one. A hidden node draws nothing, and a drawing is copied
+/// in whole.
 fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node, axis: Axis) {
+    let (label, shape) = match &node.body {
+        Body::Box { label, shape } => (label, *shape),
+        Body::Hidden => return,
+        Body::Drawing(drawing) => {
+            // Its cells become text, which Canvas::line never overwrites, so no link is
+            // drawn through the subgraph.
+            for (row, line) in (top..).zip(drawing) {
+                let mut col = left;
+                for span in line {
+                    canvas.put(row, col, &span.text, span.style);
+                    col += span.text.width();
+                }
+            }
+            return;
+        }
+    };
     let (extra_rows, extra_cols) = match axis {
         Axis::Horizontal => (node.spread, 0),
         Axis::Vertical => (0, node.spread),
     };
     let width = box_width(node) + 2 * extra_cols;
-    let outline = outline(node.shape);
+    let outline = outline(shape);
     let bottom = top + outline.height() + 2 * extra_rows - 1;
     let rim = outline.rim.map(|rim| (top + 1, rim));
     for (row, outline_row) in [(top, outline.top), (bottom, outline.bottom)].into_iter().chain(rim)
@@ -193,7 +210,7 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
         }
     }
     draw_row_ends(canvas, label_row, left, width, outline.label);
-    canvas.put(label_row, left + outline.label_offset() + extra_cols, &node.label, TEXT);
+    canvas.put(label_row, left + outline.label_offset() + extra_cols, label, TEXT);
 }
 
 /// A run of `│` as wide as the side glyphs `end`.
