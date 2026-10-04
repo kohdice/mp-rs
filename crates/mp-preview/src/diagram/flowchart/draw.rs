@@ -165,15 +165,17 @@ fn draw_subgraph_frame<'a>(
 fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node) {
     let width = box_width(node);
     let outline = outline(node.shape);
-    for (row, outline_row) in [(top, outline.top), (top + 2, outline.bottom)] {
+    let bottom = top + outline.height() - 1;
+    for (row, outline_row) in [(top, outline.top), (bottom, outline.bottom)] {
         if let Some((start, end)) = draw_row_ends(canvas, row, left, width, outline_row) {
             for col in start..end {
                 canvas.put(row, col, "─", LINE);
             }
         }
     }
-    draw_row_ends(canvas, top + 1, left, width, outline.label);
-    canvas.put(top + 1, left + outline.label_offset(), &node.label, TEXT);
+    let label_row = top + outline.label_row();
+    draw_row_ends(canvas, label_row, left, width, outline.label);
+    canvas.put(label_row, left + outline.label_offset(), &node.label, TEXT);
 }
 
 /// Draws the end glyphs of `row` on a box `width` cells wide from `left`, and returns

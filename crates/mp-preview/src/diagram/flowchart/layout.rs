@@ -9,9 +9,6 @@ use super::outline::outline;
 use super::parse::{Direction, Flowchart, Node};
 use super::signed;
 
-/// Rows of every box: a border, the label, a border.
-pub(super) const BOX_HEIGHT: usize = 3;
-
 /// Cells a self loop runs through beyond its box, both along the flow and across it;
 /// the layout keeps the ones across the flow free.
 pub(super) const SELF_LOOP_CELLS: usize = 2;
@@ -47,14 +44,14 @@ impl Axis {
     pub(super) fn box_main_size(self, node: &Node) -> usize {
         match self {
             Self::Horizontal => box_width(node),
-            Self::Vertical => BOX_HEIGHT,
+            Self::Vertical => box_height(node),
         }
     }
 
     /// The cells a box spans across the flow.
     pub(super) fn box_cross_size(self, node: &Node) -> usize {
         match self {
-            Self::Horizontal => BOX_HEIGHT,
+            Self::Horizontal => box_height(node),
             Self::Vertical => box_width(node),
         }
     }
@@ -63,7 +60,7 @@ impl Axis {
     /// that links leave and enter: the label row, or the centre column.
     fn port_offset(self, node: &Node) -> usize {
         match self {
-            Self::Horizontal => BOX_HEIGHT / 2,
+            Self::Horizontal => outline(node.shape).label_row(),
             Self::Vertical => box_width(node) / 2,
         }
     }
@@ -119,6 +116,11 @@ pub(super) struct Spacing {
 /// The label plus the cells its shape takes around it.
 pub(super) fn box_width(node: &Node) -> usize {
     node.label.width() + outline(node.shape).padding()
+}
+
+/// The rows of a node's box.
+fn box_height(node: &Node) -> usize {
+    outline(node.shape).height()
 }
 
 /// The fewest screen rows from a subgraph frame's top or bottom border to its boxes,

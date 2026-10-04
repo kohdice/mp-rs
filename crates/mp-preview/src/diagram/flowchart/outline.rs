@@ -22,6 +22,16 @@ pub(super) struct Outline {
 }
 
 impl Outline {
+    /// Rows the box takes.
+    pub(super) fn height(&self) -> usize {
+        3
+    }
+
+    /// Rows from the box's top row to its label row.
+    pub(super) fn label_row(&self) -> usize {
+        1
+    }
+
     /// Cells from the box's left edge to its label.
     pub(super) fn label_offset(&self) -> usize {
         self.label.inset[0] + self.label.ends[0].width() + 1
