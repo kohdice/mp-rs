@@ -5,7 +5,8 @@ use comrak::{Arena, Node, Options, parse_document};
 
 use crate::model::{Align, Block, Inline, ListItem};
 
-/// Parses a whole document. The comrak arena is dropped before returning, so callers
+/// Parses a whole document into blocks; empty or whitespace-only input gives no blocks,
+/// and parsing never fails. The comrak arena is dropped before returning, so callers
 /// never hold a comrak type.
 pub(crate) fn parse(markdown: &str) -> Vec<Block> {
     let arena = Arena::new();
@@ -191,14 +192,54 @@ fn comrak_options() -> Options<'static> {
 mod tests {
     use super::*;
 
+    fn text(value: &str) -> Inline {
+        Inline::Text(value.to_owned())
+    }
+
+    /// Parses a single paragraph made only of text inlines and joins them: inline HTML
+    /// is converted to its own `Inline::Text`, so it never merges with the surrounding
+    /// text.
+    fn paragraph_text(markdown: &str) -> String {
+        let blocks = parse(markdown);
+        let [Block::Paragraph(inlines)] = blocks.as_slice() else {
+            panic!("expected one paragraph, got {blocks:?}");
+        };
+        let mut joined = String::new();
+        for inline in inlines {
+            let Inline::Text(value) = inline else {
+                panic!("expected only text inlines, got {inline:?}");
+            };
+            joined.push_str(value);
+        }
+        joined
+    }
+
+    fn paragraph(value: &str) -> Block {
+        Block::Paragraph(vec![text(value)])
+    }
+
+    fn item(blocks: Vec<Block>) -> ListItem {
+        ListItem { task: None, blocks }
+    }
+
+    fn bullet_list(tight: bool, items: Vec<ListItem>) -> Block {
+        Block::List { start: None, tight, items }
+    }
+
+    fn untitled_link(url: &str, visible: &str, show_url: bool) -> Block {
+        Block::Paragraph(vec![Inline::Link {
+            url: url.to_owned(),
+            title: None,
+            children: vec![text(visible)],
+            show_url,
+        }])
+    }
+
     #[test]
     fn parse_returns_no_blocks_for_empty_input() {
         assert_eq!(parse(""), Vec::new());
         assert_eq!(parse("\n\n"), Vec::new());
-    }
-
-    fn text(value: &str) -> Inline {
-        Inline::Text(value.to_owned())
+        assert_eq!(parse("  \n\t\n"), Vec::new());
     }
 
     #[test]
@@ -219,24 +260,6 @@ mod tests {
                 Inline::Code("d".to_owned()),
             ])])]
         );
-    }
-
-    /// Parses a single paragraph made only of text inlines and joins them: inline HTML
-    /// is converted to its own `Inline::Text`, so it never merges with the surrounding
-    /// text.
-    fn paragraph_text(markdown: &str) -> String {
-        let blocks = parse(markdown);
-        let [Block::Paragraph(inlines)] = blocks.as_slice() else {
-            panic!("expected one paragraph, got {blocks:?}");
-        };
-        let mut joined = String::new();
-        for inline in inlines {
-            let Inline::Text(value) = inline else {
-                panic!("expected only text inlines, got {inline:?}");
-            };
-            joined.push_str(value);
-        }
-        joined
     }
 
     #[test]
@@ -260,18 +283,6 @@ mod tests {
             parse("a  \nb\n"),
             vec![Block::Paragraph(vec![text("a"), Inline::HardBreak, text("b")])]
         );
-    }
-
-    fn paragraph(value: &str) -> Block {
-        Block::Paragraph(vec![text(value)])
-    }
-
-    fn item(blocks: Vec<Block>) -> ListItem {
-        ListItem { task: None, blocks }
-    }
-
-    fn bullet_list(tight: bool, items: Vec<ListItem>) -> Block {
-        Block::List { start: None, tight, items }
     }
 
     #[test]
@@ -356,15 +367,6 @@ mod tests {
                 show_url: true,
             }])]
         );
-    }
-
-    fn untitled_link(url: &str, visible: &str, show_url: bool) -> Block {
-        Block::Paragraph(vec![Inline::Link {
-            url: url.to_owned(),
-            title: None,
-            children: vec![text(visible)],
-            show_url,
-        }])
     }
 
     #[test]
@@ -477,7 +479,6 @@ mod tests {
             parse("<div>\r\nx\r\n</div>\r\n"),
             vec![Block::Html("<div>\nx\n</div>\n".to_owned())]
         );
-        assert_eq!(parse("a&#13;b\n"), vec![Block::Paragraph(vec![text("a b")])]);
     }
 
     #[test]

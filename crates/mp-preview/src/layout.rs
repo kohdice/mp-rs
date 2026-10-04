@@ -355,6 +355,7 @@ mod tests {
 
     #[test]
     fn empty_task_item_renders_marker_and_box_without_trailing_space() {
+        // Markdown cannot produce a task item without content, so the block is built by hand.
         let list = Block::List {
             start: None,
             tight: true,
@@ -617,5 +618,10 @@ mod tests {
     #[test]
     fn html_block_renders_verbatim_without_its_final_newline_or_wrapping() {
         assert_eq!(plain("<div>\n\tx\n</div>\n", Some(3)), "<div>\n    x\n</div>");
+    }
+
+    #[test]
+    fn unclosed_html_block_drops_whitespace_only_trailing_lines() {
+        assert_eq!(plain("<!--\nfoo\n  \n", None), "<!--\nfoo");
     }
 }

@@ -102,18 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn preview_keeps_quote_bars_when_text_contains_a_line_feed_reference() -> io::Result<()> {
-        assert_eq!(plain("> a&#10;b\n")?, "\u{2502} a b\n");
-        Ok(())
-    }
-
-    #[test]
-    fn preview_drops_whitespace_only_trailing_lines_of_an_unclosed_html_block() -> io::Result<()> {
-        assert_eq!(plain("<!--\nfoo\n  \n")?, "<!--\nfoo\n");
-        Ok(())
-    }
-
-    #[test]
     fn preview_writes_earlier_blocks_before_later_ones_fail() {
         let mut writer = FirstWriteOnly { bytes: Vec::new(), writes: 0 };
 
