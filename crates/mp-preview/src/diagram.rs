@@ -602,6 +602,47 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_cylinder_node_has_an_elliptical_top() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[(Done)]\n"),
+            "╭──────╮\n├──────┤\n│ Done │\n╰──────╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_lr_link_into_a_cylinder_enters_on_its_label_row() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> B[(DB)]\n"),
+            "          ╭────╮\n┌───┐     ├────┤\n│ A │────►│ DB │\n└───┘     ╰────╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_link_into_a_cylinder_points_at_its_top_arc() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A --> B[(D)]\n"),
+            "┌───┐\n│ A │\n└───┘\n  │\n  │\n  ▼\n╭───╮\n├───┤\n│ D │\n╰───╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_lr_cylinder_beside_a_box_in_one_layer_keeps_both_intact() {
+        let output = mermaid("flowchart LR\n    A --> B\n    A --> C[(D)]\n");
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        let (Some(_), Some((b_row, b_left, _)), Some((d_row, d_left, _))) =
+            (box_of(&output, "A"), box_of(&output, "B"), box_of(&output, "D"))
+        else {
+            panic!("{output}");
+        };
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+        assert_eq!(glyph_at(&output, b_row, b_left - 1), Some('►'), "{output}");
+        assert_eq!(glyph_at(&output, d_row, d_left - 1), Some('►'), "{output}");
+        let cylinder_rows = d_row - 2..=d_row + 1;
+        assert!((b_row - 1..=b_row + 1).all(|row| !cylinder_rows.contains(&row)), "{output}");
+    }
+
+    #[test]
     fn mermaid_quoted_labels_in_two_character_brackets_keep_bracket_characters() {
         let stadium = mermaid("flowchart LR\n    A([\"x])y\"])\n");
         assert!(stadium.lines().any(|line| line == "( x])y )"), "{stadium}");

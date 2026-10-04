@@ -13,10 +13,13 @@ pub(super) struct Row {
     pub ends: [&'static str; 2],
 }
 
-/// A box drawn as a border row, the label row and a border row.
+/// A box drawn as a border row, an optional second border row, the label row and a
+/// border row.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Outline {
     pub top: Row,
+    /// A border row between the top row and the label row: a cylinder's lower arc.
+    pub rim: Option<Row>,
     pub label: Row,
     pub bottom: Row,
 }
@@ -24,12 +27,12 @@ pub(super) struct Outline {
 impl Outline {
     /// Rows the box takes.
     pub(super) fn height(&self) -> usize {
-        3
+        self.label_row() + 2
     }
 
     /// Rows from the box's top row to its label row.
     pub(super) fn label_row(&self) -> usize {
-        1
+        1 + usize::from(self.rim.is_some())
     }
 
     /// Cells from the box's left edge to its label.
@@ -44,7 +47,8 @@ impl Outline {
 }
 
 /// The rows of a box of `shape`. A shape's feature lies in its end glyphs and in rows
-/// inset from the box's sides, so that every shape keeps the rectangle's three rows.
+/// inset from the box's sides, so that every shape but the cylinder keeps the
+/// rectangle's three rows.
 pub(super) fn outline(shape: Shape) -> Outline {
     const fn row(inset: [usize; 2], ends: [&'static str; 2]) -> Row {
         Row { inset, ends }
@@ -82,6 +86,9 @@ pub(super) fn outline(shape: Shape) -> Outline {
         Shape::DoubleCircle => {
             [row(INSET, ["╭╭", "╮╮"]), row(FLUSH, ["((", "))"]), row(INSET, ["╰╰", "╯╯"])]
         }
+        Shape::Cylinder => [row(FLUSH, ["╭", "╮"]), row(FLUSH, ["│", "│"]), row(FLUSH, ["╰", "╯"])],
     };
-    Outline { top, label, bottom }
+    // The lower arc of the ellipse on top needs a row of its own.
+    let rim = matches!(shape, Shape::Cylinder).then_some(row(FLUSH, ["├", "┤"]));
+    Outline { top, rim, label, bottom }
 }

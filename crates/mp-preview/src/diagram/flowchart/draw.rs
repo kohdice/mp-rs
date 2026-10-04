@@ -166,7 +166,9 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
     let width = box_width(node);
     let outline = outline(node.shape);
     let bottom = top + outline.height() - 1;
-    for (row, outline_row) in [(top, outline.top), (bottom, outline.bottom)] {
+    let rim = outline.rim.map(|rim| (top + 1, rim));
+    for (row, outline_row) in [(top, outline.top), (bottom, outline.bottom)].into_iter().chain(rim)
+    {
         if let Some((start, end)) = draw_row_ends(canvas, row, left, width, outline_row) {
             for col in start..end {
                 canvas.put(row, col, "─", LINE);

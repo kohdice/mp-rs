@@ -57,6 +57,8 @@ pub(super) enum Shape {
     Circle,
     /// `A(((label)))`.
     DoubleCircle,
+    /// `A[(label)]`.
+    Cylinder,
 }
 
 #[derive(Debug)]
@@ -104,7 +106,8 @@ pub(super) enum Marker {
 /// The opening brackets of a node label, each with the closing brackets it may end with
 /// and the shape each pair gives. An opener comes before the shorter openers it starts
 /// with.
-const BRACKETS: [(&str, &[(&str, Shape)]); 11] = [
+const BRACKETS: [(&str, &[(&str, Shape)]); 12] = [
+    ("[(", &[(")]", Shape::Cylinder)]),
     ("(((", &[(")))", Shape::DoubleCircle)]),
     ("((", &[("))", Shape::Circle)]),
     ("[/", &[("/]", Shape::LeanRight), ("\\]", Shape::Trapezoid)]),
@@ -118,13 +121,12 @@ const BRACKETS: [(&str, &[(&str, Shape)]); 11] = [
     (">", &[("]", Shape::Asymmetric)]),
 ];
 
-/// Openers of upstream node shapes that are not drawn yet — the cylinder, the ellipse
-/// and `@{ shape: … }` — with the closer that must follow on the same line, if any. A
-/// node using one falls back to the code block, unless that closer is missing, which is
-/// a syntax error as for any other bracket; `@{` may also close on a later line. They
-/// are checked before `BRACKETS`, whose single-character openers they start with.
-const UNSUPPORTED_SHAPE_OPENERS: [(&str, Option<&str>); 3] =
-    [("[(", Some(")]")), ("(-", Some("-)")), ("@{", None)];
+/// Openers of upstream node shapes that are not drawn yet — the ellipse and
+/// `@{ shape: … }` — with the closer that must follow on the same line, if any. A node
+/// using one falls back to the code block, unless that closer is missing, which is a
+/// syntax error as for any other bracket; `@{` may also close on a later line. They are
+/// checked before `BRACKETS`, whose single-character openers they start with.
+const UNSUPPORTED_SHAPE_OPENERS: [(&str, Option<&str>); 2] = [("(-", Some("-)")), ("@{", None)];
 
 /// Mermaid's default `flowchart.maxEdges`.
 const MAX_EDGES: usize = 500;
