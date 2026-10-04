@@ -121,12 +121,11 @@ const BRACKETS: [(&str, &[(&str, Shape)]); 12] = [
     (">", &[("]", Shape::Asymmetric)]),
 ];
 
-/// Openers of upstream node shapes that are not drawn yet — the ellipse and
-/// `@{ shape: … }` — with the closer that must follow on the same line, if any. A node
-/// using one falls back to the code block, unless that closer is missing, which is a
-/// syntax error as for any other bracket; `@{` may also close on a later line. They are
-/// checked before `BRACKETS`, whose single-character openers they start with.
-const UNSUPPORTED_SHAPE_OPENERS: [(&str, Option<&str>); 2] = [("(-", Some("-)")), ("@{", None)];
+/// Brackets of upstream node shapes that are not drawn yet: the ellipse. A node using
+/// one falls back to the code block, unless the closer is missing, which is a syntax
+/// error as for any other bracket. They are checked before `BRACKETS`, whose
+/// single-character openers they start with.
+const UNSUPPORTED_SHAPE_OPENERS: [(&str, &str); 1] = [("(-", "-)")];
 
 /// Mermaid's default `flowchart.maxEdges`.
 const MAX_EDGES: usize = 500;
@@ -388,7 +387,7 @@ impl<'a> Builder<'a> {
             .into_iter()
             .find_map(|(open, close)| Some((rest.strip_prefix(open)?, close)))
         {
-            if close.is_some_and(|close| bracket_label(after_open, close).is_none()) {
+            if bracket_label(after_open, close).is_none() {
                 return Err(syntax_error(line, "unclosed node label"));
             }
             return Err(Failure::Unsupported);
@@ -416,8 +415,232 @@ impl<'a> Builder<'a> {
             None => rest,
         };
         let rest = rest.strip_prefix(":::").map_or(rest, |class| split_id(class).1);
+        let rest = match rest.strip_prefix("@{") {
+            Some(after_open) => {
+                let (data, after_data) = shape_data(line, after_open)?;
+                if let Some(node) = self.chart.nodes.get_mut(index) {
+                    if let Some(shape) = data.shape {
+                        node.shape = shape;
+                    }
+                    if let Some(label) = data.label {
+                        node.label = spaced(label);
+                    }
+                }
+                after_data
+            }
+            None => rest,
+        };
         Ok((index, rest.trim_start()))
     }
+}
+
+/// What a node's `@{ … }` shape data sets.
+struct ShapeData<'a> {
+    shape: Option<Shape>,
+    /// Replaces the label, also one given in brackets.
+    label: Option<&'a str>,
+}
+
+/// Upstream's names and aliases for the shapes drawn here, the `shape` values of
+/// `@{ … }`, from the table "Complete List of New Shapes" in
+/// <https://mermaid.js.org/syntax/flowchart.html>.
+const SHAPE_NAMES: [(&str, Shape); 44] = [
+    ("rect", Shape::Rectangle),
+    ("proc", Shape::Rectangle),
+    ("process", Shape::Rectangle),
+    ("rectangle", Shape::Rectangle),
+    ("rounded", Shape::Rounded),
+    ("event", Shape::Rounded),
+    ("diam", Shape::Diamond),
+    ("decision", Shape::Diamond),
+    ("diamond", Shape::Diamond),
+    ("question", Shape::Diamond),
+    ("stadium", Shape::Stadium),
+    ("pill", Shape::Stadium),
+    ("terminal", Shape::Stadium),
+    ("fr-rect", Shape::Subroutine),
+    ("framed-rectangle", Shape::Subroutine),
+    ("subproc", Shape::Subroutine),
+    ("subprocess", Shape::Subroutine),
+    ("subroutine", Shape::Subroutine),
+    ("cyl", Shape::Cylinder),
+    ("cylinder", Shape::Cylinder),
+    ("database", Shape::Cylinder),
+    ("db", Shape::Cylinder),
+    ("circle", Shape::Circle),
+    ("circ", Shape::Circle),
+    ("dbl-circ", Shape::DoubleCircle),
+    ("double-circle", Shape::DoubleCircle),
+    ("hex", Shape::Hexagon),
+    ("hexagon", Shape::Hexagon),
+    ("prepare", Shape::Hexagon),
+    ("lean-r", Shape::LeanRight),
+    ("lean-right", Shape::LeanRight),
+    ("in-out", Shape::LeanRight),
+    ("lean-l", Shape::LeanLeft),
+    ("lean-left", Shape::LeanLeft),
+    ("out-in", Shape::LeanLeft),
+    ("trap-b", Shape::Trapezoid),
+    ("priority", Shape::Trapezoid),
+    ("trapezoid", Shape::Trapezoid),
+    ("trapezoid-bottom", Shape::Trapezoid),
+    ("trap-t", Shape::InvTrapezoid),
+    ("inv-trapezoid", Shape::InvTrapezoid),
+    ("manual", Shape::InvTrapezoid),
+    ("trapezoid-top", Shape::InvTrapezoid),
+    ("odd", Shape::Asymmetric),
+];
+
+/// The rest of the names and aliases in the same table, for shapes not drawn yet.
+const UNDRAWN_SHAPE_NAMES: [&str; 96] = [
+    "bang",
+    "browser",
+    "bucket",
+    "notch-rect",
+    "card",
+    "notched-rectangle",
+    "cloud",
+    "hourglass",
+    "collate",
+    "bolt",
+    "com-link",
+    "lightning-bolt",
+    "brace",
+    "brace-l",
+    "comment",
+    "brace-r",
+    "braces",
+    "console",
+    "datastore",
+    "data-store",
+    "delay",
+    "half-rounded-rectangle",
+    "h-cyl",
+    "das",
+    "horizontal-cylinder",
+    "lin-cyl",
+    "disk",
+    "lined-cylinder",
+    "curv-trap",
+    "curved-trapezoid",
+    "display",
+    "div-rect",
+    "div-proc",
+    "divided-process",
+    "divided-rectangle",
+    "doc",
+    "document",
+    "tri",
+    "extract",
+    "triangle",
+    "folder",
+    "directory",
+    "fork",
+    "join",
+    "win-pane",
+    "internal-storage",
+    "window-pane",
+    "f-circ",
+    "filled-circle",
+    "junction",
+    "lin-doc",
+    "lined-document",
+    "lin-rect",
+    "lin-proc",
+    "lined-process",
+    "lined-rectangle",
+    "shaded-process",
+    "notch-pent",
+    "loop-limit",
+    "notched-pentagon",
+    "flip-tri",
+    "flipped-triangle",
+    "manual-file",
+    "sl-rect",
+    "manual-input",
+    "sloped-rectangle",
+    "docs",
+    "documents",
+    "st-doc",
+    "stacked-document",
+    "st-rect",
+    "processes",
+    "procs",
+    "stacked-rectangle",
+    "flag",
+    "paper-tape",
+    "person",
+    "sm-circ",
+    "small-circle",
+    "start",
+    "fr-circ",
+    "framed-circle",
+    "stop",
+    "bow-rect",
+    "bow-tie-rectangle",
+    "stored-data",
+    "cross-circ",
+    "crossed-circle",
+    "summary",
+    "tag-doc",
+    "tagged-document",
+    "tag-rect",
+    "tag-proc",
+    "tagged-process",
+    "tagged-rectangle",
+    "text",
+];
+
+/// Reads the `key: value` pairs of `@{ … }` shape data from `text`, which follows the
+/// `@{`, and returns them with the text after the closing `}`. Upstream reads the braces
+/// as YAML; the pairs are split at commas outside double quotes, and a value is taken
+/// literally without the double quotes around it.
+fn shape_data(line: usize, text: &str) -> Result<(ShapeData<'_>, &str), Failure> {
+    // The multi-line form, closed on a later line, is not read.
+    let end = outside_quotes(text, '}').next().ok_or(Failure::Unsupported)?;
+    let (body, after_body) = text.split_at(end);
+    let mut data = ShapeData { shape: None, label: None };
+    let mut start = 0;
+    for comma in outside_quotes(body, ',').chain([body.len()]) {
+        let pair = body.get(start..comma).ok_or(Failure::Unsupported)?;
+        start = comma + 1;
+        let Some((key, value)) = pair.split_once(':') else { continue };
+        let value = unquoted(value.trim());
+        match key.trim() {
+            "shape" => data.shape = Some(shape_named(line, value)?),
+            "label" => data.label = Some(value),
+            // An image has no text drawing yet.
+            "icon" | "img" => return Err(Failure::Unsupported),
+            // Upstream ignores keys it does not know, and the rest only size or place
+            // icons and images.
+            _ => {}
+        }
+    }
+    Ok((data, after_body.get(1..).ok_or(Failure::Unsupported)?))
+}
+
+/// The shape a `shape` value names. Another name in upstream's list is not drawn yet
+/// and falls back; a name outside the list is a syntax error, as upstream throws `No
+/// such shape`, which also covers names that are not lowercase.
+fn shape_named(line: usize, name: &str) -> Result<Shape, Failure> {
+    if let Some((_, shape)) = SHAPE_NAMES.into_iter().find(|&(known, _)| known == name) {
+        return Ok(shape);
+    }
+    if UNDRAWN_SHAPE_NAMES.contains(&name) {
+        return Err(Failure::Unsupported);
+    }
+    Err(syntax_error(line, &format!("no such shape \"{name}\"")))
+}
+
+/// The byte index of each `c` in `text` that is outside double quotes.
+fn outside_quotes(text: &str, c: char) -> impl Iterator<Item = usize> + '_ {
+    let mut in_quotes = false;
+    text.char_indices().filter_map(move |(index, found)| {
+        if found == '"' {
+            in_quotes = !in_quotes;
+        }
+        (found == c && !in_quotes).then_some(index)
+    })
 }
 
 /// The parts of a link token that a drawing shows.

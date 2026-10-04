@@ -643,6 +643,89 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_shape_data_sets_the_shape_and_keeps_the_id_as_label() {
+        for body in
+            ["flowchart LR\n    A@{ shape: stadium }\n", "flowchart LR\n    A@{shape:stadium}\n"]
+        {
+            assert_eq!(mermaid(body), "╭───╮\n( A )\n╰───╯", "{body}");
+        }
+    }
+
+    #[test]
+    fn mermaid_shape_data_label_overrides_the_bracket_label() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[x]@{ shape: hex, label: \"Hello, world\" }\n"),
+            " ╱────────────╲\n< Hello, world >\n ╲────────────╱"
+        );
+        assert_eq!(mermaid("flowchart LR\n    A@{ label: y }\n"), "┌───┐\n│ y │\n└───┘");
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ label: \"x}y\" }\n"),
+            "┌─────┐\n│ x}y │\n└─────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_shape_data_on_a_link_target_and_after_a_class_is_read() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> B@{ shape: stadium }\n"),
+            "┌───┐     ╭───╮\n│ A │────►( B )\n└───┘     ╰───╯"
+        );
+        assert_eq!(
+            mermaid("flowchart LR\n    A:::cls@{ shape: stadium }\n"),
+            "╭───╮\n( A )\n╰───╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_shape_data_image_parameters_do_not_change_the_drawing() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ shape: rect, w: 100, h: 50, pos: t, constraint: on }\n"),
+            "┌───┐\n│ A │\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_unknown_shape_data_shape_is_a_syntax_error() {
+        for name in ["blob", "Rect"] {
+            let body = format!("flowchart LR\n    A@{{ shape: {name} }}\n");
+            assert_eq!(
+                mermaid(&body),
+                format!("mermaid: line 2: no such shape \"{name}\"\n```mermaid\n{body}```"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_shape_data_names_and_aliases_render_like_their_bracket_forms() {
+        let names: [(&[&str], &str); 14] = [
+            (&["rect", "proc", "process", "rectangle"], "A[A]"),
+            (&["rounded", "event"], "A(A)"),
+            (&["diam", "decision", "diamond", "question"], "A{A}"),
+            (&["stadium", "pill", "terminal"], "A([A])"),
+            (&["fr-rect", "framed-rectangle", "subproc", "subprocess", "subroutine"], "A[[A]]"),
+            (&["cyl", "cylinder", "database", "db"], "A[(A)]"),
+            (&["circle", "circ"], "A((A))"),
+            (&["dbl-circ", "double-circle"], "A(((A)))"),
+            (&["hex", "hexagon", "prepare"], "A{{A}}"),
+            (&["lean-r", "lean-right", "in-out"], "A[/A/]"),
+            (&["lean-l", "lean-left", "out-in"], "A[\\A\\]"),
+            (&["trap-b", "priority", "trapezoid", "trapezoid-bottom"], "A[/A\\]"),
+            (&["trap-t", "inv-trapezoid", "manual", "trapezoid-top"], "A[\\A/]"),
+            (&["odd"], "A>A]"),
+        ];
+        for (aliases, bracket_form) in names {
+            let expected = mermaid(&format!("flowchart LR\n    {bracket_form}\n"));
+            assert!(!expected.starts_with("mermaid:"), "{expected}");
+            assert!(!expected.starts_with("```mermaid"), "{expected}");
+            for name in aliases {
+                let body = format!("flowchart LR\n    A@{{ shape: {name} }}\n");
+                assert_eq!(mermaid(&body), expected, "{name}");
+            }
+        }
+    }
+
+    #[test]
     fn mermaid_quoted_labels_in_two_character_brackets_keep_bracket_characters() {
         let stadium = mermaid("flowchart LR\n    A([\"x])y\"])\n");
         assert!(stadium.lines().any(|line| line == "( x])y )"), "{stadium}");
