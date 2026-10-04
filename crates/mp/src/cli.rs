@@ -125,6 +125,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use mp_preview::ColorMode;
+    use unicode_width::UnicodeWidthStr;
 
     use super::{Cli, ColorPolicy, Env, render_file, resolve_color_mode, run};
 
@@ -190,6 +191,10 @@ mod tests {
         Ok(())
     }
 
+    const WIDE_TABLE_MARKDOWN: &str = "| Crate | Responsibility |\n\
+         | --- | --- |\n\
+         | mp-preview | Block-to-terminal rendering with a trailing-newline guarantee |\n";
+
     #[test]
     fn run_wraps_wide_tables_to_the_detected_terminal_width() -> io::Result<()> {
         let file = write_temp_markdown(WIDE_TABLE_MARKDOWN)?;
@@ -203,16 +208,12 @@ mod tests {
         assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
         let output = utf8(stdout)?;
         assert!(
-            output.lines().all(|line| line.chars().count() <= 40),
+            output.lines().all(|line| line.width() <= 40),
             "every line must fit in 40 columns: {output}"
         );
         fs::remove_file(file)?;
         Ok(())
     }
-
-    const WIDE_TABLE_MARKDOWN: &str = "| Crate | Responsibility |\n\
-         | --- | --- |\n\
-         | mp-preview | Block-to-terminal rendering with a trailing-newline guarantee |\n";
 
     #[test]
     fn run_flushes_stdout_before_reporting_a_mid_stream_failure() -> io::Result<()> {
