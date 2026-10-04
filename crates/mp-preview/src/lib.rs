@@ -5,6 +5,7 @@
 //! through [`Options`].
 
 mod ansi;
+mod diagram;
 mod highlight;
 mod layout;
 mod markdown;

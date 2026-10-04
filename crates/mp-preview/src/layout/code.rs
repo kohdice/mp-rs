@@ -3,19 +3,42 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::ansi::ColorMode;
-use crate::highlight::highlight;
+use crate::diagram::{Failure, render_mermaid};
+use crate::highlight::{highlight, language_token};
 use crate::style::{Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
 const FENCE: &str = "```";
 const TAB_STOP: usize = 4;
 
-/// Highlights the body only in `Ansi` mode; otherwise, or when highlighting is
-/// unavailable, the body is in the inline code color.
-pub(super) fn lay_out_code_block(info: &str, code: &str, color: ColorMode) -> Vec<Line> {
+/// Lays out a fenced code block verbatim: the opening fence with its info string, the
+/// body with tabs expanded, and the closing fence. Code is never wrapped. The body is
+/// highlighted only in `Ansi` mode; otherwise, or when highlighting is unavailable, it
+/// is in the inline code color.
+///
+/// A `mermaid` block that can be drawn within `width` columns is replaced by its
+/// drawing, without fences. One with a syntax error keeps the code block and gets a
+/// `mermaid: …` reason line above it; one that is valid but cannot be drawn keeps the
+/// code block alone, since there is nothing for the author to fix.
+pub(super) fn lay_out_code_block(
+    info: &str,
+    code: &str,
+    width: Option<usize>,
+    color: ColorMode,
+) -> Vec<Line> {
     let fence_style = Style { fg: Some(DARK_PALETTE.code_fence), dim: true, ..Style::default() };
     let body_style = Style { fg: Some(DARK_PALETTE.inline_code), ..Style::default() };
-    let mut lines = vec![vec![Span { text: format!("{FENCE}{info}"), style: fence_style }]];
+    let mut lines = Vec::new();
+    if language_token(info) == Some("mermaid") {
+        match render_mermaid(code, width) {
+            Ok(drawing) => return drawing,
+            Err(Failure::Syntax(error)) => {
+                lines.push(vec![Span { text: format!("mermaid: {error}"), style: fence_style }]);
+            }
+            Err(Failure::Unsupported) => {}
+        }
+    }
+    lines.push(vec![Span { text: format!("{FENCE}{info}"), style: fence_style }]);
     let highlighted = match color {
         ColorMode::Ansi => highlight(info, code),
         ColorMode::Plain => None,

@@ -40,7 +40,7 @@ pub(crate) fn lay_out_block(
             vec![vec![Span { text: "─".repeat(columns), style }]]
         }
         Block::Table { align, header, rows } => table::lay_out_table(align, header, rows, width),
-        Block::CodeBlock { info, code } => code::lay_out_code_block(info, code, color),
+        Block::CodeBlock { info, code } => code::lay_out_code_block(info, code, width, color),
         Block::Html(html) => code::lay_out_html(html),
     }
 }

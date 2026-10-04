@@ -59,7 +59,9 @@ fn syntax_for_info(info: &str) -> Option<&'static SyntaxReference> {
     SYNTAX_SET.find_syntax_by_token(token)
 }
 
-fn language_token(info: &str) -> Option<&str> {
+/// The first whitespace-separated word of a fence info string, without a `,flags`
+/// suffix; `None` when there is no word.
+pub(crate) fn language_token(info: &str) -> Option<&str> {
     let token = info.trim_ascii().split_ascii_whitespace().next()?;
     let token = token.split_once(',').map_or(token, |(language, _flags)| language);
     if token.is_empty() { None } else { Some(token) }

@@ -24,7 +24,11 @@ Markdown text ──> markdown ──> model ──> layout ──> ansi ──>
 1. `markdown` parses the whole document with comrak and converts it into an owned
    `Vec<Block>`; the comrak arena is dropped before returning.
 2. `layout` turns one `Block` into lines of styled spans, applying the width limit, list
-   markers, quote bars, table borders, and syntax highlighting.
+   markers, quote bars, table borders, and syntax highlighting. A fenced block whose info
+   string's first word, cut before its first `,`, is `mermaid` is first handed from
+   `layout/code.rs` to `diagram` (`crates/mp-preview/src/diagram.rs`), a crate-level
+   module of pure calculations (parse, layer, route, draw onto a character canvas); when
+   the diagram cannot be drawn, the block is laid out as an ordinary code block.
 3. `ansi` encodes those lines as text, emitting escape sequences only in `ColorMode::Ansi`.
 4. `preview` writes each encoded block to the caller's writer before laying out the next one.
 
