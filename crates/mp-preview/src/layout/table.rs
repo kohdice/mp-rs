@@ -7,8 +7,7 @@ use crate::model::{Align, Inline};
 use crate::style::{Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
-/// Lays out a table whose rows all have the header's column count. Each cell is
-/// flattened once; that flattened text is both measured and wrapped.
+/// Lays out a table whose rows all have the header's column count.
 pub(super) fn lay_out_table(
     align: &[Align],
     header: &[Vec<Inline>],

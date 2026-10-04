@@ -11,7 +11,11 @@ use two_face::theme::EmbeddedThemeName;
 use crate::style::Style;
 use crate::theme::Rgb;
 
+// Highlighting is skipped above either limit: syntect's cost grows with the body, and a
+// pasted log or data dump should not stall the preview for a few colors.
+/// The largest code block, in bytes, that [`highlight`] colors.
 const MAX_CODE_BLOCK_BYTES: usize = 512 * 1024;
+/// The most lines a code block that [`highlight`] colors may have.
 const MAX_CODE_BLOCK_LINES: usize = 10_000;
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
@@ -21,7 +25,8 @@ static THEME: LazyLock<Theme> =
 
 /// Splits `code` into styled pieces whose texts concatenate back to `code`; line
 /// endings stay inside the pieces. Returns `None` when the info string names no known
-/// language, the block exceeds the size limits, or highlighting fails.
+/// language, the block exceeds [`MAX_CODE_BLOCK_BYTES`] or [`MAX_CODE_BLOCK_LINES`], or
+/// highlighting fails.
 pub(crate) fn highlight<'a>(info: &str, code: &'a str) -> Option<Vec<(Style, &'a str)>> {
     // Resolve the syntax first so a block in an unknown language skips the body scan
     // in `is_within_highlight_limits`.

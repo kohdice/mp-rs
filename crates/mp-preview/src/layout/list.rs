@@ -34,6 +34,8 @@ pub(super) fn lay_out_list(
         );
         let mut head = item_head(marker, item.task);
         if item_lines.is_empty() {
+            // An item without content ends with its marker (or box), not with the
+            // separating space.
             head.pop();
             lines.push(head);
             continue;
