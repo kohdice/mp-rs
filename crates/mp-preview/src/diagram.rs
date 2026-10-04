@@ -101,13 +101,21 @@ mod tests {
         plain(&format!("```mermaid\n{body}```\n"), width)
     }
 
-    /// The row of the box whose label row is `│ label │`, and the display columns of
+    /// The row of the box whose label row is `│ label │`, with one blank or more on
+    /// either side of the label in a box grown wider than it, and the display columns of
     /// its left and right borders.
     fn box_of(output: &str, label: &str) -> Option<(usize, usize, usize)> {
-        let label_row = format!("│ {label} │");
         output.lines().enumerate().find_map(|(row, line)| {
-            let left = line.get(..line.find(&label_row)?)?.width();
-            Some((row, left, left + label_row.width() - 1))
+            line.match_indices(label).find_map(|(at, _)| {
+                let before = line.get(..at)?;
+                let after = line.get(at + label.len()..)?;
+                let (open, close) = (before.trim_end_matches(' '), after.trim_start_matches(' '));
+                let padded = open.len() < before.len() && close.len() < after.len();
+                (padded && open.ends_with('│') && close.starts_with('│')).then(|| {
+                    let left = open.width() - 1;
+                    (row, left, before.width() + label.width() + after.len() - close.len())
+                })
+            })
         })
     }
 
@@ -221,11 +229,27 @@ mod tests {
         c.is_some_and(|c| "─│┄┆━┃┌┐└┘├┤┬┴┼".contains(c))
     }
 
+    /// The top border row, left column, bottom border row and right column of the box
+    /// whose label row is `│ label │`: the border rows are the nearest rows above and
+    /// below the label row that do not hold `│` in both border columns, so a box grown
+    /// to give its links rows of their own is measured whole.
+    fn box_bounds(output: &str, label: &str) -> Option<(usize, usize, usize, usize)> {
+        let (row, left, right) = box_of(output, label)?;
+        let side = |row: usize| {
+            glyph_at(output, row, left) == Some('│') && glyph_at(output, row, right) == Some('│')
+        };
+        let top = (0..row).rev().find(|&above| !side(above))?;
+        let bottom = (row + 1..=output.lines().count()).find(|&below| !side(below))?;
+        Some((top, left, bottom, right))
+    }
+
     /// Whether each label appears exactly once, inside a box whose border rows are made
     /// of corner glyphs and `─` over the box's columns.
     fn boxes_intact(output: &str, labels: &[&str]) -> bool {
         labels.iter().all(|label| {
-            let Some((row, left, right)) = box_of(output, label) else { return false };
+            let Some((top, left, bottom, right)) = box_bounds(output, label) else {
+                return false;
+            };
             let border = |row: usize, corners: [&str; 2]| {
                 (left..=right).all(|col| {
                     let expected = if col == left {
@@ -239,9 +263,8 @@ mod tests {
                 })
             };
             output.matches(label).count() == 1
-                && row > 0
-                && border(row - 1, ["┌╭╱", "┐╮╲"])
-                && border(row + 1, ["└╰╲", "┘╯╱"])
+                && border(top, ["┌╭╱", "┐╮╲"])
+                && border(bottom, ["└╰╲", "┘╯╱"])
         })
     }
 
