@@ -37,7 +37,9 @@ pub(super) fn self_loop_cells(axis: Axis, label: Option<&Label>) -> usize {
 /// may lie before cell 0. Mermaid puts the label outside the loop beyond its run, centred
 /// on the loop: here directly beyond the run in a vertical layout, with the usual lean
 /// left (see [`label_reach`]), and one blank cell beyond it with its middle row on the
-/// row between the legs in a horizontal one (see [`label_cross_reach`]).
+/// row between the legs in a horizontal one (see [`label_cross_reach`]). Upstream keeps a
+/// 4 px gap from the run; a cell is the least gap text has, and in a vertical layout a
+/// blank row would push the next layer further away, so there the label touches the run.
 pub(super) fn self_loop_label_at(axis: Axis, leg: usize, label: &Label) -> Option<(usize, isize)> {
     let centre = signed(leg + SELF_LOOP_SPAN / 2)?;
     let (before, _) = label_cross_reach(axis, label);
@@ -144,6 +146,8 @@ impl Axis {
     /// too wide or spans more than [`MAX_CELLS`](super::MAX_CELLS).
     pub(super) fn spacings(self) -> &'static [Spacing] {
         // A sibling gap of one is the least that keeps neighbouring boxes from touching.
+        // Upstream separates nodes and edges by `nodesep` and `edgesep` pixels; a cell is
+        // the smallest distance text has, so gaps are counted in whole cells.
         match self {
             Self::Horizontal => &[
                 // `────►`, with room on the line for a two-cell label such as `no`
@@ -1468,8 +1472,11 @@ fn crossings(layer: &[usize], parents: &[Vec<usize>], position: &[usize]) -> Opt
 /// Marks the links that would close a cycle with the links declared before them, each
 /// link standing for the order it imposes on the nodes (see [`link_order`]); a marked
 /// link is laid out reversed, which leaves no cycle. Earlier links keep their
-/// direction, so a cycle is broken at its last declared link. `None` when a link joins
-/// a subgraph to itself or to one of its own members.
+/// direction, so a cycle is broken at its last declared link. Upstream's dagre picks the
+/// links by a depth-first search over its own internal graph, whose node order a text
+/// renderer cannot reproduce exactly; declaration order reverses the same set in the
+/// documented examples. `None` when a link joins a subgraph to itself or to one of its
+/// own members.
 fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<bool>> {
     let mut children = vec![Vec::new(); chart.nodes.len()];
     let mut closing = Vec::with_capacity(chart.edges.len());

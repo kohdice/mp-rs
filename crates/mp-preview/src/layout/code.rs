@@ -19,7 +19,9 @@ const TAB_STOP: usize = 4;
 /// A `mermaid` block that can be drawn within `width` columns is replaced by its
 /// drawing, without fences. One with a syntax error keeps the code block and gets a
 /// `mermaid: …` reason line above it; one that is valid but cannot be drawn keeps the
-/// code block alone, since there is nothing for the author to fix.
+/// code block alone, since there is nothing for the author to fix. Upstream shows an
+/// error image in place of the diagram, which a terminal cannot; the source with one
+/// line of text is the closest it can show, in wording of this crate's own.
 pub(super) fn lay_out_code_block(
     info: &str,
     code: &str,

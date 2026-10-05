@@ -48,7 +48,9 @@ impl Outline {
 
 /// The rows of a box of `shape`. A shape's feature lies in its end glyphs and in rows
 /// inset from the box's sides, so that every shape but the cylinder keeps the
-/// rectangle's three rows.
+/// rectangle's three rows. Upstream draws curves, fills and exact angles, which cells of
+/// box-drawing glyphs cannot: a circle and a double circle differ from a stadium only by
+/// their inset top and bottom rows.
 pub(super) fn outline(shape: Shape) -> Outline {
     const fn row(inset: [usize; 2], ends: [&'static str; 2]) -> Row {
         Row { inset, ends }
@@ -66,7 +68,10 @@ pub(super) fn outline(shape: Shape) -> Outline {
             [row(FLUSH, ["┌┬", "┬┐"]), row(FLUSH, ["││", "││"]), row(FLUSH, ["└┴", "┴┘"])]
         }
         Shape::Hexagon => [row(INSET, ["╱", "╲"]), row(FLUSH, ["<", ">"]), row(INSET, ["╲", "╱"])],
-        // The notch's mouth leaves the label row's first cell blank.
+        // The notch's mouth leaves the label row's first cell blank. Upstream's notch
+        // (`notch` in `rect_left_inv_arrow`) is a quarter of the box's height deep, so
+        // it deepens with the label's rows; a notch drawn with glyphs is one column deep
+        // whatever the height, as a deeper one would need diagonal rows of its own.
         Shape::Asymmetric => {
             [row(FLUSH, ["╲", "┐"]), row([1, 0], [">", "│"]), row(FLUSH, ["╱", "┘"])]
         }
@@ -88,7 +93,9 @@ pub(super) fn outline(shape: Shape) -> Outline {
         }
         Shape::Cylinder => [row(FLUSH, ["╭", "╮"]), row(FLUSH, ["│", "│"]), row(FLUSH, ["╰", "╯"])],
     };
-    // The lower arc of the ellipse on top needs a row of its own.
+    // The lower arc of the ellipse on top needs a row of its own, so a cylinder is one
+    // row taller than the other shapes and a layer mixing them is less even than
+    // upstream's, whose arcs take fractions of a text line.
     let rim = matches!(shape, Shape::Cylinder).then_some(row(FLUSH, ["├", "┤"]));
     Outline { top, rim, label, bottom }
 }

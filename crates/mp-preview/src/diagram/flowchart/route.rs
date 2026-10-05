@@ -120,7 +120,10 @@ impl Scene<'_> {
 /// order of the cells they come from.
 ///
 /// A link segment whose ends are at different positions across the flow turns on a
-/// track in the gap between the layers. Each source in a gap has tracks of its own,
+/// track in the gap between the layers: lines run along rows and columns only, where
+/// upstream draws curves, which box-drawing glyphs have no cells for. A link closing a
+/// cycle is routed like the others along its reversed path, between the layers, as
+/// upstream's dagre layout routes it. Each source in a gap has tracks of its own,
 /// and the runs of its segments across the flow share a track only when they have no
 /// cell in common. A frame title moves clear of the links crossing its frame's top
 /// border, unless that makes a frame cover a box outside its subgraph or a frame
@@ -307,7 +310,13 @@ pub(super) fn route<'a>(
                     // centred on that cell; a horizontal one runs its middle row along the
                     // line on that cell's row, centred between the markers at the gap's
                     // ends with a line cell on either side of the text, as Mermaid
-                    // centres a label between a link's ends.
+                    // centres a label between a link's ends. Upstream puts the label at its
+                    // edge-label dummy node on the middle rank (`edge.x`/`edge.y`, see
+                    // `positionEdgeLabel`), placed across the flow like any node, and the
+                    // curve bends through it; an orthogonal line turns on a track, and a
+                    // label on the track would cover the turn, so the label goes on the
+                    // line after the tracks, at the cell the line enters the next layer by.
+                    // For a straight link the two coincide.
                     LabelSpot::Gap(segment) => {
                         let layer = slots.get(*path.get(segment)?)?.layer;
                         let after_tracks =

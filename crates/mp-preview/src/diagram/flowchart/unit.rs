@@ -1,7 +1,9 @@
 //! Subgraphs laid out in a direction of their own. Upstream lays such a subgraph out
 //! as a diagram of its own and embeds it in the enclosing layout as one node; here it
 //! is drawn on its own, frame included, and stands in the enclosing layout as a box of
-//! that drawing's size.
+//! that drawing's size. Upstream's curved edges enter the embedded cluster at any point
+//! of its border; here they meet the box's border at port cells, the only places a
+//! line of glyphs can end, and the box never grows for them.
 
 use crate::diagram::Failure;
 use crate::style::Line;

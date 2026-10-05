@@ -32,7 +32,9 @@ pub(super) fn is_entity_name_char(character: char) -> bool {
 /// `text` with each entity code `#name;` replaced by the character it stands for. Upstream
 /// turns an all-digit name into `&#digits;` and any other into `&name;` and lets HTML
 /// resolve it, so only decimal code points and HTML named character references decode;
-/// any other code, `#x26;` among them, is left as written.
+/// any other code, `#x26;` among them, is left as written. Upstream hands an unknown name
+/// such as `#nosuch;` to the browser as `&nosuch;`, which shows that text; without a
+/// browser there is nothing to hand it to, so the code is shown as written.
 fn decode_entities(text: &str) -> String {
     let mut decoded = String::with_capacity(text.len());
     let mut rest = text;
@@ -180,7 +182,9 @@ impl Label {
     /// The label of the markdown string whose content between the backticks is `source`:
     /// a row for each source line and each `<br>`, its leading and trailing blanks and
     /// blank lines dropped (upstream's markdown collapses them), and the emphasis of
-    /// each row read by [`emphasis_runs`].
+    /// each row read by [`emphasis_runs`]. Upstream also wraps a markdown string at a
+    /// pixel width (`wrappingWidth`); a text drawing has no such width, so rows break only
+    /// where the source does.
     fn markdown(source: &str) -> Self {
         let rows: Vec<Row> = split_rows(source)
             .into_iter()
@@ -206,7 +210,11 @@ impl Label {
 
     /// The label on one row, a space between its rows: a subgraph title lives on its
     /// frame's top border, a single row, where stacked rows would push the frame's
-    /// content.
+    /// content. Upstream draws such a title on several lines down from the cluster's top
+    /// border (`rect` in `clusters.js`) and makes room only for
+    /// `flowchart.subGraphTitleMargin`, which is 0 by default, so the lines may overlap
+    /// the content; a border made of one row of glyphs cannot hold several lines, and
+    /// glyphs overlapping the content would hide it.
     pub(super) fn joined(self) -> Self {
         let mut row = Vec::new();
         for (index, runs) in self.rows.into_iter().enumerate() {

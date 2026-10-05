@@ -19,6 +19,8 @@ use self::route::Scene;
 /// of a tall layer stretches every row to the label's width, and drawing, label
 /// placement and the canvas all take memory proportional to that area; a million cells
 /// is far beyond what a terminal shows while holding the canvas to tens of megabytes.
+/// The bound is this crate's own, not upstream's, which renders any size the browser
+/// can hold.
 const MAX_CELLS: usize = 1_000_000;
 
 /// `value` as a cell offset that may be negative; `None` past `isize::MAX`.
@@ -34,7 +36,10 @@ pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Fa
 
 /// Lays the chart out with the default spacing and then tighter spacings, stopping at
 /// the first drawing at most `width` columns wide and [`MAX_CELLS`] in size;
-/// unsupported when none fits. A subgraph laid out in a direction of its own is drawn
+/// unsupported when none fits. Upstream's SVG (`useMaxWidth`) shrinks to fit a narrower
+/// container and never grows past its natural size; a terminal has a fixed number of
+/// columns and cells that cannot shrink, so the drawing tightens its gaps and otherwise
+/// falls back. A subgraph laid out in a direction of its own is drawn
 /// first and placed as one box.
 fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Line>, Failure> {
     let mut chart = unit::embed_units(chart)?;

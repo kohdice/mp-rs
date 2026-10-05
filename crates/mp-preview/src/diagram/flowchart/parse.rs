@@ -409,8 +409,10 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         // Data for a link declared earlier with an id: its keys (`animate`, `animation`,
-        // `curve`) have no text drawing, and upstream ignores the rest. The multi-line
-        // form, closed on a later line, is not read.
+        // `curve`) have no text drawing, and upstream ignores the rest. Upstream animates
+        // the edge or draws it along the named curve; a terminal drawing is static and
+        // its lines run along rows and columns, so the keys are read and dropped. The
+        // multi-line form, closed on a later line, is not read.
         let (id, after_id) = split_id(statement);
         if self.edge_ids.contains(id)
             && let Some(data) = after_id.strip_prefix("@{")
