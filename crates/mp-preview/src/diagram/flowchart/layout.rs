@@ -112,8 +112,9 @@ impl Axis {
         // A sibling gap of one is the least that keeps neighbouring boxes from touching.
         match self {
             Self::Horizontal => &[
-                // `────►`, with room above for a three-cell label such as `yes` and a
-                // blank on either side before the gap has to widen.
+                // `────►`, with room on the line for a two-cell label such as `no`
+                // between a line cell on either side and the arrowhead before the gap
+                // has to widen.
                 Spacing { layer_gap: 5, sibling_gap: 1 },
                 Spacing { layer_gap: 3, sibling_gap: 1 },
                 // `─►`, the narrowest gap that still shows a line before the arrowhead.
@@ -244,20 +245,26 @@ pub(super) fn label_reach(width: usize) -> (usize, usize) {
 }
 
 /// The segment of a laid-out `path` whose gap holds the link's label on its line, placed
-/// by the routing: the one segment of a link between neighbouring layers of a vertical
-/// layout. `None` for every other link, whose label `place_labels` looks for a place for.
-pub(super) fn routed_label_segment(axis: Axis, path: &[usize]) -> Option<usize> {
-    (axis == Axis::Vertical && path.len() == 2).then_some(0)
+/// by the routing: the one segment of a link between neighbouring layers. `None` for
+/// every other link, whose label `place_labels` looks for a place for.
+pub(super) fn routed_label_segment(path: &[usize]) -> Option<usize> {
+    (path.len() == 2).then_some(0)
 }
 
 /// The reach of the label `edge` carries where `segment` of its laid-out `path` enters
-/// the next slot: only the segment of [`routed_label_segment`] carries one, centred on
-/// that cell.
+/// the next slot: only the segment of [`routed_label_segment`] carries one. In a vertical
+/// layout the label is centred across the flow on that cell; in a horizontal one it
+/// runs along the line on that cell's row, so it reaches no further across the flow,
+/// but still counts as a label: [`end_gaps`] keeps a blank row between a labelled line
+/// and the end next to it, so that two labels never read as one block of text.
 pub(super) fn entry_reach(axis: Axis, edge: &Edge, path: &[usize], segment: usize) -> Reach {
-    if routed_label_segment(axis, path) != Some(segment) {
+    if routed_label_segment(path) != Some(segment) {
         return None;
     }
-    edge.label.as_ref().map(|label| label_reach(label.width()))
+    edge.label.as_ref().map(|label| match axis {
+        Axis::Horizontal => (0, 0),
+        Axis::Vertical => label_reach(label.width()),
+    })
 }
 
 /// The distance between each pair of neighbouring ends, listed in order along the

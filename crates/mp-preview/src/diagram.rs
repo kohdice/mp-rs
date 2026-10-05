@@ -71,7 +71,7 @@ mod tests {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
     const A_TO_B: &str = "┌───┐     ┌───┐\n│ A │────►│ B │\n└───┘     └───┘";
-    const A_YES_B: &str = "┌───┐ yes ┌───┐\n│ A │────►│ B │\n└───┘     └───┘";
+    const A_YES_B: &str = "┌───┐      ┌───┐\n│ A │─yes─►│ B │\n└───┘      └───┘";
     const A_ABOVE_B: &str = "┌───┐\n│ A │\n└───┘\n  │\n  │\n  ▼\n┌───┐\n│ B │\n└───┘";
     /// Canonical sources whose drawing tests of other spellings compare theirs with.
     const LR_A_TO_B: &str = "flowchart LR\n    A --> B\n";
@@ -181,6 +181,16 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+
+    /// The place of `word` in `output`, which must sit on a line: a line cell on either side.
+    fn label_on_line(output: &str, word: &str) -> (usize, usize) {
+        let Some((row, col)) = position_of_word(output, word) else {
+            panic!("missing {word} in\n{output}");
+        };
+        assert_eq!(glyph_at(output, row, col - 1), Some('─'), "{word} in\n{output}");
+        assert_eq!(glyph_at(output, row, col + word.width()), Some('─'), "{word} in\n{output}");
+        (row, col)
     }
 
     /// The character whose first display column is `col` on line `row`.
@@ -851,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_lr_edge_label_sits_above_the_line() {
+    fn mermaid_lr_edge_label_sits_on_the_line() {
         assert_eq!(mermaid("flowchart LR\n    A -->|yes| B\n"), A_YES_B);
     }
 
@@ -859,20 +869,60 @@ mod tests {
     fn mermaid_lr_edge_label_widens_the_gap_when_it_is_longer() {
         assert_eq!(
             mermaid("flowchart LR\n    A -->|approved| B\n"),
-            "┌───┐ approved ┌───┐\n│ A │─────────►│ B │\n└───┘          └───┘"
+            "┌───┐           ┌───┐\n│ A │─approved─►│ B │\n└───┘           └───┘"
         );
     }
 
     #[test]
+    fn mermaid_rl_label_sits_on_the_line_before_the_arrowhead() {
+        assert_eq!(
+            mermaid("flowchart RL\n    A -->|yes| B\n"),
+            "┌───┐      ┌───┐\n│ B │◄─yes─│ A │\n└───┘      └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_lr_label_of_a_back_edge_keeps_a_line_cell_after_its_arrowhead() {
+        let output = mermaid("flowchart LR\n    A --> B\n    B -->|back| A\n");
+        let (row, col) = label_on_line(&output, "back");
+
+        assert_eq!(whole_words(&output, "back"), 1, "{output}");
+        assert_ne!(glyph_at(&output, row, col - 1), Some('◄'), "{output}");
+        assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_label_between_two_markers_keeps_a_line_cell_from_each() {
+        let output = mermaid("flowchart LR\n    A <-->|yes| B\n");
+
+        assert_eq!(output.lines().nth(1), Some("│ A │◄─yes─►│ B │"), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_label_on_a_link_without_arrowhead_needs_no_cell_for_one() {
+        let output = mermaid("flowchart LR\n    A ---|yes| B\n");
+
+        assert_eq!(output.lines().nth(1), Some("│ A │─yes─│ B │"), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_two_cell_label_fits_the_default_gap() {
+        let output = mermaid("flowchart LR\n    A -->|no| B\n");
+
+        assert_eq!(output.lines().nth(1), Some("│ A │─no─►│ B │"), "{output}");
+        assert_eq!(widest(&output), widest(A_TO_B), "{output}");
+    }
+
+    #[test]
     fn mermaid_text_label_form_is_equivalent_to_pipes_for_every_stroke() {
-        for (text_form, pipe_form) in [
-            ("A -- yes --> B", "A -->|yes| B"),
-            ("A -. yes .-> B", "A -.->|yes| B"),
-            ("A == yes ==> B", "A ==>|yes| B"),
+        for (text_form, pipe_form, line) in [
+            ("A -- yes --> B", "A -->|yes| B", "│ A │─yes─►│ B │"),
+            ("A -. yes .-> B", "A -.->|yes| B", "│ A │┄yes┄►│ B │"),
+            ("A == yes ==> B", "A ==>|yes| B", "│ A │━yes━►│ B │"),
         ] {
             let pipes = mermaid(&format!("flowchart LR\n    {pipe_form}\n"));
 
-            assert_eq!(pipes.lines().next(), Some("┌───┐ yes ┌───┐"), "{pipe_form}");
+            assert_eq!(pipes.lines().nth(1), Some(line), "{pipe_form}");
             assert_eq!(mermaid(&format!("flowchart LR\n    {text_form}\n")), pipes, "{text_form}");
         }
     }
@@ -1282,6 +1332,9 @@ mod tests {
         assert_eq!(whole_words(&output, "x"), 1, "{output}");
         assert_eq!(whole_words(&output, "y"), 1, "{output}");
         assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+        let ((x_row, _), (y_row, _)) = (label_on_line(&output, "x"), label_on_line(&output, "y"));
+        // Labelled lines keep a blank row between them.
+        assert!(x_row.abs_diff(y_row) >= 2, "{output}");
     }
 
     #[test]
@@ -1468,15 +1521,10 @@ mod tests {
 
         for label in ["a", "b"] {
             assert_eq!(whole_words(&output, label), 1, "{label} in\n{output}");
-            let Some((row, col)) = position_of_word(&output, label) else {
-                panic!("missing {label} in\n{output}");
-            };
-            assert_eq!(glyph_at(&output, row, col - 1), Some(' '), "{label} in\n{output}");
-            assert!(
-                matches!(glyph_at(&output, row, col + label.width()), Some(' ') | None),
-                "{label} in\n{output}"
-            );
         }
+        let ((a_row, _), (b_row, _)) = (label_on_line(&output, "a"), label_on_line(&output, "b"));
+        // Labelled lines keep a blank row between them.
+        assert!(a_row.abs_diff(b_row) >= 2, "{output}");
         assert_eq!(count_glyph(&output, '►'), 2, "{output}");
     }
 
@@ -1748,18 +1796,15 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_lr_edge_label_into_a_subgraph_keeps_a_blank_column_before_its_frame() {
+    fn mermaid_lr_edge_label_into_a_subgraph_keeps_a_line_cell_before_its_frame() {
         let output = mermaid("flowchart LR\n    A -->|yes| B\n    subgraph s\n    B\n    end\n");
-        let (Some((_, left, ..)), Some((row, col))) =
-            (frame_of(&output, "s"), position_of_word(&output, "yes"))
-        else {
-            panic!("missing frame or label in\n{output}");
+        let Some((_, left, ..)) = frame_of(&output, "s") else {
+            panic!("missing frame in\n{output}");
         };
-        let after = col + "yes".width();
+        let (_, col) = label_on_line(&output, "yes");
 
         assert_eq!(whole_words(&output, "yes"), 1, "{output}");
-        assert!(after < left, "{output}");
-        assert_eq!(glyph_at(&output, row, after), Some(' '), "{output}");
+        assert!(col + "yes".width() < left, "{output}");
     }
 
     #[test]
@@ -2607,8 +2652,8 @@ mod tests {
     fn mermaid_quoted_edge_label_drops_its_quotes_and_may_contain_pipes() {
         assert_eq!(mermaid("flowchart LR\n    A -->|\"yes\"| B\n"), mermaid(LR_A_YES_B));
         assert_eq!(
-            mermaid("flowchart LR\n    A -->|\"a|b\"| B\n").lines().next(),
-            Some("┌───┐ a|b ┌───┐")
+            mermaid("flowchart LR\n    A -->|\"a|b\"| B\n").lines().nth(1),
+            Some("│ A │─a|b─►│ B │")
         );
     }
 
@@ -2625,10 +2670,13 @@ mod tests {
                 "{quoted}"
             );
         }
-        for (link, label) in [("A -- \"a--b\" --> B", "a--b"), ("A -. \"a.-b\" .-> B", "a.-b")] {
+        for (link, line) in [
+            ("A -- \"a--b\" --> B", "│ A │─a--b─►│ B │"),
+            ("A -. \"a.-b\" .-> B", "│ A │┄a.-b┄►│ B │"),
+        ] {
             let output = mermaid(&format!("flowchart LR\n    {link}\n"));
 
-            assert_eq!(output.lines().next(), Some(format!("┌───┐ {label} ┌───┐").as_str()));
+            assert_eq!(output.lines().nth(1), Some(line), "{link}");
         }
     }
 
@@ -2747,12 +2795,22 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_label_on_a_link_into_a_subgraph_is_shown() {
+    fn mermaid_label_on_a_link_into_a_subgraph_sits_before_the_frame() {
         let output = mermaid("flowchart LR\n    A -->|yes| s\n    subgraph s\n    B\n    end\n");
+        let Some((_, left, ..)) = frame_of(&output, "s") else {
+            panic!("missing frame in\n{output}");
+        };
+        let (_, col) = label_on_line(&output, "yes");
 
         assert_eq!(whole_words(&output, "yes"), 1, "{output}");
         assert_eq!(count_glyph(&output, '►'), 1, "{output}");
         assert_eq!(box_of(&output, "s"), None, "{output}");
+        assert!(col + "yes".width() < left, "{output}");
+        // The label does not take the arrowhead's cell, which is just outside the frame.
+        assert!(
+            arrowheads(&output).iter().all(|&(_, arrow_col, _)| arrow_col + 1 == left),
+            "{output}"
+        );
     }
 
     #[test]
