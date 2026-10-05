@@ -57,13 +57,42 @@ fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Lin
             layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?;
         layout::grow_for_labels(&mut chart, &layered).ok_or(Failure::Unsupported)?;
     }
+    let ends_at_frame = |end: parse::End| matches!(end, parse::End::Subgraph(_));
+    let frame_ends =
+        chart.edges.iter().any(|edge| ends_at_frame(edge.from) || ends_at_frame(edge.to));
     // The layout depends on the sibling gap alone, so spacings that differ only in the
     // layer gap reuse it.
     let mut cached: Option<(usize, layout::Layered)> = None;
     for spacing in axis.spacings() {
         if cached.as_ref().is_none_or(|(gap, _)| *gap != spacing.sibling_gap) {
-            let layered =
-                layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?;
+            // How many cells the links meeting a frame need depends on the cells its
+            // members take in the layer they meet it in, which only a layout at this
+            // sibling gap tells; a frame grows by no more than this layout needs.
+            // A layout made with the frames as they end up grown, when measuring gave one.
+            let mut settled = None;
+            if frame_ends {
+                for subgraph in &mut chart.subgraphs {
+                    subgraph.spread = 0;
+                }
+                // A frame grown around members of an outer one moves those members apart,
+                // so the outer frame is measured again until no frame changes. A frame's
+                // members are moved only by the frames nested in it, so frames settle
+                // innermost first, a level a round, within one round more than there are
+                // frames; the bound only guards that, keeping the growth found last.
+                for _ in 0..=chart.subgraphs.len() {
+                    let layered = layout::lay_out(&chart, axis, spacing.sibling_gap)
+                        .ok_or(Failure::Unsupported)?;
+                    if !layout::grow_frames(&mut chart, &layered) {
+                        settled = Some(layered);
+                        break;
+                    }
+                }
+            }
+            let layered = match settled {
+                Some(layered) => layered,
+                None => layout::lay_out(&chart, axis, spacing.sibling_gap)
+                    .ok_or(Failure::Unsupported)?,
+            };
             cached = Some((spacing.sibling_gap, layered));
         }
         let Some((_, layered)) = &cached else { continue };

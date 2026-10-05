@@ -376,6 +376,24 @@ pub(super) fn route<'a>(
         .collect::<Option<_>>()?;
     // Inner frames first, so that each outer one is drawn around them.
     let innermost_first = chart.innermost_first();
+    // Whether a drawn link's marker lies just before each subgraph's frame along the flow,
+    // and just after it, where the links ending at the frame put them (see below).
+    let mut marked = vec![(false, false); chart.subgraphs.len()];
+    for (edge, &reversed) in chart.edges.iter().zip(&layered.reversed) {
+        if !edge.stroke.is_visible() {
+            continue;
+        }
+        let ends =
+            [(edge.from, !reversed, edge.tail.is_some()), (edge.to, reversed, edge.head.is_some())];
+        for (end, leaves, marker) in ends {
+            if let End::Subgraph(subgraph) = end
+                && marker
+                && let Some((before, after)) = marked.get_mut(subgraph)
+            {
+                if leaves { *after = true } else { *before = true }
+            }
+        }
+    }
     let frames = |scene: &Scene<'_>, routed: &[RoutedLabel<'_>], clear_links: bool| {
         let mut bounds: Vec<Option<FrameBounds<'a>>> =
             chart.subgraphs.iter().map(|_| None).collect();
@@ -389,12 +407,15 @@ pub(super) fn route<'a>(
                 .subgraphs
                 .iter()
                 .zip(&bounds)
-                .filter(|(inner, _)| inner.parent == Some(index))
-                .filter_map(|(_, inner)| inner.as_ref().map(|inner| (inner.main, inner.cross)))
+                .zip(&marked)
+                .filter(|((inner, _), _)| inner.parent == Some(index))
+                .filter_map(|((_, inner), &marked)| {
+                    inner.as_ref().map(|inner| ((inner.main, inner.cross), marked))
+                })
                 .collect();
             if let Some(slot) = bounds.get_mut(index) {
                 *slot = frame_bounds(
-                    subgraph,
+                    (subgraph, &chart.enclosing(index)),
                     is_member,
                     &inner,
                     scene,
@@ -540,14 +561,16 @@ struct FrameBounds<'a> {
 /// The frame around `subgraph`'s boxes, the lines of the links between its members (its
 /// members' self loops among them), the `routed` labels of those links and the frames
 /// `inner` of the subgraphs nested in it, given by their first and last cells along and
-/// across the flow: the frame margins away from them, further where a link marker next
-/// to a member box would otherwise fall on the border, and long enough to the right on
+/// across the flow with whether a link's marker lies just before and just after each
+/// along the flow: the frame margins away from them, further where a link marker next
+/// to a member box or just outside a nested frame would otherwise fall on the border,
+/// further across the flow by the cells the subgraph grew by, and long enough to the right on
 /// screen to fit `┌─ title ─┐`, with the title clear of the links crossing the top
 /// border when `clear_links` holds.
 fn frame_bounds<'a>(
-    subgraph: &'a Subgraph,
+    (subgraph, outer): (&'a Subgraph, &[usize]),
     is_member: &[bool],
-    inner: &[Rectangle],
+    inner: &[(Rectangle, (bool, bool))],
     scene: &Scene<'_>,
     routed: &[RoutedLabel<'_>],
     direction: Direction,
@@ -582,7 +605,7 @@ fn frame_bounds<'a>(
     let ((main_low, main_high), (cross_low, cross_high)) = boxes
         .chain(lines)
         .chain(labels)
-        .chain(inner.iter().copied().map(Some))
+        .chain(inner.iter().map(|&(rectangle, _)| Some(rectangle)))
         .collect::<Option<Vec<_>>>()?
         .into_iter()
         .reduce(
@@ -598,14 +621,20 @@ fn frame_bounds<'a>(
         let tail = link.edge.tail.filter(|_| is_member(link.edge.from)).and(link.points.first());
         head.into_iter().chain(tail)
     });
+    // The markers of the links ending at a nested frame lie in the cell just outside its
+    // border along the flow.
+    let inner_markers = inner.iter().flat_map(|&(((low, high), (cross, _)), (before, after))| {
+        before.then_some((low - 1, cross)).into_iter().chain(after.then_some((high + 1, cross)))
+    });
     let (main_margin, cross_margin) = axis.frame_margins();
     let (main_margin, cross_margin) = (signed(main_margin)?, signed(cross_margin)?);
-    // A marker next to a member box stays inside the frame rather than on its border,
-    // where the two glyphs would overwrite each other.
+    // A marker next to a member box, or just outside a nested frame, stays inside the
+    // frame rather than on its border, where the two glyphs would overwrite each other.
     let (main_before, main_after, cross_before, cross_after) = markers
         .map(|&(main, cross)| Some((signed(main)?, signed(cross)?)))
         .collect::<Option<Vec<_>>>()?
         .into_iter()
+        .chain(inner_markers)
         .fold(
             (main_margin, main_margin, cross_margin, cross_margin),
             |(main_before, main_after, cross_before, cross_after), (main, cross)| {
@@ -617,8 +646,11 @@ fn frame_bounds<'a>(
                 )
             },
         );
+    // The frame grew across the flow on both sides so that the links meeting its borders
+    // have cells of their own (see `grow_frames`).
+    let spread = signed(subgraph.spread)?;
     let mut main = (main_low - main_before, main_high + main_after);
-    let mut cross = (cross_low - cross_before, cross_high + cross_after);
+    let mut cross = (cross_low - cross_before - spread, cross_high + cross_after + spread);
     // The top border on screen, and the frame's cells along it from the top-left corner.
     let (top, along, from_high) = match axis {
         Axis::Horizontal => (cross.0, &mut main, direction.points_backward()),
@@ -629,7 +661,7 @@ fn frame_bounds<'a>(
     };
     let title_width = subgraph.title.width();
     let offset = if clear_links {
-        title_offset(top_border_crossings(scene, axis, top, *along, from_high), title_width)
+        title_offset(top_border_crossings(scene, outer, axis, top, *along, from_high), title_width)
     } else {
         TITLE_CORNER_OFFSET
     };
@@ -644,17 +676,32 @@ fn frame_bounds<'a>(
 }
 
 /// The cells, counted on screen from the frame's top-left corner, where links meet the
-/// frame's top border at `top`, given the frame's first and last cells along it.
-/// Links past the right end count too, since the frame may widen to fit its title.
+/// frame's top border at `top`, given the frame's first and last cells along it and the
+/// subgraphs `outer` it is nested in. Links past the right end count too, since the frame
+/// may widen to fit its title. The end segment of a link to or from one of `outer` does
+/// not count: it was routed to a cell among that subgraph's members and is cut back to
+/// the cell just outside that subgraph's frame afterwards, so it never reaches a frame
+/// nested inside.
 fn top_border_crossings(
     scene: &Scene<'_>,
+    outer: &[usize],
     axis: Axis,
     top: isize,
     (low, high): (isize, isize),
     from_high: bool,
 ) -> Vec<usize> {
+    let other_frame =
+        |end: End| matches!(end, End::Subgraph(subgraph) if outer.contains(&subgraph));
     let mut crossings = Vec::new();
-    for pair in scene.links.iter().flat_map(|link| link.points.windows(2)) {
+    let segments = scene.links.iter().flat_map(|link| {
+        let last = link.points.len().saturating_sub(2);
+        link.points.windows(2).enumerate().filter_map(move |(segment, pair)| {
+            let cut = (segment == 0 && other_frame(link.edge.from))
+                || (segment == last && other_frame(link.edge.to));
+            (!cut).then_some(pair)
+        })
+    });
+    for pair in segments {
         let &[(main_a, cross_a), (main_b, cross_b)] = pair else { continue };
         // The segment's cells across the border and along it, by the border's axis.
         let ((across_a, across_b), (along_a, along_b)) = match axis {

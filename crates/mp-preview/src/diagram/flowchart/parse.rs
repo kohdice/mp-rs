@@ -133,6 +133,10 @@ pub(super) struct Subgraph {
     /// The direction of the block's `direction` statement, if it has one; of several,
     /// the last wins.
     pub direction: Option<Direction>,
+    /// Cells the frame is grown by across the flow on each side of its members, so that
+    /// every link end on one of its borders has a cell of its own; set by
+    /// [`grow_frames`](super::layout::grow_frames).
+    pub spread: usize,
 }
 
 impl Subgraph {
@@ -516,6 +520,7 @@ impl<'a> Builder<'a> {
             members: Vec::new(),
             parent,
             direction: None,
+            spread: 0,
         });
         Ok(())
     }

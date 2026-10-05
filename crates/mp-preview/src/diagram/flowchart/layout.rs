@@ -259,11 +259,169 @@ pub(super) fn port_cells<P: Ord>(
     cells: &RangeInclusive<usize>,
     port: usize,
 ) -> Option<Vec<usize>> {
-    let mut order: Vec<usize> = (0..others.len()).collect();
-    order.sort_by_key(|&end| others.get(end));
-    let ordered: Vec<Reach> = order.iter().map(|&end| reach.get(end).copied().flatten()).collect();
+    let ordered = reach_in_order(others, reach);
     let ranked = ranked_ports(axis, port, cells, &end_gaps(axis, &ordered), others.len())?;
     scatter_by_order(others, &ranked)
+}
+
+/// The reach of each end, indexed like `others`, listed in the order of `others` (see
+/// [`scatter_by_order`]); `None` for an end missing from `reach`.
+fn reach_in_order<P: Ord>(others: &[P], reach: &[Reach]) -> Vec<Reach> {
+    let mut order: Vec<usize> = (0..others.len()).collect();
+    order.sort_by_key(|&end| others.get(end));
+    order.iter().map(|&end| reach.get(end).copied().flatten()).collect()
+}
+
+/// A cell where a drawn link from outside a frame crosses one of its borders across the
+/// flow on its way to a member or to a frame nested in it, with the reach of the link's
+/// label there. The cell is fixed by the link's other end, so the frame's own link ends
+/// keep clear of it.
+pub(super) type Crossing = (isize, Reach);
+
+/// Whether a link end at `cell` whose label has `reach` lies as far from each of
+/// `crossings` as two neighbouring ends must ([`pair_gap`]).
+fn clear_of(axis: Axis, cell: isize, reach: Reach, crossings: &[Crossing]) -> bool {
+    let apart = |distance: isize, before: Reach, after: Reach| {
+        usize::try_from(distance).is_ok_and(|distance| distance >= pair_gap(axis, before, after))
+    };
+    crossings.iter().all(|&(at, crossing)| {
+        if cell < at {
+            apart(at - cell, reach, crossing)
+        } else {
+            apart(cell - at, crossing, reach)
+        }
+    })
+}
+
+/// The cells, in order along a border, of link ends whose labels have the reach in
+/// `ordered`, packed from `first`: each end at the first cell clear of `crossings`
+/// ([`clear_of`]) from `first`, or from its gap in `gaps` after the end before it.
+/// `None` when an end would lie past `last`.
+fn packed_ports(
+    axis: Axis,
+    ordered: &[Reach],
+    gaps: &[usize],
+    crossings: &[Crossing],
+    first: isize,
+    last: isize,
+) -> Option<Vec<isize>> {
+    let mut cells: Vec<isize> = Vec::with_capacity(ordered.len());
+    for (index, &reach) in ordered.iter().enumerate() {
+        let mut cell = match index.checked_sub(1) {
+            Some(before) => cells.get(before)? + signed(*gaps.get(before)?)?,
+            None => first,
+        };
+        while cell <= last && !clear_of(axis, cell, reach, crossings) {
+            cell += 1;
+        }
+        if cell > last {
+            return None;
+        }
+        cells.push(cell);
+    }
+    Some(cells)
+}
+
+/// The cells a box would give link ends whose labels have the reach in `ordered`, `gaps`
+/// apart about `middle` (see [`symmetric_offsets`]), when they all lie within
+/// `low..=high` clear of `crossings`.
+fn box_spread(
+    axis: Axis,
+    ordered: &[Reach],
+    gaps: &[usize],
+    crossings: &[Crossing],
+    (low, high): (isize, isize),
+    middle: isize,
+) -> Option<Vec<isize>> {
+    let cells: Vec<isize> =
+        symmetric_offsets(ordered.len(), gaps)?.into_iter().map(|offset| middle + offset).collect();
+    let fits = cells.iter().zip(ordered).all(|(&cell, &reach)| {
+        (low..=high).contains(&cell) && clear_of(axis, cell, reach, crossings)
+    });
+    fits.then_some(cells)
+}
+
+/// The cells, in order along a border running from `low` to `high`, of a frame's own link
+/// ends whose labels have the reach in `ordered`, clear of the `crossings` of links
+/// passing the border into the frame: spread about `middle` as on a box where that fits
+/// ([`box_spread`]), so a border no link crosses looks like a box's; otherwise, of the
+/// packings from each first cell on ([`packed_ports`]), the one whose farthest end lies
+/// nearest `middle`, then the one with the fewest crossings between its first and last
+/// end, so that the frame's own links stay together where they can, then the one nearest
+/// `middle` in all, then the earliest. `None` when no placement fits.
+fn frame_ports(
+    axis: Axis,
+    ordered: &[Reach],
+    crossings: &[Crossing],
+    (low, high): (isize, isize),
+    middle: isize,
+) -> Option<Vec<isize>> {
+    let gaps = end_gaps(axis, ordered);
+    if let Some(cells) = box_spread(axis, ordered, &gaps, crossings, (low, high), middle) {
+        return Some(cells);
+    }
+    if crossings.is_empty() {
+        return None;
+    }
+    let mut best: Option<((isize, usize, isize), Vec<isize>)> = None;
+    for first in low..=high {
+        // Packing from a later cell puts no end before the one from an earlier cell.
+        let Some(cells) = packed_ports(axis, ordered, &gaps, crossings, first, high) else {
+            break;
+        };
+        let distance = |cell: &isize| (cell - middle).abs();
+        let farthest = cells.iter().map(distance).max().unwrap_or(0);
+        // The crossing links that would run between the frame's own ends.
+        let between = match (cells.first(), cells.last()) {
+            (Some(&first), Some(&last)) => {
+                crossings.iter().filter(|&&(at, _)| first < at && at < last).count()
+            }
+            _ => 0,
+        };
+        let key = (farthest, between, cells.iter().map(distance).sum());
+        let past_middle = cells.first().is_some_and(|&cell| cell >= middle);
+        let beaten = best.as_ref().is_some_and(|((best, ..), _)| farthest > *best);
+        if best.as_ref().is_none_or(|(best, _)| key < *best) {
+            best = Some((key, cells));
+        }
+        // From here on no end moves nearer the middle, so the farthest only grows.
+        if past_middle && beaten {
+            break;
+        }
+    }
+    best.map(|(_, cells)| cells)
+}
+
+/// The fewest cells a frame grows by on each side of its members' cells `low..=high` for
+/// [`frame_ports`] to place its own link ends, whose labels have the reach in `ordered`,
+/// about `middle` clear of `crossings`. Growing never makes them fit less well, so the
+/// count is found by halving an interval whose top is known to fit: past the members'
+/// cells and the crossings, room for every gap and one more on either side.
+fn frame_growth(
+    axis: Axis,
+    ordered: &[Reach],
+    crossings: &[Crossing],
+    (low, high): (isize, isize),
+    middle: isize,
+) -> Option<usize> {
+    let gaps = end_gaps(axis, ordered);
+    let fits = |grown: isize| {
+        let (low, high) = (low - grown, high + grown);
+        box_spread(axis, ordered, &gaps, crossings, (low, high), middle).is_some()
+            || (!crossings.is_empty()
+                && packed_ports(axis, ordered, &gaps, crossings, low, high).is_some())
+    };
+    let widest = |reach: Reach| reach.map_or(0, |(before, after)| before.max(after));
+    let reach = crossings.iter().map(|&(_, reach)| reach).chain(ordered.iter().copied());
+    let step = signed(axis.entry_spacing().max(2 * reach.map(widest).max().unwrap_or(0) + 2))?;
+    let outside = crossings.iter().map(|&(at, _)| (low - at).max(at - high)).max().unwrap_or(0);
+    let total = gaps.iter().try_fold(0, |total: isize, &gap| Some(total + signed(gap)?))?;
+    let (mut short, mut enough) = (-1, (high - low) + total + outside.max(0) + 2 * step);
+    while enough - short > 1 {
+        let grown = short + (enough - short) / 2;
+        if fits(grown) { enough = grown } else { short = grown }
+    }
+    usize::try_from(enough).ok()
 }
 
 /// The cells of `ranked`, listed in their order along a border, given back in the order
@@ -292,9 +450,12 @@ pub(super) struct Exits {
 /// The cells where the links leaving a box meet its far border along the flow, as
 /// [`port_cells`] gives them: first `targets` links to other slots, then a self loop
 /// for each of `loop_labels`, the labels of the box's self loops in the order of their
-/// edges, each taking two cells [`SELF_LOOP_SPAN`] apart (see [`exit_gaps`]). `None`
-/// when a loop's legs do not get two cells of `cells` exactly that far apart, as on a
-/// border too short to hold them that cannot grow, such as a drawing's frame.
+/// edges, each taking two cells [`SELF_LOOP_SPAN`] apart (see [`exit_gaps`]). Upstream
+/// centres a loop on the border and lets other edges cross it and its label; crossing
+/// glyphs would merge the loop with those lines, so the loops take the last cells
+/// instead. `None` when a loop's legs do not get two cells of `cells` exactly that far
+/// apart, as on a border too short to hold them that cannot grow, such as a drawing's
+/// frame.
 pub(super) fn exit_cells(
     axis: Axis,
     targets: usize,
@@ -451,23 +612,30 @@ pub(super) fn entry_reach(axis: Axis, edge: &Edge, path: &[usize], segment: usiz
 }
 
 /// The distance between each pair of neighbouring ends, listed in order along the
-/// border with the reach of each end's label: [`Axis::entry_spacing`], or, where either
-/// end has a label, enough for one blank cell between a label and the label or line
-/// next to it.
+/// border with the reach of each end's label (see [`pair_gap`]).
 fn end_gaps(axis: Axis, ordered: &[Reach]) -> Vec<usize> {
-    let spacing = axis.entry_spacing();
     ordered
         .windows(2)
-        .map(|pair| match pair {
-            [None, None] => spacing,
-            [before, after] => {
-                let after_first = before.map_or(0, |(_, after)| after);
-                let before_second = after.map_or(0, |(before, _)| before);
-                spacing.max(after_first + before_second + 2)
-            }
-            _ => spacing,
+        .map(|pair| match *pair {
+            [before, after] => pair_gap(axis, before, after),
+            _ => axis.entry_spacing(),
         })
         .collect()
+}
+
+/// The distance between two neighbouring ends along a border, the first with the reach
+/// `before` and the second with `after`: [`Axis::entry_spacing`], or, where either end has
+/// a label, enough for one blank cell between a label and the label or line next to it.
+fn pair_gap(axis: Axis, before: Reach, after: Reach) -> usize {
+    let spacing = axis.entry_spacing();
+    match (before, after) {
+        (None, None) => spacing,
+        _ => {
+            let after_first = before.map_or(0, |(_, after)| after);
+            let before_second = after.map_or(0, |(before, _)| before);
+            spacing.max(after_first + before_second + 2)
+        }
+    }
 }
 
 /// The offsets from a border's centre of `count` link ends, in ascending order, where
@@ -520,8 +688,12 @@ fn symmetric_ports(
 /// link ends on each of its two borders along the flow fit its port cells at
 /// [`Axis::entry_spacing`], spread as [`symmetric_offsets`] spreads them. A link closing
 /// a cycle is counted on the borders it is laid out between, and a self loop takes two
-/// cells [`SELF_LOOP_SPAN`] apart on the border its box's other links leave by. `None`
-/// when the chart cannot be searched for cycles.
+/// cells [`SELF_LOOP_SPAN`] apart on the border its box's other links leave by. Upstream
+/// sizes a node by its label (widened to `flowchart.minNodeWidth`) and padding, never by
+/// its edges, and lets edges meet its border at any point (`intersect`); a
+/// three-row box has one non-corner cell on each side, and two links sharing a cell
+/// would show a single line and marker, so the box grows instead. `None` when the chart
+/// cannot be searched for cycles.
 pub(super) fn grow_boxes(chart: &mut Flowchart) -> Option<()> {
     let axis = chart.direction.axis();
     let reversed = cycle_closing_edges(chart)?;
@@ -627,6 +799,31 @@ pub(super) fn grow_for_labels(chart: &mut Flowchart, layered: &Layered) -> Optio
     Some(())
 }
 
+/// Sets the cells each subgraph frame with members grows by across the flow on both
+/// sides of its members, as [`grow_boxes`] and [`grow_for_labels`] grow a box: just
+/// enough, as `layered` measured it ([`Layered::frame_needs`]), for the drawn links
+/// meeting each of its two borders along the flow to take cells of their own there,
+/// clear of the links crossing that border into the frame (see `frame_ports`). A frame no
+/// drawn link meets grows by nothing. The frame grows on both sides so that its members
+/// stay centred in it. Upstream sizes a cluster by its content and its title (`rect` in
+/// `clusters.js`), never by its edges, and cuts each edge where it meets the border, at
+/// any point (`cutPathAtIntersect`), while an edge to a node inside runs on through the
+/// border; a text border has only whole cells, and two links sharing one would read as
+/// one line with a single marker, so the frame grows instead.
+///
+/// The cells an outer frame's members take, and the cells where links cross its borders
+/// to the frames nested in it, depend on how far those frames grew, which `layered` was
+/// laid out with, so the caller lays the chart out again and calls this until no frame
+/// changes. Returns whether any frame's growth changed.
+pub(super) fn grow_frames(chart: &mut Flowchart, layered: &Layered) -> bool {
+    let mut changed = false;
+    for (frame, &need) in chart.subgraphs.iter_mut().zip(&layered.frame_needs) {
+        changed |= frame.spread != need;
+        frame.spread = need;
+    }
+    changed
+}
+
 /// Up to `count` cells within `cells`, `spacing` apart, nearest to `port` first, in
 /// ascending order.
 fn spread_ports(
@@ -651,6 +848,21 @@ fn spread_ports(
     }
     ports.sort_unstable();
     ports
+}
+
+/// One placement of every slot across the flow, as `place` in [`lay_out`] makes it.
+struct Placement {
+    /// The first cell of each slot.
+    starts: Vec<isize>,
+    /// The cell of each slot where links leave and enter.
+    ports: Vec<isize>,
+    /// The fewest cells each subgraph's frame must grow by on either side (see
+    /// [`Layered::frame_needs`]).
+    needs: Vec<usize>,
+    /// The cells where the drawn links entering each slot meet it.
+    entered: Vec<Vec<isize>>,
+    /// The cell where each link leaving a slot leaves it, indexed like its children.
+    exits: Vec<Vec<isize>>,
 }
 
 /// A place in a layer: a node's box, or the cells a link longer than one layer passes
@@ -684,11 +896,16 @@ pub(super) struct Layered {
     /// Whether each edge runs against the flow, from its source in a later layer back
     /// to its target, indexed like [`Flowchart::edges`].
     pub reversed: Vec<bool>,
+    /// The fewest cells each subgraph's frame must grow by on either side of its members
+    /// for the links meeting it in this layout to fit its borders (see `frame_ports`),
+    /// indexed like [`Flowchart::subgraphs`]; 0 for a frame no drawn link meets.
+    pub frame_needs: Vec<usize>,
 }
 
 /// Bounds the slots added for long links. Their number grows with the product of the
 /// number of edges and the number of layers, so a small input could otherwise demand
-/// an enormous drawing.
+/// an enormous drawing. The bound is this crate's own, not upstream's: a terminal
+/// drawing must bound its memory and time even when no width limits it.
 const MAX_PASSING_SLOTS: usize = 10_000;
 
 /// Places every node in the first layer that is, for each parent, at least the link's
@@ -814,7 +1031,11 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     // A link's passing slots lie in the subgraphs both its ends lie in, as Mermaid puts
     // the dummy nodes of a link between two members of a cluster in that cluster: the
     // frame runs around them, and the slots of other nodes stay outside it. An end at a
-    // frame lies in no subgraph, so neither do the passing slots of its link.
+    // frame lies in no subgraph, so neither do the passing slots of its link. Upstream
+    // assigns an edge's dummy nodes to the clusters on its path by rank
+    // (`parentDummyChains`), so the label of a link entering a cluster may fall inside
+    // it; here a link to a frame ends at the frame's border, so its label stays in the
+    // gap before the frame, outside it.
     for path in &paths {
         let (Some(&first), Some(&last)) = (path.first(), path.last()) else { continue };
         let (from, to) = (chain_of.get(first)?, chain_of.get(last)?);
@@ -907,6 +1128,13 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     };
 
     let frame_margin = signed(axis.frame_margins().1)?;
+    // The cells `frames` take across the flow on one side of their members: each frame's
+    // margin and the cells it grew by (see `grow_frames`).
+    let pads = |frames: &[usize]| -> Option<isize> {
+        frames.iter().try_fold(0, |sum, &subgraph| {
+            Some(sum + frame_margin + signed(chart.subgraphs.get(subgraph)?.spread)?)
+        })
+    };
     // The cells across the flow a frame starting at `frame_start` needs to fit its title
     // clear of the links crossing its top border at `crossings`: the title runs across
     // the flow only in a vertical layout.
@@ -923,19 +1151,30 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     };
     let gap = signed(sibling_gap)?;
 
+    // Whether the link at the end of a link at a frame, the slot `end`, is drawn.
+    let end_drawn = |end: usize, entering: bool| -> Option<bool> {
+        if entering {
+            let (&parent, &link) = parents.get(end)?.first().zip(link_of.get(end)?.first())?;
+            drawn.get(parent)?.get(link).copied()
+        } else {
+            drawn.get(end)?.first().copied()
+        }
+    };
     // Each slot goes as close as the stack allows to the mean port of its parents,
     // `sibling_gap` cells or more after the slot before it, with room for a subgraph's
     // frame wherever the stack enters or leaves the subgraph's members; no further than
-    // its `ceiling` towards its parents, and no earlier than its `floor`. Returns the
-    // first cell and the port of each slot.
+    // its `ceiling` towards its parents, and no earlier than its `floor`.
     let place = |members: &[Vec<usize>],
                  floor: &HashMap<usize, isize>,
                  ceiling: &HashMap<usize, isize>|
-     -> Option<(Vec<isize>, Vec<isize>)> {
+     -> Option<Placement> {
         let position = positions(members)?;
         let mut starts = vec![0; layer_of.len()];
         let mut ports = vec![0; layer_of.len()];
         let mut exits: Vec<Vec<isize>> = vec![Vec::new(); layer_of.len()];
+        // The cells each frame grows by on either side for its own link ends to fit.
+        let mut needs = vec![0; chart.subgraphs.len()];
+        let mut entered: Vec<Vec<isize>> = vec![Vec::new(); layer_of.len()];
         for (layer_index, layer) in members.iter().enumerate() {
             // The first cell after the previous slot, or after the frame closing behind it.
             let mut end = None;
@@ -949,7 +1188,11 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             // cells of their own, and a child goes opposite the cells its drawn links
             // leave from, so that children fan out the way their links do. A slot no drawn
             // link reaches goes just before the next slot that has such a place, so that
-            // an invisible link fixes only the layer and the order of its target.
+            // an invisible link fixes only the layer and the order of its target. Upstream's
+            // Brandes-Köpf pass (`balance` in dagre's `bk.js`) aligns a node with the
+            // median of its neighbours, the targets of invisible links included; in text
+            // a box placed for a link that is not drawn only bends the drawn lines, as
+            // cells cannot place a box between two columns.
             let mut wanted_of = Vec::with_capacity(layer.len());
             // The first and last cells, from the slot's first cell, that the links entering
             // each slot take on the label rows of the gap before the layer: their entry
@@ -958,6 +1201,9 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             // The labels of the links entering each slot: the link's other end and the
             // first cell of its label, from the slot's first cell.
             let mut labels_of = Vec::with_capacity(layer.len());
+            // The entry cells, from the slot's first cell, of the drawn links entering each
+            // slot, with the reach of their labels.
+            let mut entries_of: Vec<Vec<(usize, Reach)>> = Vec::with_capacity(layer.len());
             for &slot in layer {
                 let (_, port_offset) = extent(slot);
                 let (arrivals, reach): (Vec<usize>, Vec<Reach>) = parents
@@ -978,6 +1224,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     .get(slot)
                     .map_or(port_offset..=port_offset, |node| axis.port_range(node));
                 let entries = port_cells(axis, &sources, &reach, &cells, port_offset)?;
+                entries_of.push(entries.iter().copied().zip(reach.iter().copied()).collect());
                 let mut row: Option<(isize, isize)> = None;
                 let mut labels = Vec::new();
                 for ((cell, reach), &parent) in entries.into_iter().zip(&reach).zip(&arrivals) {
@@ -1014,9 +1261,9 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     // before the next lie between them too.
                     let (chain, next_chain) = (chain_of.get(slot)?, chain_of.get(next_slot)?);
                     let common = chain.iter().zip(next_chain).take_while(|(a, b)| a == b).count();
-                    let frames = signed(chain.len() - common + next_chain.len() - common)?;
+                    let frames = pads(chain.get(common..)?)? + pads(next_chain.get(common..)?)?;
                     let size = signed(extent(slot).0 + overhang(slot).1)?;
-                    *wanted = Some(next_wanted - gap - size - frame_margin * frames);
+                    *wanted = Some(next_wanted - gap - size - frames);
                 }
                 next = wanted.map(|wanted| (slot, wanted)).or(next);
             }
@@ -1040,14 +1287,15 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 while open.len() > kept {
                     let (current, frame_start, crossings) = open.pop()?;
                     let title_end = frame_start + title_cells(current, &crossings, frame_start)?;
-                    end = end.map(|end: isize| (end + frame_margin).max(title_end));
+                    let pad = pads(&[current])?;
+                    end = end.map(|end: isize| (end + pad).max(title_end));
                     // A frame whose members start in this layer has its top border below
                     // the label rows.
                     if member_layers.get(current)?.0 < layer_index {
                         row_end = row_end.max(end.map(|end| end - 1));
                     }
                 }
-                let lead = frame_margin * signed(chain.len() - kept)?;
+                let lead = pads(chain.get(kept..)?)?;
                 // The box keeps the gap from the box or frame before. The label rows hold
                 // no box, so a label reaching past the slot keeps one blank cell from the
                 // lines, labels and frame borders before it there. A frame opening here
@@ -1080,9 +1328,9 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     (None, None) => 0,
                 };
                 let start = floor.get(&slot).map_or(start, |&floor| start.max(floor));
-                // Each frame opening here lies one margin outside the next one in.
+                // Each frame opening here lies its margin and growth outside the next one in.
                 for (depth, &subgraph) in chain.iter().enumerate().skip(kept) {
-                    let frame_start = start - frame_margin * signed(chain.len() - depth)?;
+                    let frame_start = start - pads(chain.get(depth..)?)?;
                     open.push((subgraph, frame_start, Vec::new()));
                 }
                 // The cells the routing gives the links leaving this slot: a box spreads
@@ -1176,9 +1424,18 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 *ports.get_mut(slot)? = start + offset;
                 *exits.get_mut(slot)? = leaving;
             }
+            for (&slot, entries) in layer.iter().zip(&entries_of) {
+                let start = *starts.get(slot)?;
+                *entered.get_mut(slot)? = entries
+                    .iter()
+                    .map(|&(cell, _)| Some(start + signed(cell)?))
+                    .collect::<Option<_>>()?;
+            }
             // The links meeting one border of a frame in this layer take cells of their own
-            // across the span of its members here, spread about its centre as on a box
-            // border and ordered by their other ends.
+            // across the span of its members here and the cells the frame grew by around
+            // it, ordered by their other ends and clear of the links crossing that border
+            // into the frame (see `frame_ports`); an invisible link meets no border and
+            // stays at the centre.
             let mut borders: Vec<((usize, bool), Vec<usize>)> = Vec::new();
             for &slot in frame_ends.get(layer_index)? {
                 let border = *frame_end.get(&slot)?;
@@ -1187,35 +1444,110 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     None => borders.push((border, vec![slot])),
                 }
             }
+            // The ends at a nested frame are cells the links to them cross the borders of
+            // the frames around it at, so the deepest frames take their cells first.
+            borders.sort_by_key(|&((subgraph, _), _)| {
+                std::cmp::Reverse(chart.enclosing(subgraph).len())
+            });
             for ((subgraph, entering), ends) in borders {
+                // The cells the frame's content takes here: each member's box with the
+                // frames nested in this one around it, their margins and growth included,
+                // as a box's ports are spread about the box itself.
                 let spans = layer
                     .iter()
                     .filter(|&&member| in_subgraph(member, subgraph))
                     .map(|&member| {
+                        let chain = chain_of.get(member)?;
+                        let depth = chain.iter().position(|&outer| outer == subgraph)?;
+                        let nested = pads(chain.get(depth + 1..)?)?;
                         let start = *starts.get(member)?;
                         let size = axis.box_cross_size(chart.nodes.get(member)?);
-                        Some((start, start + signed(size)? - 1))
+                        Some((start - nested, start + signed(size)? - 1 + nested))
                     })
                     .collect::<Option<Vec<_>>>()?;
-                let low = spans.iter().map(|&(low, _)| low).min()?;
-                let high = spans.iter().map(|&(_, high)| high).max()?;
-                let others = ends
+                let first = spans.iter().map(|&(low, _)| low).min()?;
+                let last = spans.iter().map(|&(_, high)| high).max()?;
+                let middle = first + (last - first) / 2;
+                let spread = signed(chart.subgraphs.get(subgraph)?.spread)?;
+                let (low, high) = (first - spread, last + spread);
+                // Where drawn links from outside cross this border: into the frame's
+                // members here at their entry cells, out of them at their exit cells, and
+                // to or from the frames nested in it at those frames' ends.
+                let mut crossings: Vec<Crossing> = Vec::new();
+                for &end in frame_ends.get(layer_index)? {
+                    let &(inner, inner_entering) = frame_end.get(&end)?;
+                    if inner == subgraph
+                        || inner_entering != entering
+                        || !chart.enclosing(inner).contains(&subgraph)
+                    {
+                        continue;
+                    }
+                    let reach = if entering { *arrival_reach.get(end)?.first()? } else { None };
+                    if end_drawn(end, entering)? {
+                        crossings.push((*starts.get(end)?, reach));
+                    }
+                }
+                for (&slot, entries) in layer.iter().zip(&entries_of) {
+                    if !in_subgraph(slot, subgraph) {
+                        continue;
+                    }
+                    let start = *starts.get(slot)?;
+                    if entering {
+                        for &(cell, reach) in entries {
+                            crossings.push((start + signed(cell)?, reach));
+                        }
+                    } else {
+                        let leaving = children.get(slot)?.iter().zip(drawn.get(slot)?);
+                        for ((&child, &is_drawn), &cell) in leaving.zip(exits.get(slot)?) {
+                            if is_drawn && !in_subgraph(child, subgraph) {
+                                crossings.push((cell, None));
+                            }
+                        }
+                    }
+                }
+                // Each end's other end, whether its link is drawn, and its label's reach.
+                let links = ends
                     .iter()
                     .map(|&end| {
                         if entering {
                             let (&parent, &link) =
                                 parents.get(end)?.first().zip(link_of.get(end)?.first())?;
-                            exits.get(parent)?.get(link).copied()
+                            let other = *exits.get(parent)?.get(link)?;
+                            let drawn = *drawn.get(parent)?.get(link)?;
+                            Some((other, drawn, *arrival_reach.get(end)?.first()?))
                         } else {
                             let &child = children.get(end)?.first()?;
-                            signed(*position.get(child)?)
+                            let drawn = *drawn.get(end)?.first()?;
+                            Some((signed(*position.get(child)?)?, drawn, None))
                         }
                     })
                     .collect::<Option<Vec<_>>>()?;
+                let (others, reach): (Vec<isize>, Vec<Reach>) = links
+                    .iter()
+                    .filter(|&&(_, drawn, _)| drawn)
+                    .map(|&(other, _, reach)| (other, reach))
+                    .unzip();
+                let ordered = reach_in_order(&others, &reach);
+                let need = frame_growth(axis, &ordered, &crossings, (first, last), middle)?;
+                let frame_need = needs.get_mut(subgraph)?;
+                *frame_need = (*frame_need).max(need);
                 let span = usize::try_from(high - low).ok()?;
-                for (&end, cell) in
-                    ends.iter().zip(port_cells(axis, &others, &[], &(0..=span), span / 2)?)
-                {
+                let port = usize::try_from(middle - low).ok()?;
+                // Before the frame has grown as far as it needs, as in the rounds that
+                // measure it, its ends share cells as on a box border too short for them.
+                let cells = match frame_ports(axis, &ordered, &crossings, (low, high), middle) {
+                    Some(ranked) => {
+                        let ranked = ranked
+                            .iter()
+                            .map(|&cell| usize::try_from(cell - low).ok())
+                            .collect::<Option<Vec<_>>>()?;
+                        scatter_by_order(&others, &ranked)?
+                    }
+                    None => port_cells(axis, &others, &reach, &(0..=span), port)?,
+                };
+                let mut cells = cells.into_iter();
+                for (&end, &(_, drawn, _)) in ends.iter().zip(&links) {
+                    let cell = if drawn { cells.next()? } else { port };
                     let at = low + signed(cell)?;
                     *starts.get_mut(end)? = at;
                     *ports.get_mut(end)? = at;
@@ -1223,7 +1555,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 }
             }
         }
-        Some((starts, ports))
+        Some(Placement { starts, ports, needs, entered, exits })
     };
 
     // A frame keeps the cells across the flow it covers clear of non-members in every
@@ -1240,8 +1572,9 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     let mut floor = HashMap::new();
     let mut ceiling = HashMap::new();
     let mut rounds = 0;
-    let (starts, ports) = loop {
-        let (starts, ports) = place(&members, &floor, &ceiling)?;
+    let Placement { starts, ports, needs: frame_needs, .. } = loop {
+        let placement = place(&members, &floor, &ceiling)?;
+        let Placement { starts, entered, exits, .. } = &placement;
         rounds += 1;
         // A slot's cells across the flow, with the labels of its self loops.
         let span = |slot: usize| {
@@ -1251,6 +1584,43 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         };
         // Each frame's first and last cells across the flow, around its members' boxes,
         // the passing slots of the links between its members and its inner frames.
+        // The cells where drawn links meet a frame's top border on screen, which its title
+        // keeps clear of: in a vertical layout, the border facing the layer before its
+        // members (`TD`) or after them (`BT`), where links from outside reach its members,
+        // the frames nested in it and the frame itself; a horizontal title runs along the
+        // flow, where `title_cells` reserves nothing.
+        let top_crossings = |index: usize| -> Option<Vec<isize>> {
+            if axis == Axis::Horizontal {
+                return Some(Vec::new());
+            }
+            let facing = !chart.direction.points_backward();
+            let &(first, last) = member_layers.get(index)?;
+            let layer = if facing { first } else { last };
+            let mut cells = Vec::new();
+            for (slot, &slot_layer) in layer_of.iter().enumerate() {
+                if slot_layer != layer {
+                    continue;
+                }
+                if let Some(&(frame, entering)) = frame_end.get(&slot) {
+                    let within = frame == index || chart.enclosing(frame).contains(&index);
+                    if entering == facing && within && end_drawn(slot, entering)? {
+                        cells.push(*starts.get(slot)?);
+                    }
+                } else if in_subgraph(slot, index) {
+                    if facing {
+                        cells.extend(entered.get(slot)?);
+                    } else {
+                        let leaving = children.get(slot)?.iter().zip(drawn.get(slot)?);
+                        for ((&child, &is_drawn), &cell) in leaving.zip(exits.get(slot)?) {
+                            if is_drawn && !in_subgraph(child, index) {
+                                cells.push(cell);
+                            }
+                        }
+                    }
+                }
+            }
+            Some(cells)
+        };
         let mut bands: Vec<Option<(isize, isize)>> = vec![None; chart.subgraphs.len()];
         for &index in &innermost_first {
             let subgraph = chart.subgraphs.get(index)?;
@@ -1263,9 +1633,10 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 .filter(|(inner, _)| inner.parent == Some(index))
                 .filter_map(|(_, band)| band.map(Some));
             let spans = boxes.chain(inner).collect::<Option<Vec<_>>>()?;
-            let low = spans.iter().map(|&(low, _)| low).min()? - frame_margin;
-            let high = (spans.iter().map(|&(_, high)| high).max()? + frame_margin)
-                .max(low + title_cells(index, &[], low)? - 1);
+            let pad = pads(&[index])?;
+            let low = spans.iter().map(|&(low, _)| low).min()? - pad;
+            let high = (spans.iter().map(|&(_, high)| high).max()? + pad)
+                .max(low + title_cells(index, &top_crossings(index)?, low)? - 1);
             *bands.get_mut(index)? = Some((low, high));
         }
         let mut strays = Vec::new();
@@ -1288,10 +1659,10 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             }
         }
         if strays.is_empty() || rounds > node_count {
-            break (starts, ports);
+            break placement;
         }
         for (stray, subgraph, high) in strays {
-            let lead = frame_margin * signed(chain_of.get(stray)?.len())?;
+            let lead = pads(chain_of.get(stray)?)?;
             // The labels of the stray's self loops move out of the frame with it.
             let after = high + 1 + gap + lead + signed(overhang(stray).0)?;
             floor
@@ -1299,11 +1670,12 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 .and_modify(|floor: &mut isize| *floor = (*floor).max(after))
                 .or_insert(after);
             for &member in &chart.subgraphs.get(subgraph)?.members {
-                // A member nested deeper lies a margin further in for each frame between.
+                // A member lies the margin and growth of the frame it sits in, and of each
+                // frame nested between, further in.
                 let chain = chain_of.get(member)?;
-                let depth = chain.len() - chain.iter().position(|&outer| outer == subgraph)?;
+                let depth = chain.iter().position(|&outer| outer == subgraph)?;
                 let size = extent(member).0 + overhang(member).1;
-                let inside = high - frame_margin * signed(depth)? - signed(size)? + 1;
+                let inside = high - pads(chain.get(depth..)?)? - signed(size)? + 1;
                 ceiling
                     .entry(member)
                     .and_modify(|ceiling: &mut isize| *ceiling = (*ceiling).min(inside))
@@ -1342,7 +1714,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             })
         })
         .collect::<Option<_>>()?;
-    Some(Layered { slots, layer_count, paths, reversed })
+    Some(Layered { slots, layer_count, paths, reversed, frame_needs })
 }
 
 /// The hidden node an empty subgraph holds, if `subgraph` is one.
