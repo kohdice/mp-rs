@@ -51,7 +51,9 @@ just check                   # Format and lint
 just test                    # Run all unit and integration tests
 ```
 
-CI runs `just check-ci` and `just test` for pushes to `main` and for non-draft pull requests.
+CI runs `just check-ci` and `just test` for pushes to `main` and for non-draft pull requests
+that touch code, build, or CI files (the `paths` filters in `.github/workflows/ci.yml`);
+documentation-only changes do not start it.
 Make sure `just check` and `just test` pass locally before pushing.
 
 ### Benchmarking
