@@ -11,9 +11,39 @@ use super::outline::outline;
 use super::parse::{Body, Direction, Edge, End, Flowchart, Node};
 use super::signed;
 
-/// Cells a self loop runs through beyond its box, both along the flow and across it;
-/// the layout keeps the ones across the flow free.
+/// Cells a self loop runs through beyond its box along the flow: its legs leave and
+/// re-enter the box's far border on the first, and its run joins them on the second.
 pub(super) const SELF_LOOP_CELLS: usize = 2;
+
+/// Cells across the flow from a self loop's first leg to its second, which leaves the
+/// cell between them free, as Mermaid centres a loop's span on its node.
+pub(super) const SELF_LOOP_SPAN: usize = 2;
+
+/// The cells along the flow a self loop carrying `label` takes after its box, before
+/// the tracks there: its legs and its run, then, outside the loop beyond the run, a
+/// label row in a vertical layout, or in a horizontal one a blank cell and the label
+/// running along the flow.
+pub(super) fn self_loop_cells(axis: Axis, label: Option<&str>) -> usize {
+    match (axis, label) {
+        (_, None) => SELF_LOOP_CELLS,
+        (Axis::Vertical, Some(_)) => SELF_LOOP_CELLS + 1,
+        (Axis::Horizontal, Some(label)) => SELF_LOOP_CELLS + 1 + label.width(),
+    }
+}
+
+/// Where the label `width` cells wide of a self loop whose first leg is at `leg` across
+/// the flow starts: the cells along the flow after the box's far border, and the cell
+/// across the flow, which may lie before cell 0. Mermaid puts the label outside the loop
+/// beyond its run, centred on the loop: here directly beyond the run in a vertical
+/// layout, with the usual lean left (see [`label_reach`]), and one blank cell beyond it
+/// on the row between the legs in a horizontal one.
+pub(super) fn self_loop_label_at(axis: Axis, leg: usize, width: usize) -> Option<(usize, isize)> {
+    let centre = signed(leg + SELF_LOOP_SPAN / 2)?;
+    Some(match axis {
+        Axis::Vertical => (SELF_LOOP_CELLS, centre - signed(label_reach(width).0)?),
+        Axis::Horizontal => (SELF_LOOP_CELLS + 1, centre),
+    })
+}
 
 /// Cells from a frame's top-left corner to the blank before its title when nothing is
 /// in the way: `┌─`.
@@ -222,16 +252,109 @@ pub(super) fn port_cells<P: Ord>(
 ) -> Option<Vec<usize>> {
     let mut order: Vec<usize> = (0..others.len()).collect();
     order.sort_by_key(|&end| others.get(end));
-    let spacing = axis.entry_spacing();
     let ordered: Vec<Reach> = order.iter().map(|&end| reach.get(end).copied().flatten()).collect();
-    let gaps = end_gaps(axis, &ordered);
-    let ports = symmetric_ports(port, cells, others.len(), &gaps)
-        .unwrap_or_else(|| spread_ports(port, cells, spacing, others.len()));
-    let mut cells_of = vec![0; others.len()];
-    for (rank, &end) in order.iter().enumerate() {
-        *cells_of.get_mut(end)? = *ports.get(rank * ports.len() / others.len())?;
+    let ranked = ranked_ports(axis, port, cells, &end_gaps(axis, &ordered), others.len())?;
+    scatter_by_order(others, &ranked)
+}
+
+/// The cells of `ranked`, listed in their order along a border, given back in the order
+/// of `keys`: the end at each rank is the one that rank takes when `keys` are sorted, ties
+/// keeping the order of `keys`.
+pub(super) fn scatter_by_order<P: Ord>(keys: &[P], ranked: &[usize]) -> Option<Vec<usize>> {
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by_key(|&end| keys.get(end));
+    let mut cells_of = vec![0; keys.len()];
+    for (&end, &cell) in order.iter().zip(ranked) {
+        *cells_of.get_mut(end)? = cell;
     }
     Some(cells_of)
+}
+
+/// The cells where the links leaving a box meet its far border along the flow, counted
+/// from the box's first cell, as [`exit_cells`] spreads them.
+#[derive(Debug)]
+pub(super) struct Exits {
+    /// The cells of the links to other slots, in rank order (see [`scatter_by_order`]).
+    pub targets: Vec<usize>,
+    /// The cell of each self loop's first leg; its second is [`SELF_LOOP_SPAN`] further.
+    pub legs: Vec<usize>,
+}
+
+/// The cells where the links leaving a box meet its far border along the flow, as
+/// [`port_cells`] gives them: first `targets` links to other slots, then a self loop
+/// for each of `loop_labels`, the labels of the box's self loops in the order of their
+/// edges, each taking two cells [`SELF_LOOP_SPAN`] apart (see [`exit_gaps`]). `None`
+/// when a loop's legs do not get two cells of `cells` exactly that far apart, as on a
+/// border too short to hold them that cannot grow, such as a drawing's frame.
+pub(super) fn exit_cells(
+    axis: Axis,
+    targets: usize,
+    loop_labels: &[Option<&str>],
+    cells: &RangeInclusive<usize>,
+    port: usize,
+) -> Option<Exits> {
+    let gaps = exit_gaps(axis, targets, loop_labels);
+    let ranked = ranked_ports(axis, port, cells, &gaps, targets + 2 * loop_labels.len())?;
+    let legs = ranked
+        .get(targets..)?
+        .chunks(2)
+        .map(|pair| match *pair {
+            [first, second] if second == first + SELF_LOOP_SPAN && cells.contains(&second) => {
+                Some(first)
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let targets = ranked.get(..targets)?.to_vec();
+    Some(Exits { targets, legs })
+}
+
+/// The distances between neighbouring ends on a box's far border along the flow, in the
+/// order [`exit_cells`] lists them: `targets` links to other slots, then a self loop of
+/// two legs for each of `loop_labels`. The legs of one loop are [`SELF_LOOP_SPAN`]
+/// apart; any other neighbours are [`end_gaps`] apart, as the ends of labelled links
+/// entering a box are. In a vertical layout a loop's label lies across the flow, centred
+/// on the cell between the legs, so each leg carries the label's reach measured from it;
+/// that keeps one blank cell between the label and the line or label next to it.
+fn exit_gaps(axis: Axis, targets: usize, loop_labels: &[Option<&str>]) -> Vec<usize> {
+    let mut ordered: Vec<Reach> = vec![None; targets];
+    for label in loop_labels {
+        let legs = match (axis, label) {
+            (Axis::Vertical, Some(label)) => {
+                let (before, after) = label_reach(label.width());
+                let half = SELF_LOOP_SPAN / 2;
+                [
+                    Some((before.saturating_sub(half), after + half)),
+                    Some((before + half, after.saturating_sub(half))),
+                ]
+            }
+            _ => [None, None],
+        };
+        ordered.extend(legs);
+    }
+    let mut gaps = end_gaps(axis, &ordered);
+    for index in 0..loop_labels.len() {
+        if let Some(gap) = gaps.get_mut(targets + 2 * index) {
+            *gap = SELF_LOOP_SPAN;
+        }
+    }
+    gaps
+}
+
+/// The cell of each of `count` link ends in their order along a border: spread
+/// symmetrically about `port` with `gaps` between them (see [`symmetric_offsets`]), or,
+/// when those cells do not all lie within `cells`, shared out from `port` outwards,
+/// [`Axis::entry_spacing`] apart and several to a cell.
+fn ranked_ports(
+    axis: Axis,
+    port: usize,
+    cells: &RangeInclusive<usize>,
+    gaps: &[usize],
+    count: usize,
+) -> Option<Vec<usize>> {
+    let ports = symmetric_ports(port, cells, count, gaps)
+        .unwrap_or_else(|| spread_ports(port, cells, axis.entry_spacing(), count));
+    (0..count).map(|rank| ports.get(rank * ports.len() / count).copied()).collect()
 }
 
 /// The cells a link's label takes before and after the cell where the link meets a
@@ -257,7 +380,7 @@ pub(super) enum LabelSpot {
 }
 
 /// Where the label of a link laid out along `path` goes (see [`LabelSpot`]). `None` for a
-/// self loop, whose label `place_labels` looks for a place for.
+/// self loop, whose label goes outside the loop (see [`self_loop_label_at`]).
 pub(super) fn label_spot(path: &[usize]) -> Option<LabelSpot> {
     let segments = path.len().checked_sub(1).filter(|&segments| segments > 0)?;
     let middle = segments / 2;
@@ -368,14 +491,15 @@ fn symmetric_ports(
 /// Grows each box across the flow by whole cells on both sides of its label until the
 /// link ends on each of its two borders along the flow fit its port cells at
 /// [`Axis::entry_spacing`], spread as [`symmetric_offsets`] spreads them. A link closing
-/// a cycle is counted on the borders it is laid out between, and a self loop leaves
-/// through the border its box's other links leave by. `None` when the chart cannot be
-/// searched for cycles.
+/// a cycle is counted on the borders it is laid out between, and a self loop takes two
+/// cells [`SELF_LOOP_SPAN`] apart on the border its box's other links leave by. `None`
+/// when the chart cannot be searched for cycles.
 pub(super) fn grow_boxes(chart: &mut Flowchart) -> Option<()> {
     let axis = chart.direction.axis();
     let reversed = cycle_closing_edges(chart)?;
     let mut entering = vec![0; chart.nodes.len()];
     let mut leaving = vec![0; chart.nodes.len()];
+    let mut loops: Vec<Vec<Option<&str>>> = vec![Vec::new(); chart.nodes.len()];
     for (edge, &reversed) in chart.edges.iter().zip(&reversed) {
         // An invisible link meets no border.
         if !edge.stroke.is_visible() {
@@ -384,20 +508,36 @@ pub(super) fn grow_boxes(chart: &mut Flowchart) -> Option<()> {
         let (from, to) = if reversed { (edge.to, edge.from) } else { (edge.from, edge.to) };
         let (from, to) = (laid_out_end(chart, from), laid_out_end(chart, to));
         // The end at a frame meets no box.
-        if let End::Node(from) = from {
-            *leaving.get_mut(from)? += 1;
-        }
-        if let End::Node(to) = to
-            && from != End::Node(to)
-        {
-            *entering.get_mut(to)? += 1;
+        match (from, to) {
+            (End::Node(from), End::Node(to)) if from == to => {
+                loops.get_mut(from)?.push(edge.label.as_deref());
+            }
+            _ => {
+                if let End::Node(from) = from {
+                    *leaving.get_mut(from)? += 1;
+                }
+                if let End::Node(to) = to {
+                    *entering.get_mut(to)? += 1;
+                }
+            }
         }
     }
-    for ((node, entering), leaving) in chart.nodes.iter_mut().zip(entering).zip(leaving) {
-        let count: usize = entering.max(leaving);
-        let gaps = vec![axis.entry_spacing(); count.saturating_sub(1)];
-        let reach =
-            symmetric_offsets(count, &gaps)?.last().map_or(0, |&offset| offset.unsigned_abs());
+    let reach = |offsets: Vec<isize>| offsets.iter().map(|offset| offset.unsigned_abs()).max();
+    let spreads = entering
+        .into_iter()
+        .zip(leaving)
+        .zip(&loops)
+        .map(|((entering, leaving), labels)| {
+            let entries = symmetric_offsets(
+                entering,
+                &vec![axis.entry_spacing(); entering.saturating_sub(1)],
+            )?;
+            let exits =
+                symmetric_offsets(leaving + 2 * labels.len(), &exit_gaps(axis, leaving, labels))?;
+            Some(reach(entries).max(reach(exits)).unwrap_or(0))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    for (node, reach) in chart.nodes.iter_mut().zip(spreads) {
         node.spread = spread_for(node, axis, reach);
     }
     Some(())
@@ -631,7 +771,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             }
         }
     }
-    let chain_of: Vec<Vec<usize>> = innermost
+    let mut chain_of: Vec<Vec<usize>> = innermost
         .iter()
         .map(|held| {
             held.map_or_else(Vec::new, |(_, subgraph)| {
@@ -642,17 +782,63 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             })
         })
         .collect();
+    // A link's passing slots lie in the subgraphs both its ends lie in, as Mermaid puts
+    // the dummy nodes of a link between two members of a cluster in that cluster: the
+    // frame runs around them, and the slots of other nodes stay outside it. An end at a
+    // frame lies in no subgraph, so neither do the passing slots of its link.
+    for path in &paths {
+        let (Some(&first), Some(&last)) = (path.first(), path.last()) else { continue };
+        let (from, to) = (chain_of.get(first)?, chain_of.get(last)?);
+        let common: Vec<usize> =
+            from.iter().zip(to).take_while(|(a, b)| a == b).map(|(&a, _)| a).collect();
+        for &slot in path.get(1..path.len().saturating_sub(1)).unwrap_or(&[]) {
+            *chain_of.get_mut(slot)? = common.clone();
+        }
+    }
+    let chain_of = chain_of;
     let in_subgraph = |slot: usize, subgraph: usize| {
         chain_of.get(slot).is_some_and(|chain| chain.contains(&subgraph))
     };
     for layer in &mut members {
         group_subgraph_members(layer, &chain_of)?;
     }
-    let mut loops = vec![0_usize; node_count];
-    let drawn_edges = chart.edges.iter().filter(|edge| edge.stroke.is_visible());
-    for (from, _) in drawn_edges.filter_map(Edge::nodes).filter(|(from, to)| from == to) {
-        *loops.get_mut(from)? += 1;
+    // The labels of each node's drawn self loops, in the order of their edges.
+    let mut loop_labels: Vec<Vec<Option<&str>>> = vec![Vec::new(); node_count];
+    for edge in chart.edges.iter().filter(|edge| edge.stroke.is_visible()) {
+        if let Some((from, to)) = edge.nodes()
+            && from == to
+        {
+            loop_labels.get_mut(from)?.push(edge.label.as_deref());
+        }
     }
+    // The cells across the flow the labels of each node's self loops reach past its box,
+    // before and after it; only a label across the flow, in a vertical layout, can. The
+    // loops' legs come after the node's other exits, whatever their order.
+    let mut overhang = vec![(0, 0); node_count];
+    for (node, labels) in loop_labels.iter().enumerate() {
+        let Some(node_data) = chart.nodes.get(node) else { continue };
+        if axis == Axis::Horizontal || labels.iter().all(Option::is_none) {
+            continue;
+        }
+        let targets = drawn.get(node)?.iter().filter(|&&drawn| drawn).count();
+        let Exits { legs, .. } = exit_cells(
+            axis,
+            targets,
+            labels,
+            &axis.port_range(node_data),
+            axis.port_offset(node_data),
+        )?;
+        let size = signed(axis.box_cross_size(node_data))?;
+        for (&leg, label) in legs.iter().zip(labels) {
+            let Some(label) = label else { continue };
+            let (_, first) = self_loop_label_at(axis, leg, label.width())?;
+            let end = first + signed(label.width())?;
+            let (before, after) = overhang.get_mut(node)?;
+            *before = (*before).max(usize::try_from(-first).unwrap_or(0));
+            *after = (*after).max(usize::try_from(end - size).unwrap_or(0));
+        }
+    }
+    let overhang = |slot: usize| overhang.get(slot).copied().unwrap_or((0, 0));
     // Each slot's index in its layer's stack.
     let positions = |members: &[Vec<usize>]| -> Option<Vec<usize>> {
         let mut position = vec![0; layer_of.len()];
@@ -682,12 +868,9 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         })
         .collect();
     // A passing slot is one cell across the flow, entered and left at that cell, or as
-    // wide as the label it carries. A self loop runs through the cells after its box.
+    // wide as the label it carries.
     let extent = |slot: usize| match chart.nodes.get(slot) {
-        Some(node) => {
-            let loop_cells = if loops.get(slot) > Some(&0) { SELF_LOOP_CELLS } else { 0 };
-            (axis.box_cross_size(node) + loop_cells, axis.port_offset(node))
-        }
+        Some(node) => (axis.box_cross_size(node), axis.port_offset(node)),
         None => slot_footprints
             .get(&slot)
             .map_or((1, 0), |&(_, cross, port_offset)| (cross, port_offset)),
@@ -802,7 +985,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     let (chain, next_chain) = (chain_of.get(slot)?, chain_of.get(next_slot)?);
                     let common = chain.iter().zip(next_chain).take_while(|(a, b)| a == b).count();
                     let frames = signed(chain.len() - common + next_chain.len() - common)?;
-                    let size = signed(extent(slot).0)?;
+                    let size = signed(extent(slot).0 + overhang(slot).1)?;
                     *wanted = Some(next_wanted - gap - size - frame_margin * frames);
                 }
                 next = wanted.map(|wanted| (slot, wanted)).or(next);
@@ -839,7 +1022,10 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 // no box, so a label reaching past the slot keeps one blank cell from the
                 // lines, labels and frame borders before it there. A frame opening here
                 // encloses the labels of links from its own members, so such a label keeps
-                // the gap from the box before as well, as the frame does.
+                // the gap from the box before as well, as the frame does. The labels of the
+                // slot's self loops keep the gap from it as the box does.
+                let (before, after) = overhang(slot);
+                let (before, after) = (signed(before)?, signed(after)?);
                 let opening = match chain.get(kept) {
                     Some(&outermost) => labels
                         .iter()
@@ -849,7 +1035,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                         .unwrap_or(0),
                     None => 0,
                 };
-                let box_free = end.map(|end| end + gap + lead + opening);
+                let box_free = end.map(|end| end + gap + lead + opening.max(before));
                 let row_free =
                     row.zip(row_end).map(|((first, _), row_end)| row_end + 2 + lead - first);
                 let free = box_free.max(row_free);
@@ -881,15 +1067,16 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                             .iter()
                             .zip(drawn)
                             .filter(|&(_, &drawn)| drawn)
-                            .map(|(&child, _)| Some((false, *position.get(child)?)))
+                            .map(|(&child, _)| position.get(child).copied())
                             .collect::<Option<Vec<_>>>()?;
-                        let others: Vec<(bool, usize)> = targets
-                            .into_iter()
-                            .chain(std::iter::repeat_n((true, 0), *loops.get(slot)?))
-                            .collect();
-                        let mut cells =
-                            port_cells(axis, &others, &[], &axis.port_range(node), port_offset)?
-                                .into_iter();
+                        let exits = exit_cells(
+                            axis,
+                            targets.len(),
+                            loop_labels.get(slot)?,
+                            &axis.port_range(node),
+                            port_offset,
+                        )?;
+                        let mut cells = scatter_by_order(&targets, &exits.targets)?.into_iter();
                         drawn
                             .iter()
                             .map(|&drawn| {
@@ -951,7 +1138,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                         );
                     }
                 }
-                end = Some(start + signed(cross_size)?);
+                end = Some(start + signed(cross_size)? + after);
                 if let Some((_, last)) = row {
                     row_end = row_end.max(Some(start + last));
                 }
@@ -1026,15 +1213,19 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     let (starts, ports) = loop {
         let (starts, ports) = place(&members, &floor, &ceiling)?;
         rounds += 1;
+        // A slot's cells across the flow, with the labels of its self loops.
         let span = |slot: usize| {
-            Some((*starts.get(slot)?, starts.get(slot)? + signed(extent(slot).0)? - 1))
+            let (before, after) = overhang(slot);
+            let start = *starts.get(slot)?;
+            Some((start - signed(before)?, start + signed(extent(slot).0 + after)? - 1))
         };
-        // Each frame's first and last cells across the flow, around its members' boxes
-        // and its inner frames.
+        // Each frame's first and last cells across the flow, around its members' boxes,
+        // the passing slots of the links between its members and its inner frames.
         let mut bands: Vec<Option<(isize, isize)>> = vec![None; chart.subgraphs.len()];
         for &index in &innermost_first {
             let subgraph = chart.subgraphs.get(index)?;
-            let boxes = subgraph.members.iter().map(|&member| span(member));
+            let passing = (node_count..layer_of.len()).filter(|&slot| in_subgraph(slot, index));
+            let boxes = subgraph.members.iter().copied().chain(passing).map(span);
             let inner = chart
                 .subgraphs
                 .iter()
@@ -1071,7 +1262,8 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         }
         for (stray, subgraph, high) in strays {
             let lead = frame_margin * signed(chain_of.get(stray)?.len())?;
-            let after = high + 1 + gap + lead;
+            // The labels of the stray's self loops move out of the frame with it.
+            let after = high + 1 + gap + lead + signed(overhang(stray).0)?;
             floor
                 .entry(stray)
                 .and_modify(|floor: &mut isize| *floor = (*floor).max(after))
@@ -1080,17 +1272,18 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 // A member nested deeper lies a margin further in for each frame between.
                 let chain = chain_of.get(member)?;
                 let depth = chain.len() - chain.iter().position(|&outer| outer == subgraph)?;
-                let inside = high - frame_margin * signed(depth)? - signed(extent(member).0)? + 1;
+                let size = extent(member).0 + overhang(member).1;
+                let inside = high - frame_margin * signed(depth)? - signed(size)? + 1;
                 ceiling
                     .entry(member)
                     .and_modify(|ceiling: &mut isize| *ceiling = (*ceiling).min(inside))
                     .or_insert(inside);
             }
-            // In a layer holding members of the frame, the stray moves after them, so that
-            // its place in the stack agrees with the floor that puts it after the frame.
-            let is_member = is_member.get(subgraph)?;
+            // In a layer holding members of the frame or passing slots inside it, the stray
+            // moves after them, so that its place in the stack agrees with the floor that
+            // puts it after the frame.
             let layer = members.get_mut(*layer_of.get(stray)?)?;
-            let last_member = layer.iter().rposition(|&slot| is_member.get(slot) == Some(&true));
+            let last_member = layer.iter().rposition(|&slot| in_subgraph(slot, subgraph));
             if let (Some(at), Some(last_member)) =
                 (layer.iter().position(|&slot| slot == stray), last_member)
                 && at < last_member

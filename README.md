@@ -50,24 +50,42 @@ or redirected, no width limit applies and the content keeps its natural width.
   asymmetric nodes, `@{ shape: … }` with a `label`, for those shapes, solid, dotted and
   thick links with arrow, circle and cross ends, invisible links `~~~` (a labelled
   invisible link falls back), longer links, edge labels (on the line, at the middle of
-  the link's span, as Mermaid draws them; beside the line for self loops), edge ids
+  the link's span, as Mermaid draws them), self loops (a bump on the border the box's
+  links leave by, with the label just outside the loop), edge ids
   (`A e1@--> B`) with `e1@{ … }` data read and ignored, `&` groups,
   nested `subgraph … end` blocks, `direction` inside a subgraph (ignored, as in Mermaid,
   when one of its nodes links outside), and links to and from subgraphs; a link that
-  closes a cycle is drawn backwards. Styling statements
-  such as `style` and `classDef`, and a `direction` statement outside a subgraph, are
-  accepted and ignored, as in Mermaid.
+  closes a cycle is drawn backwards. `%%` comments and a `direction` statement outside
+  a subgraph are skipped, as in Mermaid. `style`, `classDef`, `class`, `linkStyle` and
+  `click` statements are read and ignored: a text drawing has no colors or clicks.
+  Where character output cannot reproduce Mermaid's rendering, the drawing differs
+  from the browser's: shapes are built from box-drawing glyphs (a circle and a double
+  circle are told from a stadium only by their inset top and bottom rows, a cylinder
+  is one row taller than the other shapes, and an asymmetric node's notch is one
+  column deep); lines run horizontally and vertically only, and a link that turns
+  carries its label after its last turn rather than at the middle of a curve; one
+  blank cell separates what Mermaid separates by pixels; a self loop sits after its
+  box's other links instead of at the centre of the border, its label touching the
+  loop (`TD`, `BT`) or one cell from it (`LR`, `RL`), and those other links keep a
+  blank cell from that label; which link of a cycle is drawn backwards follows
+  declaration order; a subgraph with its own `direction` is drawn as a unit whose
+  links meet its frame at port cells; the label of a link entering a subgraph stays
+  outside the frame; and a box is centred over the targets of its drawn links only,
+  not over those of invisible ones.
   Every link meets a box at a cell of its own, so a box with several links on
   one side is drawn taller (`LR`, `RL`) or wider (`TD`, `BT`) than its label needs.
   When the diagram is wider than the terminal, spacing is tightened; if it still does
   not fit, it renders as the plain code block.
   A diagram whose drawing would exceed an internal size limit also renders as the plain
-  code block.
+  code block, as does one that cannot be laid out: a subgraph whose frame would have to
+  cover a box outside it, or a subgraph with its own `direction` that a link joins to
+  the outside at a subgraph rather than at a node.
 - A Mermaid block that is not valid Mermaid renders as the plain code block with one line
   above it naming the problem, such as `mermaid: line 2: unclosed node label`; this also
   applies to diagrams over Mermaid's limits of 50 000 characters or 500 edges. Other
-  diagram types and features not supported yet (the ellipse `(- -)`, images and the other
-  `@{ shape }` names, and multi-line `@{ }`) render as the plain code block without that line.
+  diagram types, a diagram with no nodes, and features not supported yet (the ellipse
+  `(- -)`, images and the other `@{ shape }` names, and multi-line `@{ }`) render as the
+  plain code block without that line.
 - Other control characters, including ones written as references such as `&#27;`, are
   shown as control pictures such as `␛`, and C1 control characters such as `&#155;` as
   `�`, so a document can never inject escape sequences into the terminal.

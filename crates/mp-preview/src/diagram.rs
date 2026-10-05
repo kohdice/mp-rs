@@ -1393,18 +1393,42 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_td_self_loop_and_exit_use_different_cells() {
+    fn mermaid_td_self_loop_takes_the_last_cells_of_its_border() {
         let output = mermaid("flowchart TD\n    A[Source node] --> A\n    A --> B\n");
         let Some((row, left, right)) = box_of(&output, "Source node") else {
             panic!("missing box in\n{output}");
         };
-        let below: Vec<usize> =
-            (left..=right).filter(|&col| glyph_at(&output, row + 2, col) == Some('│')).collect();
+        let below: Vec<(usize, char)> = (left..=right)
+            .filter_map(|col| glyph_at(&output, row + 2, col).map(|c| (col, c)))
+            .filter(|&(_, c)| c != ' ')
+            .collect();
+        let glyphs: Vec<char> = below.iter().map(|&(_, c)| c).collect();
 
-        assert_eq!(below.len(), 2, "{output}");
+        assert_eq!(glyphs, ['│', '│', '▲'], "{output}");
+        assert!(
+            below.windows(2).all(|pair| matches!(pair, &[(a, _), (b, _)] if a + 2 == b)),
+            "{output}"
+        );
         assert_eq!(count_glyph(&output, '▼'), 1, "{output}");
-        assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
+        assert_eq!(count_glyph(&output, '▲'), 1, "{output}");
+        assert_eq!(count_glyph(&output, '◄'), 0, "{output}");
         assert!(boxes_intact(&output, &["Source node", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_self_loop_label_keeps_a_blank_from_the_exit_beside_it() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A[Source node] -->|retry now| A\n    A --> B\n"),
+            "┌─────────────┐\n│ Source node │\n└─────────────┘\n  │    │ ▲\n  │    └─┘\n  │ retry now\n  ▼\n┌───┐\n│ B │\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_two_self_loop_labels_keep_a_blank_between_them() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A -->|once| A\n    A -->|more| A\n"),
+            "┌─────────┐\n│    A    │\n└─────────┘\n  │ ▲  │ ▲\n  └─┘  └─┘\n once more"
+        );
     }
 
     #[test]
@@ -1470,25 +1494,16 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_self_loop_renders_one_arrowhead_outside_the_box() {
-        let output = mermaid("flowchart LR\n    A --> A\n");
-        let Some((row, left, right)) = box_of(&output, "A") else {
-            panic!("missing box in\n{output}");
-        };
-        let line_outside_box = output.lines().enumerate().any(|(line_row, line)| {
-            let mut col = 0;
-            line.chars().any(|c| {
-                let outside =
-                    !(row - 1..=row + 1).contains(&line_row) || !(left..=right).contains(&col);
-                col += c.width().unwrap_or(0);
-                outside && is_line_glyph(Some(c))
-            })
-        });
+    fn mermaid_lr_self_loop_bumps_out_of_the_right_border() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> A\n"),
+            "┌───┐\n│   │─┐\n│ A │ │\n│   │◄┘\n└───┘"
+        );
+    }
 
-        assert!(boxes_intact(&output, &["A"]), "{output}");
-        assert_eq!(output.matches("│ A │").count(), 1, "{output}");
-        assert_eq!(arrowheads(&output).len(), 1, "{output}");
-        assert!(line_outside_box, "{output}");
+    #[test]
+    fn mermaid_td_self_loop_bumps_out_of_the_bottom_border() {
+        assert_eq!(mermaid("flowchart TD\n    A --> A\n"), "┌───┐\n│ A │\n└───┘\n │ ▲\n └─┘");
     }
 
     #[test]
@@ -1680,28 +1695,161 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_self_loop_label_is_shown() {
-        let output = mermaid("flowchart LR\n    A -->|again| A\n");
+    fn mermaid_lr_self_loop_label_sits_right_of_the_loop_on_its_middle_row() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A -->|again| A\n"),
+            "┌───┐\n│   │─┐\n│ A │ │ again\n│   │◄┘\n└───┘"
+        );
+    }
 
+    #[test]
+    fn mermaid_td_self_loop_label_sits_below_the_loop_centred_on_it() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A -->|again| A\n"),
+            "┌───┐\n│ A │\n└───┘\n │ ▲\n └─┘\nagain"
+        );
+    }
+
+    #[test]
+    fn mermaid_bt_self_loop_label_sits_above_the_loop() {
+        assert_eq!(
+            mermaid("flowchart BT\n    A -->|again| A\n"),
+            "again\n ┌─┐\n │ ▼\n┌───┐\n│ A │\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_rl_self_loop_label_sits_left_of_the_loop() {
+        assert_eq!(
+            mermaid("flowchart RL\n    A -->|again| A\n"),
+            "        ┌───┐\n      ┌─│   │\nagain │ │ A │\n      └►│   │\n        └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_lr_self_loop_label_keeps_the_next_layer_beyond_it() {
+        let output = mermaid("flowchart LR\n    A -->|retry on failure| A\n    A --> B\n");
+        let Some(b) = box_of(&output, "B") else {
+            panic!("missing box in\n{output}");
+        };
+        let Some(&(head_row, ..)) = arrowheads(&output).iter().find(|&&(.., c)| c == '◄') else {
+            panic!("missing loop arrowhead in\n{output}");
+        };
+        let Some((row, col)) = position_of_word(&output, "retry on failure") else {
+            panic!("missing label in\n{output}");
+        };
+        let last = col + "retry on failure".width() - 1;
+
+        assert_eq!(output.matches("retry on failure").count(), 1, "{output}");
+        assert_eq!(row + 1, head_row, "{output}");
+        assert!(b.1 >= last + 2, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 1, "{output}");
+        assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
+        assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_self_loop_label_keeps_the_tracks_of_its_box_beyond_it() {
+        let output = mermaid("flowchart LR\n    A -->|again| A\n    A --> B\n    A --> C\n");
+        let Some(&(head_row, head_col, _)) = arrowheads(&output).iter().find(|&&(.., c)| c == '◄')
+        else {
+            panic!("missing loop arrowhead in\n{output}");
+        };
+        let corner_col = head_col + 1;
+        let Some((row, col)) = position_of_word(&output, "again") else {
+            panic!("missing label in\n{output}");
+        };
+        let after = glyph_at(&output, row, col + "again".width());
+        let Some(c) = box_of(&output, "C") else {
+            panic!("missing box in\n{output}");
+        };
+        // The link into C turns at the first column left of its arrowhead that is not `─`.
+        let Some(turn_col) =
+            (0..c.1 - 1).rev().find(|&col| glyph_at(&output, c.0, col) != Some('─'))
+        else {
+            panic!("missing link into C in\n{output}");
+        };
+
+        assert_eq!(whole_words(&output, "again"), 1, "{output}");
+        assert_eq!(glyph_at(&output, head_row, corner_col), Some('┘'), "{output}");
+        assert_eq!(row + 1, head_row, "{output}");
+        assert_eq!(col, corner_col + 2, "{output}");
+        assert!(after.is_none_or(|c| c == ' '), "{output}");
+        assert!(turn_col > col + "again".width(), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+        assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_self_loop_label_reaching_past_its_box_keeps_a_blank_from_its_neighbour() {
+        let output = mermaid("flowchart TD\n    A -->|retry on failure| A\n    B --> C\n");
+        let Some((b_row, b_left, b_right)) = box_of(&output, "B") else {
+            panic!("missing box in\n{output}");
+        };
+        let Some((_, col)) = position_of_word(&output, "retry on failure") else {
+            panic!("missing label in\n{output}");
+        };
+        let last = col + "retry on failure".width() - 1;
+        let Some(exit) =
+            (b_left..=b_right).find(|&col| glyph_at(&output, b_row + 2, col) == Some('│'))
+        else {
+            panic!("missing link leaving B in\n{output}");
+        };
+
+        assert_eq!(output.matches("retry on failure").count(), 1, "{output}");
+        assert!(exit >= last + 2, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_self_loop_label_inside_a_subgraph_stays_inside_the_frame() {
+        let output = mermaid("flowchart TD\n    subgraph s\n    A -->|again| A\n    end\n");
+        let Some((_, left, bottom, right)) = intact_frame(&output, "s") else {
+            panic!("missing or broken frame in\n{output}");
+        };
+        let Some((row, col)) = position_of_word(&output, "again") else {
+            panic!("missing label in\n{output}");
+        };
+
+        assert!(bottom > row, "{output}");
+        assert!(left < col && col + "again".width() - 1 < right, "{output}");
         assert_eq!(whole_words(&output, "again"), 1, "{output}");
         assert!(boxes_intact(&output, &["A"]), "{output}");
     }
 
     #[test]
-    fn mermaid_self_loop_and_a_turning_link_from_the_same_box_run_down_separate_columns() {
+    fn mermaid_td_self_loop_label_of_a_node_between_a_frames_layers_stays_outside_the_frame() {
+        let output = mermaid(
+            "flowchart TD\n    subgraph s\n    A ---> B\n    end\n    A --> C\n    C -->|retry on failure| C\n",
+        );
+        let Some((_, left, _, right)) = intact_frame(&output, "s") else {
+            panic!("missing or broken frame in\n{output}");
+        };
+        let Some((_, col)) = position_of_word(&output, "retry on failure") else {
+            panic!("missing label in\n{output}");
+        };
+        let last = col + "retry on failure".width() - 1;
+
+        assert_eq!(output.matches("retry on failure").count(), 1, "{output}");
+        assert!(col >= right + 2 || last + 2 <= left, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_self_loop_and_the_tracks_of_its_box_keep_separate_columns() {
         let output = mermaid("flowchart LR\n    A --> A\n    A --> B\n    A --> C\n");
-        let [Some(a), Some(c)] = ["A", "C"].map(|label| box_of(&output, label)) else {
+        let [Some(a), Some(b), Some(c)] = ["A", "B", "C"].map(|label| box_of(&output, label))
+        else {
             panic!("missing box in\n{output}");
         };
-        let Some((_, _, a_bottom, _)) = box_bounds(&output, "A") else {
+        let Some((a_top, _, a_bottom, _)) = box_bounds(&output, "A") else {
             panic!("missing box in\n{output}");
         };
-        // The self loop runs down beside A from A's bottom border on; above it, A's
-        // exits leave from rows of their own.
-        let Some(loop_col) = (a_bottom..output.lines().count()).find_map(|row| {
-            (a.2 + 1..)
-                .take_while(|&col| glyph_at(&output, row, col).is_some())
-                .find(|&col| glyph_at(&output, row, col) == Some('│'))
+        // The loop's last corner lies beside A, between its right border and the next
+        // layer.
+        let Some(loop_col) = (a_top..=a_bottom).find_map(|row| {
+            (a.2 + 1..b.1.min(c.1)).find(|&col| glyph_at(&output, row, col) == Some('┘'))
         }) else {
             panic!("missing self loop in\n{output}");
         };
@@ -1713,19 +1861,19 @@ mod tests {
         };
 
         assert_eq!(glyph_at(&output, c.0, c.1 - 1), Some('►'), "{output}");
-        assert_eq!(glyph_at(&output, c.0, turn_col), Some('└'), "{output}");
-        assert_ne!(turn_col, loop_col, "{output}");
+        assert!(matches!(glyph_at(&output, c.0, turn_col), Some('└' | '┌')), "{output}");
+        assert!(turn_col > loop_col, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+        assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
         assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
     }
 
     #[test]
-    fn mermaid_self_loop_label_wider_than_its_box_is_shown() {
-        // There is no place for the label clear of the box and the loop, and it is shown
-        // anyway.
-        let output = mermaid("flowchart LR\n    A -->|retry on failure| A\n");
-
-        assert!(output.contains("retry on failure"), "{output}");
-        assert!(boxes_intact(&output, &["A"]), "{output}");
+    fn mermaid_td_self_loop_label_wider_than_its_box_moves_the_drawing_right() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A -->|retry on failure| A\n"),
+            "      ┌───┐\n      │ A │\n      └───┘\n       │ ▲\n       └─┘\nretry on failure"
+        );
     }
 
     #[test]
@@ -2169,6 +2317,13 @@ mod tests {
         assert!(is_line_glyph(glyph_at(&output, y_row, right + 1)), "{output}");
         assert!(y_left > right, "{output}");
         assert!(boxes_intact(&output, &["A", "B", "Y"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_self_loop_on_a_unit_whose_border_cannot_hold_its_legs_falls_back() {
+        let body = "flowchart LR\n    subgraph s\n    direction TB\n    A\n    end\n    s --> s\n    s --> Y\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
     }
 
     #[test]
@@ -2687,6 +2842,62 @@ mod tests {
         );
         assert!(a_right < left, "{output}");
         assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_link_between_members_spanning_a_layer_stays_inside_the_frame() {
+        let output = mermaid("flowchart TD\n    subgraph s\n    A ---> B\n    end\n    A --> C\n");
+        let Some((top, left, bottom, right)) = intact_frame(&output, "s") else {
+            panic!("missing or broken frame in\n{output}");
+        };
+        let (Some(a), Some(b), Some(c)) =
+            (box_bounds(&output, "A"), box_bounds(&output, "B"), box_bounds(&output, "C"))
+        else {
+            panic!("missing box in\n{output}");
+        };
+        let inside = |(box_top, box_left, box_bottom, box_right): (usize, usize, usize, usize)| {
+            top < box_top && box_bottom < bottom && left < box_left && box_right < right
+        };
+        let Some((b_row, b_left, b_right)) = box_of(&output, "B") else {
+            panic!("missing box in\n{output}");
+        };
+        let b_centre = (b_left + b_right) / 2;
+
+        assert!(inside(a) && inside(b), "{output}");
+        assert!(c.1 > right, "{output}");
+        assert_eq!(count_glyph(&output, '┼'), 1, "{output}");
+        assert_eq!(count_glyph(&output, '▼'), 2, "{output}");
+        assert_eq!(glyph_at(&output, b_row - 2, b_centre), Some('▼'), "{output}");
+        assert!(left < b_centre && b_centre < right, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_link_between_members_spanning_a_layer_stays_inside_the_frame() {
+        let output = mermaid("flowchart LR\n    subgraph s\n    A ---> B\n    end\n    A --> C\n");
+        // A→C leaves the frame through its bottom border, where it crosses with `┼`.
+        let Some((top, left, bottom, right)) = intact_crossed_frame(&output, "s") else {
+            panic!("missing or broken frame in\n{output}");
+        };
+        let (Some(a), Some(b), Some(c)) =
+            (box_bounds(&output, "A"), box_bounds(&output, "B"), box_bounds(&output, "C"))
+        else {
+            panic!("missing box in\n{output}");
+        };
+        let inside = |(box_top, box_left, box_bottom, box_right): (usize, usize, usize, usize)| {
+            top < box_top && box_bottom < bottom && left < box_left && box_right < right
+        };
+        let Some((b_row, b_left, _)) = box_of(&output, "B") else {
+            panic!("missing box in\n{output}");
+        };
+
+        assert!(inside(a) && inside(b), "{output}");
+        assert!(c.0 > bottom, "{output}");
+        assert_eq!(count_glyph(&output, '┼'), 1, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+        assert_eq!(glyph_at(&output, b_row, b_left - 1), Some('►'), "{output}");
+        assert!(top < b_row && b_row < bottom, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
     }
 
     #[test]

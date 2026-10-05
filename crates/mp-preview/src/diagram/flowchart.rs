@@ -68,7 +68,7 @@ fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Lin
         if !fits(&scene, axis, width) {
             continue;
         }
-        let (labels, cross_shift) = route::place_labels(&scene, &routed, axis);
+        let (labels, cross_shift) = route::place_labels(&routed);
         route::shift(&mut scene, &mut [], 0, cross_shift).ok_or(Failure::Unsupported)?;
         scene.labels = labels;
         if fits(&scene, axis, width) {
