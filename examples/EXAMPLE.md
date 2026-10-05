@@ -201,8 +201,6 @@ Line 3 with indentation:
 
 ## Mermaid Diagrams
 
-The following Mermaid diagrams are rendered as ASCII art in place.
-
 ### Flowchart
 
 #### Basic TD direction
@@ -400,8 +398,6 @@ erDiagram
 ```
 
 ### gitGraph
-
-When the terminal supports color, each branch is rendered in its own color.
 
 ```mermaid
 gitGraph

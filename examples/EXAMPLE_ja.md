@@ -201,8 +201,6 @@ fi
 
 ## Mermaid 図
 
-以下の Mermaid 図は ASCII アートとしてその場で描画されます。
-
 ### フローチャート (flowchart)
 
 #### 基本 (TD 方向)
@@ -400,8 +398,6 @@ erDiagram
 ```
 
 ### gitGraph
-
-ターミナルがカラー対応していれば、branch ごとに色分けされて表示されます。
 
 ```mermaid
 gitGraph
