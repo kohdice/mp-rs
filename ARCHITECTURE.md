@@ -73,14 +73,18 @@ These are guarantees the code relies on; changing one requires updating its cons
 - **Styles are data.** `layout` produces lines of spans carrying a `Style`; `ansi` is the
   only place that emits escape sequences, and nothing reads ANSI bytes back. Styles never
   carry across lines.
-- **External libraries stay at the edges.** Only `markdown` names a comrak type and only
-  `highlight` names a syntect type. The comrak arena never escapes `markdown::parse`.
+- **External libraries stay at the edges.** Only `markdown` names a comrak type, only
+  `highlight` names a syntect type, and only the flowchart `label` module reads the
+  `entities` table of HTML named character references. The comrak arena never escapes
+  `markdown::parse`.
 - **Text is safe once it leaves `markdown`.** Inline text, inline code, URLs, titles, alert
   titles, and code-fence info strings contain no line breaks or tabs: LF, CR, and HT become
   one space. Code and HTML block bodies keep LF and HT, with CR and CRLF normalized to LF.
   Everywhere, the remaining C0 control characters and DEL are replaced with Unicode control
   pictures and C1 control characters with U+FFFD, including characters decoded from
-  references, so later stages can print text verbatim.
+  references, so later stages can print text verbatim. `diagram` decodes Mermaid entity
+  codes (`#27;`) in labels and runs the result through the same replacement
+  (`control::visualize_control`), so a drawing is as safe as the text it came from.
 - **Non-empty output ends with exactly one trailing newline.** `preview` appends the newline
   to every encoded block, and empty input writes nothing.
 - **Width handling is the library's job.** The binary only detects whether stdout is a

@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 use crate::diagram::{Failure, SyntaxError};
 use crate::style::Line;
 
+use super::label::{Label, is_entity_name_char, unquoted};
+
 #[derive(Debug)]
 pub(super) struct Flowchart {
     pub direction: Direction,
@@ -37,7 +39,7 @@ pub(super) struct Node {
 #[derive(Debug, Clone)]
 pub(super) enum Body {
     /// A box drawn around `label` in `shape`.
-    Box { label: String, shape: Shape },
+    Box { label: Label, shape: Shape },
     /// One blank cell: the member an empty subgraph's frame is drawn around.
     Hidden,
     /// A subgraph laid out in a direction of its own and drawn on its own, frame
@@ -87,7 +89,7 @@ pub(super) struct Edge {
     pub tail: Option<Marker>,
     /// The marker drawn where the link meets the target, if any.
     pub head: Option<Marker>,
-    pub label: Option<String>,
+    pub label: Option<Label>,
     /// The fewest layers the link spans: one, plus one for each extra `-`, `=` or `.`.
     pub length: usize,
 }
@@ -122,7 +124,7 @@ impl Edge {
 /// A `subgraph … end` block, drawn as a titled frame.
 #[derive(Debug, Clone)]
 pub(super) struct Subgraph {
-    pub title: String,
+    pub title: Label,
     /// Indices into [`Flowchart::nodes`] of the nodes referenced inside the block or
     /// inside the subgraphs nested in it, in order of first reference.
     pub members: Vec<usize>,
@@ -202,10 +204,8 @@ const MAX_EDGES: usize = 500;
 const IGNORED_KEYWORDS: [&str; 5] = ["style", "classDef", "class", "linkStyle", "click"];
 
 pub(super) fn parse(source: &str) -> Result<Flowchart, Failure> {
-    let mut statements = source
-        .lines()
-        .zip(1..)
-        .flat_map(|(text, line)| split_statements(text).into_iter().map(move |text| (line, text)))
+    let mut statements = split_statements(source)
+        .into_iter()
         .map(|(line, text)| (line, text.trim()))
         .filter(|(_, text)| !text.is_empty());
     let (header_line, header) = statements.next().ok_or(Failure::Unsupported)?;
@@ -299,29 +299,51 @@ fn direction_word(word: &str) -> Option<Direction> {
     }
 }
 
-/// Splits one source line at each `;` and drops a `%%` comment, ignoring both inside
-/// double quotes.
-fn split_statements(line: &str) -> Vec<&str> {
+/// Splits `source` into statements, each with the 1-based line it starts on, for error
+/// reports: at each line break and `;`, and drops each `%%` comment up to the end of its
+/// line, ignoring all three inside double quotes, so that a quoted string may span lines
+/// as `flow.jison`'s `string` lexer state lets it. The `;` closing an entity code such as
+/// `#quot;` splits nothing: upstream's `encodeEntities` in `packages/mermaid/src/utils.ts`
+/// replaces every `#\w+;` in the source before parsing it.
+fn split_statements(source: &str) -> Vec<(usize, &str)> {
     let mut statements = Vec::new();
     let mut in_quotes = false;
-    let mut start = 0;
-    let mut end = line.len();
-    let mut chars = line.char_indices().peekable();
+    let mut line = 1;
+    // The line and byte index the current statement starts at.
+    let (mut start_line, mut start) = (1, 0);
+    // Where a `%%` comment cut the current statement short.
+    let mut comment: Option<usize> = None;
+    // How many name characters follow the last `#`, while they may still make an entity
+    // code; `None` outside one.
+    let mut entity_name: Option<usize> = None;
+    let mut chars = source.char_indices().peekable();
     while let Some((index, c)) = chars.next() {
+        let mut ends_statement = false;
         match c {
+            '\n' => ends_statement = !in_quotes,
+            _ if comment.is_some() => {}
             '"' => in_quotes = !in_quotes,
-            ';' if !in_quotes => {
-                statements.push(&line[start..index]);
-                start = index + 1;
-            }
+            ';' => ends_statement = !in_quotes && !entity_name.is_some_and(|length| length > 0),
             '%' if !in_quotes && chars.peek().is_some_and(|&(_, next)| next == '%') => {
-                end = index;
-                break;
+                comment = Some(index);
             }
             _ => {}
         }
+        if ends_statement {
+            let end = comment.take().unwrap_or(index);
+            statements.push((start_line, source.get(start..end).unwrap_or_default()));
+            start = index + c.len_utf8();
+            start_line = line + usize::from(c == '\n');
+        }
+        line += usize::from(c == '\n');
+        entity_name = match c {
+            '#' => Some(0),
+            _ if is_entity_name_char(c) => entity_name.map(|length| length + 1),
+            _ => None,
+        };
     }
-    statements.push(&line[start..end]);
+    let end = comment.unwrap_or(source.len());
+    statements.push((start_line, source.get(start..end).unwrap_or_default()));
     statements
 }
 
@@ -453,7 +475,7 @@ impl<'a> Builder<'a> {
                         stroke,
                         tail,
                         head,
-                        label: label.map(spaced),
+                        label: label.map(Label::parse),
                         length,
                     });
                 }
@@ -465,8 +487,9 @@ impl<'a> Builder<'a> {
 
     /// Starts the subgraph declared by `text`, the part of a `subgraph` statement after
     /// the keyword: an id, which may be a quoted string, followed by a bracketed title,
-    /// or else the rest of the statement, without the quotes around it, as both id and
-    /// title. A subgraph opened inside another is nested in it.
+    /// or else the rest of the statement as the id, without the quotes around it, and as
+    /// the title, quotes and all, for [`Label::parse`] to read. A subgraph opened inside
+    /// another is nested in it.
     fn open_subgraph(&mut self, line: usize, text: &'a str) -> Result<(), Failure> {
         let text = text.trim();
         let quoted = text.strip_prefix('"').and_then(|rest| rest.split_once('"'));
@@ -477,7 +500,7 @@ impl<'a> Builder<'a> {
                     .ok_or_else(|| syntax_error(line, "unclosed subgraph title"))?;
                 (id, title)
             }
-            None => (unquoted(text), unquoted(text)),
+            None => (unquoted(text), text),
         };
         self.subgraph_ids.push(id);
         let parent = self.open.last().map(|parent| parent.index);
@@ -487,7 +510,7 @@ impl<'a> Builder<'a> {
             members: HashSet::new(),
         });
         self.chart.subgraphs.push(Subgraph {
-            title: spaced(title),
+            title: Label::parse(title).joined(),
             members: Vec::new(),
             parent,
             direction: None,
@@ -611,7 +634,7 @@ impl<'a> Builder<'a> {
         }
         let index = *self.index_of.entry(id).or_insert_with(|| {
             self.chart.nodes.push(Node {
-                body: Body::Box { label: id.to_owned(), shape: Shape::Rectangle },
+                body: Body::Box { label: Label::plain(id), shape: Shape::Rectangle },
                 spread: 0,
             });
             self.chart.nodes.len() - 1
@@ -650,7 +673,7 @@ impl<'a> Builder<'a> {
                 if let Some(Body::Box { label: node_label, shape: node_shape }) =
                     self.chart.nodes.get_mut(index).map(|node| &mut node.body)
                 {
-                    *node_label = spaced(label);
+                    *node_label = Label::parse(label);
                     *node_shape = shape;
                 }
                 after_label
@@ -668,7 +691,7 @@ impl<'a> Builder<'a> {
                         *shape = data_shape;
                     }
                     if let Some(data_label) = data.label {
-                        *label = spaced(data_label);
+                        *label = Label::parse(data_label);
                     }
                 }
                 after_data
@@ -682,7 +705,7 @@ impl<'a> Builder<'a> {
 /// What a node's `@{ … }` shape data sets.
 struct ShapeData<'a> {
     shape: Option<Shape>,
-    /// Replaces the label, also one given in brackets.
+    /// Replaces the label, also one given in brackets; with any double quotes around it.
     label: Option<&'a str>,
 }
 
@@ -839,7 +862,8 @@ const UNDRAWN_SHAPE_NAMES: [&str; 96] = [
 /// Reads the `key: value` pairs of `@{ … }` shape data from `text`, which follows the
 /// `@{`, and returns them with the text after the closing `}`. Upstream reads the braces
 /// as YAML; the pairs are split at commas outside double quotes, and a value is taken
-/// literally without the double quotes around it.
+/// literally: without the double quotes around it for `shape`, with them for `label`,
+/// which [`Label::parse`] reads.
 fn shape_data(line: usize, text: &str) -> Result<(ShapeData<'_>, &str), Failure> {
     // The multi-line form, closed on a later line, is not read.
     let end = outside_quotes(text, '}').next().ok_or(Failure::Unsupported)?;
@@ -850,9 +874,9 @@ fn shape_data(line: usize, text: &str) -> Result<(ShapeData<'_>, &str), Failure>
         let pair = body.get(start..comma).ok_or(Failure::Unsupported)?;
         start = comma + 1;
         let Some((key, value)) = pair.split_once(':') else { continue };
-        let value = unquoted(value.trim());
+        let value = value.trim();
         match key.trim() {
-            "shape" => data.shape = Some(shape_named(line, value)?),
+            "shape" => data.shape = Some(shape_named(line, unquoted(value))?),
             "label" => data.label = Some(value),
             // An image has no text drawing yet.
             "icon" | "img" => return Err(Failure::Unsupported),
@@ -893,7 +917,7 @@ struct Link<'a> {
     stroke: Stroke,
     tail: Option<Marker>,
     head: Option<Marker>,
-    /// The text of the `A -- text --> B` form.
+    /// The text of the `A -- text --> B` form, with any double quotes around it.
     label: Option<&'a str>,
     length: usize,
 }
@@ -933,7 +957,7 @@ fn link(text: &str) -> Option<(Link<'_>, &str)> {
             if label.ends_with('.') {
                 return None;
             }
-            (Some(unquoted(label.trim())), closing.get(1..)?)
+            (Some(label.trim()), closing.get(1..)?)
         }
         Stroke::Solid | Stroke::Thick
             if !after_base.starts_with(|c| c == line_char(stroke) || head_marker(c).is_some()) =>
@@ -941,7 +965,7 @@ fn link(text: &str) -> Option<(Link<'_>, &str)> {
             let doubled = if stroke == Stroke::Solid { "--" } else { "==" };
             let (label, closing) =
                 after_base.split_at_checked(find_after_quotes(after_base, doubled)?)?;
-            (Some(unquoted(label.trim())), closing.get(2..)?)
+            (Some(label.trim()), closing.get(2..)?)
         }
         Stroke::Dotted | Stroke::Invisible => return None,
         Stroke::Solid | Stroke::Thick => (None, after_base),
@@ -970,15 +994,6 @@ fn find_after_quotes(text: &str, close: &str) -> Option<usize> {
         None => 0,
     };
     Some(skip + text.get(skip..)?.find(close)?)
-}
-
-/// `text` without the double quotes around it when the whole of it is one quoted
-/// string, the `STR` token of Mermaid's `flow.jison`, which holds no quote itself.
-fn unquoted(text: &str) -> &str {
-    text.strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-        .filter(|inner| !inner.contains('"'))
-        .unwrap_or(text)
 }
 
 /// The character repeated in a link of `stroke`, after its first two characters.
@@ -1021,12 +1036,6 @@ fn head_marker(c: char) -> Option<Marker> {
     }
 }
 
-/// `label` with each tab replaced by a space: a tab has no display width of its own, so
-/// it would leave the box narrower than the text shown in it.
-fn spaced(label: &str) -> String {
-    label.replace('\t', " ")
-}
-
 fn syntax_error(line: usize, message: &str) -> Failure {
     Failure::Syntax(SyntaxError { line: Some(line), message: message.to_owned() })
 }
@@ -1041,12 +1050,14 @@ fn split_id(text: &str) -> (&str, &str) {
 }
 
 /// Splits `text`, which follows an opening bracket, into the label and the text after
-/// the `close` bracket. A label in double quotes may contain brackets; the quotes are
-/// not part of it.
+/// the `close` bracket. A label in double quotes may contain brackets; it keeps its
+/// quotes, which tell [`Label::parse`] a quoted string, such as a markdown string, from
+/// plain text.
 fn bracket_label<'a>(text: &'a str, close: &str) -> Option<(&'a str, &'a str)> {
     match text.strip_prefix('"') {
         Some(quoted) => {
-            let (label, after_quote) = quoted.split_once('"')?;
+            let (inner, after_quote) = quoted.split_once('"')?;
+            let label = text.get(..inner.len() + 2)?;
             Some((label, after_quote.strip_prefix(close)?))
         }
         None => text.split_once(close),

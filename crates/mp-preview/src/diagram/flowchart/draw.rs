@@ -7,7 +7,8 @@ use crate::style::{Line, Style};
 use crate::theme::Rgb;
 use crate::theme::solarized::DARK_PALETTE;
 
-use super::layout::{Axis, box_width};
+use super::label::{Label, Run, row_width};
+use super::layout::{Axis, box_width, label_reach};
 use super::outline::{Row, outline};
 use super::parse::{Body, Direction, Marker, Node, Stroke};
 use super::route::Scene;
@@ -97,12 +98,54 @@ pub(super) fn draw(scene: &Scene<'_>, direction: Direction) -> Vec<Line> {
             canvas.put(row, col, marker_glyph(tail, heading), LINE);
         }
     }
-    for label in &scene.labels {
-        let (label_main_size, _) = axis.label_size(label.text);
-        let (row, col) = frame.top_left(label.main, label.cross, label_main_size);
-        canvas.put(row, col, label.text, TEXT);
+    for placed in &scene.labels {
+        let (label_main_size, _) = axis.label_size(placed.label);
+        let (top, left) = frame.top_left(placed.main, placed.cross, label_main_size);
+        let align = match axis {
+            Axis::Horizontal => RowAlign::Centred,
+            Axis::Vertical => RowAlign::OnLine,
+        };
+        draw_label(&mut canvas, (top, left), placed.label, align);
     }
     canvas.into_lines()
+}
+
+/// Where a label row narrower than the widest goes.
+#[derive(Clone, Copy)]
+enum RowAlign {
+    /// Centred within the widest row, the odd spare cell after it.
+    Centred,
+    /// Centred on the column of the vertical line the label lies on, leaning left as
+    /// [`label_reach`] does, so that every row covers the line.
+    OnLine,
+}
+
+/// Draws `label` with its top-left cell at `(top, left)`, one row under another, each
+/// placed as `align` says.
+fn draw_label<'a>(
+    canvas: &mut Canvas<'a>,
+    (top, left): (usize, usize),
+    label: &'a Label,
+    align: RowAlign,
+) {
+    let width = label.width();
+    for (row, runs) in (top..).zip(label.rows()) {
+        let row_width = row_width(runs);
+        let offset = match align {
+            RowAlign::Centred => (width - row_width) / 2,
+            RowAlign::OnLine => label_reach(width).0 - label_reach(row_width).0,
+        };
+        draw_runs(canvas, (row, left + offset), runs);
+    }
+}
+
+/// Draws `runs` one after another from `(row, col)`, each in the label text style with
+/// its own emphasis.
+fn draw_runs<'a>(canvas: &mut Canvas<'a>, (row, mut col): (usize, usize), runs: &'a [Run]) {
+    for run in runs {
+        canvas.put(row, col, &run.text, Style { bold: run.bold, italic: run.italic, ..TEXT });
+        col += run.text.width();
+    }
 }
 
 /// The end cell of a line whose points are listed from that end, and the direction the
@@ -152,20 +195,23 @@ fn draw_subgraph_frame<'a>(
     canvas: &mut Canvas<'a>,
     (top, left): (usize, usize),
     (bottom, right): (usize, usize),
-    title: &'a str,
+    title: &'a Label,
     title_offset: usize,
 ) {
     let corners = [(top, left), (top, right), (bottom, right), (bottom, left), (top, left)];
     canvas.line(&corners, line_glyphs(Stroke::Solid), LINE);
     let start = left + title_offset;
     canvas.put(top, start, " ", TEXT);
-    canvas.put(top, start + 1, title, TEXT);
+    // A title is one row (see `Label::joined`).
+    for runs in title.rows() {
+        draw_runs(canvas, (top, start + 1), runs);
+    }
     canvas.put(top, start + 1 + title.width(), " ", TEXT);
 }
 
 /// Draws `node`'s box with its top-left cell at `(top, left)`, grown by its spread on
 /// both sides of the label across the flow of `axis`: extra rows of sides above and
-/// below the label row in a horizontal layout, extra columns of border either side of
+/// below the label rows in a horizontal layout, extra columns of border either side of
 /// the label in a vertical one. A hidden node draws nothing, and a drawing is copied
 /// in whole.
 fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node, axis: Axis) {
@@ -191,7 +237,8 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
     };
     let width = box_width(node) + 2 * extra_cols;
     let outline = outline(shape);
-    let bottom = top + outline.height() + 2 * extra_rows - 1;
+    let rows = label.height();
+    let bottom = top + outline.height(rows) + 2 * extra_rows - 1;
     let rim = outline.rim.map(|rim| (top + 1, rim));
     for (row, outline_row) in [(top, outline.top), (bottom, outline.bottom)].into_iter().chain(rim)
     {
@@ -201,17 +248,17 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
             }
         }
     }
-    let label_row = top + outline.label_row() + extra_rows;
-    // The rows the box grew by carry its sides on, as plain lines where the label row
-    // has the shape's own glyphs.
+    let first_label_row = top + outline.label_row() + extra_rows;
+    let label_rows = first_label_row..first_label_row + rows;
+    // The rows the box grew by carry its sides on, as plain lines where the label rows
+    // have the shape's own glyphs.
     let side = Row { inset: outline.label.inset, ends: outline.label.ends.map(plain_side) };
-    for row in label_row - extra_rows..=label_row + extra_rows {
-        if row != label_row {
-            draw_row_ends(canvas, row, left, width, side);
-        }
+    for row in first_label_row - extra_rows..label_rows.end + extra_rows {
+        let ends = if label_rows.contains(&row) { outline.label } else { side };
+        draw_row_ends(canvas, row, left, width, ends);
     }
-    draw_row_ends(canvas, label_row, left, width, outline.label);
-    canvas.put(label_row, left + outline.label_offset() + extra_cols, label, TEXT);
+    let label_left = left + outline.label_offset() + extra_cols;
+    draw_label(canvas, (first_label_row, label_left), label, RowAlign::Centred);
 }
 
 /// A run of `│` as wide as the side glyphs `end`.

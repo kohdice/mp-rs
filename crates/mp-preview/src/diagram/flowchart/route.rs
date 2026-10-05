@@ -3,12 +3,11 @@
 
 use std::ops::RangeInclusive;
 
-use unicode_width::UnicodeWidthStr;
-
+use super::label::Label;
 use super::layout::{
     Axis, LabelSpot, Layered, Reach, SELF_LOOP_CELLS, SELF_LOOP_SPAN, TITLE_CORNER_OFFSET,
-    entry_reach, exit_cells, frame_width, label_spot, port_cells, scatter_by_order,
-    self_loop_cells, self_loop_label_at, title_offset,
+    entry_reach, exit_cells, frame_width, label_cross_reach, label_spot, port_cells,
+    scatter_by_order, self_loop_cells, self_loop_label_at, title_offset,
 };
 use super::parse::{Direction, Edge, End, Flowchart, Node, Subgraph};
 use super::signed;
@@ -28,7 +27,7 @@ pub(super) struct Scene<'a> {
 pub(super) struct RoutedLabel<'a> {
     /// The index of the label's link in [`Scene::links`].
     pub link: usize,
-    pub text: &'a str,
+    pub label: &'a Label,
     /// Its first cell along and across the flow, which may lie before the first column.
     pub at: (isize, isize),
 }
@@ -49,11 +48,12 @@ pub(super) struct Route<'a> {
     pub points: Vec<(usize, usize)>,
 }
 
-/// Text starting at a cell; it extends along the flow in a horizontal layout and
-/// across it in a vertical one, i.e. always to the right on screen.
+/// A label starting at a cell; its rows extend along the flow in a horizontal layout and
+/// across it in a vertical one, i.e. always to the right on screen, and follow each other
+/// down the screen.
 #[derive(Debug)]
 pub(super) struct PlacedLabel<'a> {
-    pub text: &'a str,
+    pub label: &'a Label,
     pub main: usize,
     pub cross: usize,
 }
@@ -61,7 +61,7 @@ pub(super) struct PlacedLabel<'a> {
 /// A subgraph frame, given by the cells of its borders along and across the flow.
 #[derive(Debug)]
 pub(super) struct PlacedFrame<'a> {
-    pub title: &'a str,
+    pub title: &'a Label,
     /// Cells on screen from the top-left corner to the blank before the title.
     pub title_offset: usize,
     pub main: RangeInclusive<usize>,
@@ -69,11 +69,11 @@ pub(super) struct PlacedFrame<'a> {
 }
 
 impl Axis {
-    /// Cells a label takes along and across the flow.
-    pub(super) fn label_size(self, text: &str) -> (usize, usize) {
+    /// Cells a label takes along and across the flow: its widest row, and its rows.
+    pub(super) fn label_size(self, label: &Label) -> (usize, usize) {
         match self {
-            Self::Horizontal => (text.width(), 1),
-            Self::Vertical => (1, text.width()),
+            Self::Horizontal => (label.width(), label.height()),
+            Self::Vertical => (label.height(), label.width()),
         }
     }
 }
@@ -89,7 +89,7 @@ impl Scene<'_> {
         });
         let links = self.links.iter().flat_map(|link| &link.points);
         let labels = self.labels.iter().map(|label| {
-            let (main_size, cross_size) = axis.label_size(label.text);
+            let (main_size, cross_size) = axis.label_size(label.label);
             (label.main + main_size, label.cross + cross_size)
         });
         let frames = self.frames.iter().map(|frame| (frame.main.end() + 1, frame.cross.end() + 1));
@@ -142,9 +142,9 @@ pub(super) fn route<'a>(
     let exits = exit_ports(chart, layered, axis)?;
 
     let mut runs = Vec::new();
-    // For each gap, the cells the routed labels on its lines need after the tracks: a
-    // label and the markers at the gap's ends. A vertical layout only needs to know
-    // whether there is a label row.
+    // For each gap, the cells the routed labels on its lines need after the tracks: in a
+    // horizontal layout a label's widest row and the markers at the gap's ends, in a
+    // vertical one a label's rows.
     let mut routed_label_cells: Vec<Option<usize>> = vec![None; layered.layer_count];
     for (index, ((((edge, path), entries), &reversed), &exit)) in
         chart.edges.iter().zip(paths).zip(&entries).zip(&layered.reversed).zip(&exits).enumerate()
@@ -168,8 +168,14 @@ pub(super) fn route<'a>(
             && let Some(LabelSpot::Gap(segment)) = label_spot(path)
         {
             let cells = routed_label_cells.get_mut(slots.get(*path.get(segment)?)?.layer)?;
-            let (before, after) = gap_end_markers(edge, reversed, path, segment);
-            *cells = Some(cells.unwrap_or(0).max(before + label.width() + after));
+            let needed = match axis {
+                Axis::Horizontal => {
+                    let (before, after) = gap_end_markers(edge, reversed, path, segment);
+                    before + label.width() + after
+                }
+                Axis::Vertical => label.height(),
+            };
+            *cells = Some(cells.unwrap_or(0).max(needed));
         }
     }
     let (track_of, track_counts) = assign_tracks(layered, &entries, &runs)?;
@@ -181,7 +187,7 @@ pub(super) fn route<'a>(
             && node == to
         {
             let cells = loop_cells.get_mut(slots.get(node)?.layer)?;
-            *cells = (*cells).max(self_loop_cells(axis, edge.label.as_deref()));
+            *cells = (*cells).max(self_loop_cells(axis, edge.label.as_ref()));
         }
     }
 
@@ -207,11 +213,11 @@ pub(super) fn route<'a>(
         .map(|((&lead, &routed_cells), &loop_cells)| {
             // After the last track, a horizontal gap holds a line cell and the arrowhead,
             // or a label on the line with its markers and a line cell on either side of
-            // the text; a vertical one the label row, if any, and the cell of the
+            // the text; a vertical one the label rows, if any, and the cell of the
             // arrowhead.
             let needed = match axis {
                 Axis::Horizontal => lead + routed_cells.unwrap_or(0) + 2,
-                Axis::Vertical => lead + usize::from(routed_cells.is_some()) + 1,
+                Axis::Vertical => lead + routed_cells.unwrap_or(0) + 1,
             };
             // A blank cell separates the next layer from the loops and their labels.
             let loops = if loop_cells > 0 { loop_cells + 1 } else { 0 };
@@ -263,10 +269,10 @@ pub(super) fn route<'a>(
                 let node = chart.nodes.get(first)?;
                 let main = *layer_start.get(first_slot.layer)?;
                 if let Some(text) = &edge.label {
-                    let (along, cross) = self_loop_label_at(axis, exit_cell, text.width())?;
+                    let (along, cross) = self_loop_label_at(axis, exit_cell, text)?;
                     let out = main + axis.box_main_size(node);
                     let at = (signed(out + along)?, cross);
-                    routed.push(RoutedLabel { link: scene.links.len(), text: text.as_str(), at });
+                    routed.push(RoutedLabel { link: scene.links.len(), label: text, at });
                 }
                 let points = self_loop(axis, node, main, exit_cell);
                 scene.links.push(Route { edge, points });
@@ -293,22 +299,22 @@ pub(super) fn route<'a>(
                 && let Some(spot) = label_spot(path)
             {
                 let width = text.width();
+                // The cells across the flow from the label's first cell to the line.
+                let (before_line, _) = label_cross_reach(axis, text);
                 let at = match spot {
                     // After the tracks the line is already at the cell it enters the next
-                    // layer by. A vertical label sits on the label row, centred on that
-                    // cell; a horizontal one runs along the line on that cell's row,
-                    // centred between the markers at the gap's ends with a line cell on
-                    // either side of the text, as Mermaid centres a label between a
-                    // link's ends.
+                    // layer by. A vertical label's rows sit on the rows after the tracks,
+                    // centred on that cell; a horizontal one runs its middle row along the
+                    // line on that cell's row, centred between the markers at the gap's
+                    // ends with a line cell on either side of the text, as Mermaid
+                    // centres a label between a link's ends.
                     LabelSpot::Gap(segment) => {
                         let layer = slots.get(*path.get(segment)?)?.layer;
                         let after_tracks =
                             gap_start(layer)? + exit.get(layer)? + leads.get(layer)?;
-                        let entry = *entries.get(segment)?;
+                        let entry = signed(*entries.get(segment)?)? - signed(before_line)?;
                         match axis {
-                            Axis::Vertical => {
-                                (signed(after_tracks)?, signed(entry)? - signed(width / 2)?)
-                            }
+                            Axis::Vertical => (signed(after_tracks)?, entry),
                             Axis::Horizontal => {
                                 let gap_end =
                                     gap_start(layer)? + exit.get(layer)? + gaps.get(layer)?;
@@ -316,28 +322,32 @@ pub(super) fn route<'a>(
                                     gap_end_markers(edge, reversed, path, segment);
                                 let low = after_tracks + 1 + before;
                                 let high = gap_end.checked_sub(2 + after)?;
-                                (signed(centred_start(low, high, width)?)?, signed(entry)?)
+                                (signed(centred_start(low, high, width)?)?, entry)
                             }
                         }
                     }
                     // The line runs straight through the passing slot at its port, in a layer
-                    // `Slot::main` sized for the label.
+                    // `Slot::main` sized for the label: a vertical label's middle row is on
+                    // the layer's, each the upper of two for an even count, so a label as
+                    // tall as the layer fills it.
                     LabelSpot::Slot(index) => {
                         let slot = slots.get(*path.get(index)?)?;
                         let start = *layer_start.get(slot.layer)?;
                         let size = *layer_size.get(slot.layer)?;
+                        let cross = signed(slot.port)? - signed(before_line)?;
                         match axis {
                             Axis::Vertical => {
-                                (signed(start + size / 2)?, signed(slot.port)? - signed(width / 2)?)
+                                let middle = start + size.checked_sub(1)? / 2;
+                                (signed(middle.checked_sub(text.middle_row())?)?, cross)
                             }
                             Axis::Horizontal => {
                                 let end = (start + size).checked_sub(1)?;
-                                (signed(centred_start(start, end, width)?)?, signed(slot.port)?)
+                                (signed(centred_start(start, end, width)?)?, cross)
                             }
                         }
                     }
                 };
-                routed.push(RoutedLabel { link: scene.links.len(), text: text.as_str(), at });
+                routed.push(RoutedLabel { link: scene.links.len(), label: text, at });
             }
             let entry = *entries.last()?;
             let into = layer_start.get(slots.get(last)?.layer)?.checked_sub(1)?;
@@ -511,7 +521,7 @@ type Rectangle = ((isize, isize), (isize, isize));
 /// The first and last cells of a frame's borders along and across the flow, which may
 /// lie before the scene's first cells.
 struct FrameBounds<'a> {
-    title: &'a str,
+    title: &'a Label,
     /// Cells on screen from the top-left corner to the blank before the title.
     title_offset: usize,
     main: (isize, isize),
@@ -553,10 +563,10 @@ fn frame_bounds<'a>(
         .flat_map(|link| &link.points)
         .map(|&(main, cross)| Some((span(main, 1)?, span(cross, 1)?)));
     // The labels on links between members lie inside the frame like their boxes.
-    let labels = routed.iter().filter_map(|&RoutedLabel { link, text, at: (main, cross) }| {
+    let labels = routed.iter().filter_map(|&RoutedLabel { link, label, at: (main, cross) }| {
         let edge = scene.links.get(link)?.edge;
         (is_member(edge.from) && is_member(edge.to)).then_some(())?;
-        let (main_size, cross_size) = axis.label_size(text);
+        let (main_size, cross_size) = axis.label_size(label);
         let (main_size, cross_size) = (signed(main_size)?, signed(cross_size)?);
         Some(Some(((main, main + main_size - 1), (cross, cross + cross_size - 1))))
     });
@@ -732,8 +742,12 @@ pub(super) fn place_labels<'a>(routed: &[RoutedLabel<'a>]) -> (Vec<PlacedLabel<'
     let cross_shift = routed.iter().map(|label| -label.at.1).max().unwrap_or(0).max(0);
     let labels = routed
         .iter()
-        .filter_map(|&RoutedLabel { text, at: (main, cross), .. }| {
-            Some(PlacedLabel { text, main: unsigned(main)?, cross: unsigned(cross + cross_shift)? })
+        .filter_map(|&RoutedLabel { label, at: (main, cross), .. }| {
+            Some(PlacedLabel {
+                label,
+                main: unsigned(main)?,
+                cross: unsigned(cross + cross_shift)?,
+            })
         })
         .collect();
     (labels, unsigned(cross_shift).unwrap_or(0))
@@ -898,7 +912,7 @@ fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<us
         let targets: Vec<usize> = leaving.iter().map(|&(port, _)| port).collect();
         let labels = loops
             .iter()
-            .map(|&edge| Some(chart.edges.get(edge)?.label.as_deref()))
+            .map(|&edge| Some(chart.edges.get(edge)?.label.as_ref()))
             .collect::<Option<Vec<_>>>()?;
         let port = slot.port.checked_sub(slot.cross)?;
         let spread = exit_cells(axis, targets.len(), &labels, &axis.port_range(node), port)?;

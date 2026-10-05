@@ -292,6 +292,7 @@ name = "mp-preview"
 version = "0.1.0"
 dependencies = [
  "comrak",
+ "entities",
  "syntect",
  "two-face",
  "unicode-segmentation",

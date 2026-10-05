@@ -1703,6 +1703,38 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_lr_three_row_self_loop_label_keeps_a_blank_row_from_the_exit_beside_it() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A -->|x<br>y<br>z| A\n    A --> B\n"),
+            "┌───┐     ┌───┐\n│   │────►│ B │\n│   │     └───┘\n│ A │─┐ x\n│   │ │ y\n│   │◄┘ z\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_lr_two_row_self_loop_label_puts_its_lower_row_on_the_second_leg() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A -->|x<br>yy| A\n    A --> B\n"),
+            "┌───┐\n│   │      ┌───┐\n│   │─────►│ B │\n│ A │─┐    └───┘\n│   │ │ x\n│   │◄┘ yy\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_two_row_self_loop_label_centres_each_row_on_the_loop() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A -->|x<br>yy| A\n"),
+            "┌───┐\n│ A │\n└───┘\n │ ▲\n └─┘\n  x\n yy"
+        );
+    }
+
+    #[test]
+    fn mermaid_lr_two_row_label_on_a_passing_slot_runs_its_upper_row_on_the_line() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> B --> C\n    A -->|x<br>y| C\n"),
+            "┌───┐     ┌───┐\n│   │────►│ B │─┐   ┌───┐\n│ A │     └───┘ └──►│   │\n│   │─┐             │ C │\n└───┘ │          ┌─►│   │\n      └─────x────┘  └───┘\n            y"
+        );
+    }
+
+    #[test]
     fn mermaid_td_self_loop_label_sits_below_the_loop_centred_on_it() {
         assert_eq!(
             mermaid("flowchart TD\n    A -->|again| A\n"),
@@ -3568,6 +3600,340 @@ mod tests {
             mermaid("flowchart LR\n    A -->|a\tb| B\n"),
             mermaid("flowchart LR\n    A -->|a b| B\n")
         );
+    }
+
+    /// The plain drawing of a lone rectangle whose label is `text` written in quotes.
+    fn quoted_box(text: &str) -> String {
+        mermaid(&format!("flowchart LR\n    A[\"{text}\"]\n"))
+    }
+
+    /// A lone rectangle around `label`, which is one display cell per character.
+    fn box_around(label: &str) -> String {
+        let border = "─".repeat(label.chars().count() + 2);
+        format!("┌{border}┐\n│ {label} │\n└{border}┘")
+    }
+
+    #[test]
+    fn mermaid_decimal_entity_code_decodes_in_a_node_label() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[\"A dec char:#9829;\"]\n"),
+            "┌──────────────┐\n│ A dec char:♥ │\n└──────────────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_named_entity_codes_decode_in_a_node_label() {
+        let output = mermaid("flowchart LR\n    A[\"#quot;x#quot; #amp; #lt;y#gt;\"]\n");
+
+        assert!(output.lines().any(|line| line == "│ \"x\" & <y> │"), "{output}");
+    }
+
+    #[test]
+    fn mermaid_entity_codes_decode_in_edge_labels_and_subgraph_titles() {
+        let edge = mermaid("flowchart LR\n    A -->|#quot;yes#quot;| B\n");
+        assert_eq!(edge, "┌───┐        ┌───┐\n│ A │─\"yes\"─►│ B │\n└───┘        └───┘");
+
+        let title = mermaid("flowchart LR\n    subgraph s [a #amp; b]\n    A\n    end\n");
+        assert!(intact_frame(&title, "a & b").is_some(), "{title}");
+    }
+
+    #[test]
+    fn mermaid_control_characters_from_entity_codes_render_as_control_pictures() {
+        let escape = mermaid("flowchart LR\n    A[\"x#27;y\"]\n");
+        assert!(escape.lines().any(|line| line == "│ x␛y │"), "{escape}");
+        assert!(!escape.contains('\u{1b}'), "{escape}");
+
+        // 0x9D is one of the C1 codes HTML's table leaves as they are.
+        let c1 = mermaid("flowchart LR\n    A[\"x#157;y\"]\n");
+        assert!(c1.lines().any(|line| line == "│ x�y │"), "{c1}");
+
+        let tab = mermaid("flowchart LR\n    A[\"x#9;y\"]\n");
+        assert!(tab.lines().any(|line| line == "│ x y │"), "{tab}");
+    }
+
+    #[test]
+    fn mermaid_entity_codes_decode_as_html_and_leave_partial_codes_as_written() {
+        for (written, shown) in [
+            ("#35;1", "#1"),
+            ("#nosuch;", "#nosuch;"),
+            ("#0;", "�"),
+            ("#1114112;", "�"),
+            ("#55296;", "�"),
+            ("#x26;", "#x26;"),
+            ("#;", "#;"),
+            ("#amp", "#amp"),
+            ("a#", "a#"),
+            ("##35;", "##"),
+            ("#fjlig;", "fj"),
+        ] {
+            assert_eq!(quoted_box(written), box_around(shown), "{written}");
+        }
+    }
+
+    #[test]
+    fn mermaid_decimal_entity_codes_128_to_159_decode_as_html_does() {
+        assert_eq!(quoted_box("x#128;y"), box_around("x€y"));
+        assert_eq!(quoted_box("x#159;y"), box_around("xŸy"));
+    }
+
+    #[test]
+    fn mermaid_br_in_a_node_label_makes_a_second_row() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[\"Line 1<br>Line 2\"]\n"),
+            "┌────────┐\n│ Line 1 │\n│ Line 2 │\n└────────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_br_spellings_all_break_the_line() {
+        for br in ["<br/>", "<br />", "<BR>", "</br>"] {
+            assert_eq!(
+                mermaid(&format!("flowchart LR\n    A[\"a{br}b\"]\n")),
+                "┌───┐\n│ a │\n│ b │\n└───┘",
+                "{br}"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_shorter_label_rows_are_centred() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[\"Longer row<br>ab\"]\n"),
+            "┌────────────┐\n│ Longer row │\n│     ab     │\n└────────────┘"
+        );
+        assert_eq!(
+            mermaid("flowchart LR\n    A[\"abc<br>ab\"]\n"),
+            "┌─────┐\n│ abc │\n│ ab  │\n└─────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_lr_link_into_a_two_row_label_enters_on_the_upper_middle_row() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> B[\"x<br>y\"]\n"),
+            "┌───┐     ┌───┐\n│ A │────►│ x │\n└───┘     │ y │\n          └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_link_into_a_two_row_label_points_at_its_top_border() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A --> B[\"x<br>y\"]\n"),
+            "┌───┐\n│ A │\n└───┘\n  │\n  │\n  ▼\n┌───┐\n│ x │\n│ y │\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_br_rows_follow_how_html_breaks_lines() {
+        // A last `<br>` ends the line before it without starting another.
+        assert_eq!(quoted_box("a<br>"), box_around("a"));
+        assert_eq!(quoted_box("<br>"), "┌──┐\n│  │\n└──┘");
+        assert_eq!(quoted_box("a<br><br>"), "┌───┐\n│ a │\n│   │\n└───┘");
+        assert_eq!(quoted_box("a<br><br>b"), "┌───┐\n│ a │\n│   │\n│ b │\n└───┘");
+        assert_eq!(quoted_box("<br>b"), "┌───┐\n│   │\n│ b │\n└───┘");
+        assert_eq!(quoted_box("a<brx>"), box_around("a<brx>"));
+        assert_eq!(quoted_box("a<b r>"), box_around("a<b r>"));
+    }
+
+    #[test]
+    fn mermaid_two_row_labels_repeat_the_label_row_of_each_shape() {
+        assert_eq!(mermaid("flowchart LR\n    A{\"x<br>y\"}\n"), "╱───╲\n│ x │\n│ y │\n╲───╱");
+        assert_eq!(mermaid("flowchart LR\n    A((\"x<br>y\"))\n"), " ╭─╮\n( x )\n( y )\n ╰─╯");
+    }
+
+    #[test]
+    fn mermaid_br_in_a_shape_data_label_makes_rows_too() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ shape: stadium, label: \"x<br>y\" }\n"),
+            "╭───╮\n( x )\n( y )\n╰───╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_br_in_an_lr_edge_label_stacks_its_rows_on_the_line() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A -->|yes<br>no| B\n"),
+            "┌───┐      ┌───┐\n│ A │─yes─►│ B │\n└───┘ no   └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_edge_label_rows_are_each_centred_on_the_line() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A -->|x<br>yy| B\n"),
+            "┌───┐\n│ A │\n└───┘\n  │\n  x\n yy\n  ▼\n┌───┐\n│ B │\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_passing_slot_label_as_tall_as_its_layer_fills_it() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A --> B --> C\n    A -->|a<br>b<br>c<br>d| C\n"),
+            concat!(
+                " ┌───┐\n │ A │\n └───┘\n  │ │\n  │ └───┐\n  ▼     │\n",
+                "┌───┐   a\n│ B │   b\n└───┘   c\n  │     d\n",
+                "  │     │\n  └─┐   │\n    │ ┌─┘\n    ▼ ▼\n   ┌───┐\n   │ C │\n   └───┘"
+            )
+        );
+    }
+
+    #[test]
+    fn mermaid_even_rows_in_a_td_passing_slot_put_the_upper_middle_row_on_the_layer_middle() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A --> B --> C\n    A -->|x<br>y| C\n"),
+            concat!(
+                " ┌───┐\n │ A │\n └───┘\n  │ │\n  │ └───┐\n  ▼     │\n",
+                "┌───┐   │\n│ B │   x\n└───┘   y\n",
+                "  │     │\n  └─┐   │\n    │ ┌─┘\n    ▼ ▼\n   ┌───┐\n   │ C │\n   └───┘"
+            )
+        );
+    }
+
+    #[test]
+    fn mermaid_br_in_a_subgraph_title_joins_the_rows_with_a_space() {
+        assert_eq!(
+            mermaid("flowchart LR\n    subgraph s [Data<br>Layer]\n    A\n    end\n"),
+            mermaid("flowchart LR\n    subgraph s [Data Layer]\n    A\n    end\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_quoted_label_spanning_source_lines_joins_them_with_a_space() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[\"first\n    second\"] --> B\n"),
+            mermaid("flowchart LR\n    A[\"first second\"] --> B\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_unclosed_quote_at_the_end_of_the_diagram_is_a_syntax_error() {
+        let body = "flowchart LR\n    A[\"first\n    B\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 2: unclosed node label\n```mermaid\n{body}```")
+        );
+    }
+
+    /// The first span of `lines` whose text contains `text`.
+    fn span_containing<'a>(lines: &'a [Line], text: &str) -> Option<&'a Span> {
+        lines.iter().flatten().find(|span| span.text.contains(text))
+    }
+
+    #[test]
+    fn mermaid_markdown_string_bold_is_drawn_bold_without_the_markers() {
+        let body = "flowchart LR\n    A[\"`The **cat** sat`\"]\n";
+        let output = mermaid(body);
+        assert!(output.lines().any(|line| line == "│ The cat sat │"), "{output}");
+
+        let lines = lay_out(&format!("```mermaid\n{body}```\n"), None);
+        let cat = lines.iter().flatten().find(|span| span.text == "cat");
+        assert!(cat.is_some_and(|cat| cat.style.bold), "{lines:?}");
+        assert!(cat.is_some_and(|cat| cat.style.fg == Some(DARK_PALETTE.body)), "{lines:?}");
+        for plain in ["The ", " sat"] {
+            let span = span_containing(&lines, plain);
+            assert!(span.is_some_and(|span| !span.style.bold), "{plain}: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn mermaid_markdown_string_italic_uses_asterisk_or_underscore() {
+        let body = "flowchart LR\n    A[\"`This *is* _Markdown_`\"]\n";
+        let output = mermaid(body);
+        assert!(output.lines().any(|line| line == "│ This is Markdown │"), "{output}");
+
+        let lines = lay_out(&format!("```mermaid\n{body}```\n"), None);
+        for italic in ["is", "Markdown"] {
+            let span = lines.iter().flatten().find(|span| span.text == italic);
+            assert!(span.is_some_and(|span| span.style.italic), "{italic}: {lines:?}");
+        }
+    }
+
+    #[test]
+    fn mermaid_markdown_string_newlines_make_rows() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[\"`Line1\n    Line 2\n    Line 3`\"]\n"),
+            "┌────────┐\n│ Line1  │\n│ Line 2 │\n│ Line 3 │\n└────────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_asterisks_outside_markdown_strings_are_plain_text() {
+        let body = "flowchart LR\n    A[\"**not bold**\"]\n";
+        let output = mermaid(body);
+        assert!(output.lines().any(|line| line == "│ **not bold** │"), "{output}");
+
+        let lines = lay_out(&format!("```mermaid\n{body}```\n"), None);
+        assert!(lines.iter().flatten().all(|span| !span.style.bold), "{lines:?}");
+    }
+
+    #[test]
+    fn mermaid_markdown_edge_label_and_subgraph_title_render_bold() {
+        let body = "flowchart LR\n    subgraph \"`**Two**`\"\n    c(\"`The **cat**\n    in the hat`\") -- \"`Bold **edge label**`\" --> d(\"The dog in the hog\")\n    end\n";
+        let output = mermaid(body);
+        assert!(!output.starts_with("mermaid:"), "{output}");
+        assert!(
+            intact_frame(&output, "Two").or_else(|| intact_crossed_frame(&output, "Two")).is_some(),
+            "{output}"
+        );
+        assert!(output.lines().any(|line| line.contains("│  The cat   │")), "{output}");
+        assert!(output.lines().any(|line| line.contains("│ in the hat │")), "{output}");
+        assert_eq!(output.matches("Bold edge label").count(), 1, "{output}");
+        assert!(boxes_intact(&output, &["The dog in the hog"]), "{output}");
+
+        let lines = lay_out(&format!("```mermaid\n{body}```\n"), None);
+        for bold in ["Two", "edge label"] {
+            let span = lines.iter().flatten().find(|span| span.text == bold);
+            assert!(span.is_some_and(|span| span.style.bold), "{bold}: {lines:?}");
+        }
+    }
+
+    /// The laid-out lines of a lone rectangle whose label is the markdown string `text`.
+    fn markdown_box_lines(text: &str) -> Vec<Line> {
+        lay_out(&format!("```mermaid\nflowchart LR\n    A[\"`{text}`\"]\n```\n"), None)
+    }
+
+    #[test]
+    fn mermaid_markdown_string_double_underscores_are_bold() {
+        assert_eq!(quoted_box("`__b__`"), box_around("b"));
+        let lines = markdown_box_lines("__b__");
+        let b = lines.iter().flatten().find(|span| span.text == "b");
+        assert!(b.is_some_and(|b| b.style.bold && !b.style.italic), "{lines:?}");
+    }
+
+    #[test]
+    fn mermaid_markdown_string_emphasis_nests() {
+        assert_eq!(quoted_box("`*a **b** c*`"), box_around("a b c"));
+        let lines = markdown_box_lines("*a **b** c*");
+        let style_of = |text: &str| span_containing(&lines, text).map(|span| span.style);
+        assert!(style_of("a").is_some_and(|style| style.italic && !style.bold), "{lines:?}");
+        assert!(style_of("b").is_some_and(|style| style.italic && style.bold), "{lines:?}");
+        assert!(style_of("c").is_some_and(|style| style.italic && !style.bold), "{lines:?}");
+    }
+
+    #[test]
+    fn mermaid_markdown_string_unpaired_markers_and_inner_underscores_stay_text() {
+        for (written, shown) in [("*x", "*x"), ("snake_case_name", "snake_case_name")] {
+            assert_eq!(quoted_box(&format!("`{written}`")), box_around(shown), "{written}");
+            let lines = markdown_box_lines(written);
+            assert!(
+                lines.iter().flatten().all(|span| !span.style.italic && !span.style.bold),
+                "{written}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_markdown_string_drops_blank_lines_and_the_blanks_around_lines() {
+        assert_eq!(quoted_box("``"), "┌──┐\n│  │\n└──┘");
+        assert_eq!(quoted_box("`  a  \n\n    b  `"), "┌───┐\n│ a │\n│ b │\n└───┘");
+    }
+
+    #[test]
+    fn mermaid_markdown_string_unclosed_backtick_is_plain_text() {
+        let output = mermaid("flowchart LR\n    A[\"`not markdown\"]\n");
+
+        assert!(output.lines().any(|line| line == "│ `not markdown │"), "{output}");
     }
 
     #[test]

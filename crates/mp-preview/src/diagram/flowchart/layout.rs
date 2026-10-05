@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::style::Line;
 
+use super::label::Label;
 use super::outline::outline;
 use super::parse::{Body, Direction, Edge, End, Flowchart, Node};
 use super::signed;
@@ -20,29 +21,31 @@ pub(super) const SELF_LOOP_CELLS: usize = 2;
 pub(super) const SELF_LOOP_SPAN: usize = 2;
 
 /// The cells along the flow a self loop carrying `label` takes after its box, before
-/// the tracks there: its legs and its run, then, outside the loop beyond the run, a
-/// label row in a vertical layout, or in a horizontal one a blank cell and the label
+/// the tracks there: its legs and its run, then, outside the loop beyond the run, the
+/// label's rows in a vertical layout, or in a horizontal one a blank cell and the label
 /// running along the flow.
-pub(super) fn self_loop_cells(axis: Axis, label: Option<&str>) -> usize {
+pub(super) fn self_loop_cells(axis: Axis, label: Option<&Label>) -> usize {
     match (axis, label) {
         (_, None) => SELF_LOOP_CELLS,
-        (Axis::Vertical, Some(_)) => SELF_LOOP_CELLS + 1,
+        (Axis::Vertical, Some(label)) => SELF_LOOP_CELLS + label.height(),
         (Axis::Horizontal, Some(label)) => SELF_LOOP_CELLS + 1 + label.width(),
     }
 }
 
-/// Where the label `width` cells wide of a self loop whose first leg is at `leg` across
-/// the flow starts: the cells along the flow after the box's far border, and the cell
-/// across the flow, which may lie before cell 0. Mermaid puts the label outside the loop
-/// beyond its run, centred on the loop: here directly beyond the run in a vertical
-/// layout, with the usual lean left (see [`label_reach`]), and one blank cell beyond it
-/// on the row between the legs in a horizontal one.
-pub(super) fn self_loop_label_at(axis: Axis, leg: usize, width: usize) -> Option<(usize, isize)> {
+/// Where `label`, on a self loop whose first leg is at `leg` across the flow, starts: the
+/// cells along the flow after the box's far border, and the cell across the flow, which
+/// may lie before cell 0. Mermaid puts the label outside the loop beyond its run, centred
+/// on the loop: here directly beyond the run in a vertical layout, with the usual lean
+/// left (see [`label_reach`]), and one blank cell beyond it with its middle row on the
+/// row between the legs in a horizontal one (see [`label_cross_reach`]).
+pub(super) fn self_loop_label_at(axis: Axis, leg: usize, label: &Label) -> Option<(usize, isize)> {
     let centre = signed(leg + SELF_LOOP_SPAN / 2)?;
-    Some(match axis {
-        Axis::Vertical => (SELF_LOOP_CELLS, centre - signed(label_reach(width).0)?),
-        Axis::Horizontal => (SELF_LOOP_CELLS + 1, centre),
-    })
+    let (before, _) = label_cross_reach(axis, label);
+    let along = match axis {
+        Axis::Vertical => SELF_LOOP_CELLS,
+        Axis::Horizontal => SELF_LOOP_CELLS + 1,
+    };
+    Some((along, centre - signed(before)?))
 }
 
 /// Cells from a frame's top-left corner to the blank before its title when nothing is
@@ -90,7 +93,8 @@ impl Axis {
     }
 
     /// The offset across the flow from a box's first cell to the middle of the borders
-    /// that links leave and enter: the label row, or the centre column.
+    /// that links leave and enter: the middle label row (see [`Label::middle_row`]), or
+    /// the centre column.
     pub(super) fn port_offset(self, node: &Node) -> usize {
         match self {
             Self::Horizontal => label_row(node) + node.spread,
@@ -99,9 +103,9 @@ impl Axis {
     }
 
     /// The cells across the flow, counted from a box's first cell, where links may meet
-    /// its borders along the flow: in a horizontal layout the label row and the rows
-    /// the box grew by around it, which leaves out a cylinder's arc row; in a vertical
-    /// one every column between the corners.
+    /// its borders along the flow: in a horizontal layout the middle label row and the
+    /// rows the box grew by around it, as many on either side as its spread, which leaves
+    /// out a cylinder's arc row; in a vertical one every column between the corners.
     pub(super) fn port_range(self, node: &Node) -> RangeInclusive<usize> {
         match (self, &node.body) {
             // A drawing's frame is never grown: its links meet any row between the corners.
@@ -183,16 +187,17 @@ pub(super) fn box_width(node: &Node) -> usize {
 /// holding one.
 fn box_height(node: &Node) -> usize {
     match &node.body {
-        Body::Box { shape, .. } => outline(*shape).height(),
+        Body::Box { label, shape } => outline(*shape).height(label.height()),
         Body::Hidden => 1,
         Body::Drawing(drawing) => drawing.len(),
     }
 }
 
-/// The rows from a node's top row to its label row, or to the middle row of a drawing.
+/// The rows from a node's top row to its middle label row (see [`Label::middle_row`]),
+/// or to the middle row of a drawing.
 fn label_row(node: &Node) -> usize {
     match &node.body {
-        Body::Box { shape, .. } => outline(*shape).label_row(),
+        Body::Box { label, shape } => outline(*shape).label_row() + label.middle_row(),
         Body::Hidden => 0,
         Body::Drawing(drawing) => drawing.len() / 2,
     }
@@ -289,7 +294,7 @@ pub(super) struct Exits {
 pub(super) fn exit_cells(
     axis: Axis,
     targets: usize,
-    loop_labels: &[Option<&str>],
+    loop_labels: &[Option<&Label>],
     cells: &RangeInclusive<usize>,
     port: usize,
 ) -> Option<Exits> {
@@ -315,20 +320,30 @@ pub(super) fn exit_cells(
 /// apart; any other neighbours are [`end_gaps`] apart, as the ends of labelled links
 /// entering a box are. In a vertical layout a loop's label lies across the flow, centred
 /// on the cell between the legs, so each leg carries the label's reach measured from it;
-/// that keeps one blank cell between the label and the line or label next to it.
-fn exit_gaps(axis: Axis, targets: usize, loop_labels: &[Option<&str>]) -> Vec<usize> {
+/// that keeps one blank cell between the label and the line or label next to it. In a
+/// horizontal one the label's middle row is the row between the legs, and a leg whose
+/// row the label reaches carries the rows reaching on past it, so that the end next to
+/// the leg keeps a blank row from the label too.
+fn exit_gaps(axis: Axis, targets: usize, loop_labels: &[Option<&Label>]) -> Vec<usize> {
     let mut ordered: Vec<Reach> = vec![None; targets];
+    let half = SELF_LOOP_SPAN / 2;
     for label in loop_labels {
         let legs = match (axis, label) {
             (Axis::Vertical, Some(label)) => {
-                let (before, after) = label_reach(label.width());
-                let half = SELF_LOOP_SPAN / 2;
+                let (before, after) = label_cross_reach(axis, label);
                 [
                     Some((before.saturating_sub(half), after + half)),
                     Some((before + half, after.saturating_sub(half))),
                 ]
             }
-            _ => [None, None],
+            (Axis::Horizontal, Some(label)) => {
+                let (before, after) = label_cross_reach(axis, label);
+                [
+                    (before >= half).then(|| (before - half, 0)),
+                    (after >= half).then(|| (0, after - half)),
+                ]
+            }
+            (_, None) => [None, None],
         };
         ordered.extend(legs);
     }
@@ -363,8 +378,22 @@ pub(super) type Reach = Option<(usize, usize)>;
 
 /// The cells a label `width` cells wide takes on either side of the cell it is centred
 /// on: an odd cell left over goes before it, as the label leans left.
-fn label_reach(width: usize) -> (usize, usize) {
+pub(super) fn label_reach(width: usize) -> (usize, usize) {
     (width / 2, width.saturating_sub(1) - width / 2)
+}
+
+/// The cells `label` takes across the flow before and after the cell of the line it lies
+/// on: in a vertical layout its rows are centred on the line's column (see
+/// [`label_reach`]); in a horizontal one the line runs through its middle row (see
+/// [`Label::middle_row`]) and the other rows lie above and below it.
+pub(super) fn label_cross_reach(axis: Axis, label: &Label) -> (usize, usize) {
+    match axis {
+        Axis::Vertical => label_reach(label.width()),
+        Axis::Horizontal => {
+            let middle = label.middle_row();
+            (middle, label.height() - 1 - middle)
+        }
+    }
 }
 
 /// Where the routing places a link's label on its line: at Mermaid's label rank, half way
@@ -387,39 +416,34 @@ pub(super) fn label_spot(path: &[usize]) -> Option<LabelSpot> {
     Some(if segments % 2 == 1 { LabelSpot::Gap(middle) } else { LabelSpot::Slot(middle) })
 }
 
-/// The footprint of a passing slot carrying a label `width` cells wide, as
-/// `(main, cross, port_offset)`: the cells it takes along the flow, the cells it takes
-/// across the flow, and the offset of its port, where the line runs, from its first
-/// cell across the flow. Mermaid makes the label's dummy node a box the size of the
-/// label. In a horizontal layout the label runs along the line with a line cell on
-/// either side, so it takes `width + 2` cells along the flow and one row across; in a
-/// vertical one it takes the one row it sits on along the flow and `width` cells
-/// across. Across the flow the label is centred on the port with a blank cell on either
-/// side.
-fn labelled_slot_footprint(axis: Axis, width: usize) -> (usize, usize, usize) {
+/// The footprint of a passing slot carrying `label`, as `(main, cross, port_offset)`: the
+/// cells it takes along the flow, the cells it takes across the flow, and the offset of
+/// its port, where the line runs, from its first cell across the flow. Mermaid makes the
+/// label's dummy node a box the size of the label. In a horizontal layout the label runs
+/// along the line with a line cell on either side, so it takes its widest row plus 2
+/// cells along the flow and its rows across; in a vertical one it takes its rows along
+/// the flow and its widest row across. Across the flow the label lies on the port as
+/// [`label_cross_reach`] puts it, with a blank cell on either side.
+fn labelled_slot_footprint(axis: Axis, label: &Label) -> (usize, usize, usize) {
     let (main, across) = match axis {
-        Axis::Horizontal => (width + 2, 1),
-        Axis::Vertical => (1, width),
+        Axis::Horizontal => (label.width() + 2, label.height()),
+        Axis::Vertical => (label.height(), label.width()),
     };
-    let (before, _) = label_reach(across);
+    let (before, _) = label_cross_reach(axis, label);
     (main, across + 2, before + 1)
 }
 
 /// The reach of the label `edge` carries where `segment` of its laid-out `path` enters
 /// the next slot: only a label in the gap that segment crosses ([`LabelSpot::Gap`]) has
-/// a reach there. In a vertical layout the label is centred across the flow on that
-/// cell; in a horizontal one it runs along the line on that cell's row, so it reaches
-/// no further across the flow, but still counts as a label: [`end_gaps`] keeps a blank
-/// row between a labelled line and the end next to it, so that two labels never read as
-/// one block of text.
+/// a reach there, as [`label_cross_reach`] gives it. A one-row label in a horizontal
+/// layout runs along the line on that cell's row, so it reaches no further across the
+/// flow, but still counts as a label: [`end_gaps`] keeps a blank row between a labelled
+/// line and the end next to it, so that two labels never read as one block of text.
 pub(super) fn entry_reach(axis: Axis, edge: &Edge, path: &[usize], segment: usize) -> Reach {
     if label_spot(path) != Some(LabelSpot::Gap(segment)) {
         return None;
     }
-    edge.label.as_ref().map(|label| match axis {
-        Axis::Horizontal => (0, 0),
-        Axis::Vertical => label_reach(label.width()),
-    })
+    edge.label.as_ref().map(|label| label_cross_reach(axis, label))
 }
 
 /// The distance between each pair of neighbouring ends, listed in order along the
@@ -499,7 +523,7 @@ pub(super) fn grow_boxes(chart: &mut Flowchart) -> Option<()> {
     let reversed = cycle_closing_edges(chart)?;
     let mut entering = vec![0; chart.nodes.len()];
     let mut leaving = vec![0; chart.nodes.len()];
-    let mut loops: Vec<Vec<Option<&str>>> = vec![Vec::new(); chart.nodes.len()];
+    let mut loops: Vec<Vec<Option<&Label>>> = vec![Vec::new(); chart.nodes.len()];
     for (edge, &reversed) in chart.edges.iter().zip(&reversed) {
         // An invisible link meets no border.
         if !edge.stroke.is_visible() {
@@ -510,7 +534,7 @@ pub(super) fn grow_boxes(chart: &mut Flowchart) -> Option<()> {
         // The end at a frame meets no box.
         match (from, to) {
             (End::Node(from), End::Node(to)) if from == to => {
-                loops.get_mut(from)?.push(edge.label.as_deref());
+                loops.get_mut(from)?.push(edge.label.as_ref());
             }
             _ => {
                 if let End::Node(from) = from {
@@ -549,8 +573,8 @@ fn spread_for(node: &Node, axis: Axis, reach: usize) -> usize {
     match (&node.body, axis) {
         // A drawing keeps the size of its content; its links share cells instead.
         (Body::Drawing(_), _) => 0,
-        // The label row is a port row, and every row the box grows by on either
-        // side of it is one more; a hidden node's every cell is a port.
+        // The middle label row is a port row, and every row the box grew by around it
+        // is one more on either side; a hidden node's every cell is a port.
         (Body::Box { .. }, Axis::Horizontal) | (Body::Hidden, _) => reach,
         // The port cells run from one column inside the left corner to one inside
         // the right corner, around the centre column.
@@ -636,9 +660,10 @@ pub(super) struct Slot {
     pub port: usize,
     /// The cells the slot takes along the flow; `route` sizes a layer as the largest `main`
     /// of its slots. A node's box takes its size along the flow. A passing slot carrying a
-    /// label takes the label with a line cell on either side in a horizontal layout, and
-    /// the one row the label sits on in a vertical one, so that a layer with no node (as
-    /// under `A -----> B`) still has room for the label. Any other passing slot takes 0.
+    /// label takes its widest row plus a line cell on either side in a horizontal layout
+    /// (`label.width() + 2`), and its rows (`label.height()`) in a vertical one, so that a
+    /// layer with no node (as under `A -----> B`) still has room for the label. Any other
+    /// passing slot takes 0.
     pub main: usize,
 }
 
@@ -803,21 +828,22 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         group_subgraph_members(layer, &chain_of)?;
     }
     // The labels of each node's drawn self loops, in the order of their edges.
-    let mut loop_labels: Vec<Vec<Option<&str>>> = vec![Vec::new(); node_count];
+    let mut loop_labels: Vec<Vec<Option<&Label>>> = vec![Vec::new(); node_count];
     for edge in chart.edges.iter().filter(|edge| edge.stroke.is_visible()) {
         if let Some((from, to)) = edge.nodes()
             && from == to
         {
-            loop_labels.get_mut(from)?.push(edge.label.as_deref());
+            loop_labels.get_mut(from)?.push(edge.label.as_ref());
         }
     }
     // The cells across the flow the labels of each node's self loops reach past its box,
-    // before and after it; only a label across the flow, in a vertical layout, can. The
-    // loops' legs come after the node's other exits, whatever their order.
+    // before and after it: a label across the flow, in a vertical layout, or one with rows
+    // above or below its middle row, in a horizontal one. The loops' legs come after the
+    // node's other exits, whatever their order.
     let mut overhang = vec![(0, 0); node_count];
     for (node, labels) in loop_labels.iter().enumerate() {
         let Some(node_data) = chart.nodes.get(node) else { continue };
-        if axis == Axis::Horizontal || labels.iter().all(Option::is_none) {
+        if labels.iter().all(Option::is_none) {
             continue;
         }
         let targets = drawn.get(node)?.iter().filter(|&&drawn| drawn).count();
@@ -831,8 +857,8 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         let size = signed(axis.box_cross_size(node_data))?;
         for (&leg, label) in legs.iter().zip(labels) {
             let Some(label) = label else { continue };
-            let (_, first) = self_loop_label_at(axis, leg, label.width())?;
-            let end = first + signed(label.width())?;
+            let (_, first) = self_loop_label_at(axis, leg, label)?;
+            let end = first + signed(axis.label_size(label).1)?;
             let (before, after) = overhang.get_mut(node)?;
             *before = (*before).max(usize::try_from(-first).unwrap_or(0));
             *after = (*after).max(usize::try_from(end - size).unwrap_or(0));
@@ -864,7 +890,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         .zip(&paths)
         .filter_map(|(edge, path)| {
             let Some(LabelSpot::Slot(index)) = label_spot(path) else { return None };
-            Some((*path.get(index)?, labelled_slot_footprint(axis, edge.label.as_ref()?.width())))
+            Some((*path.get(index)?, labelled_slot_footprint(axis, edge.label.as_ref()?)))
         })
         .collect();
     // A passing slot is one cell across the flow, entered and left at that cell, or as
@@ -922,7 +948,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             // an invisible link fixes only the layer and the order of its target.
             let mut wanted_of = Vec::with_capacity(layer.len());
             // The first and last cells, from the slot's first cell, that the links entering
-            // each slot take on the label row of the gap before the layer: their entry
+            // each slot take on the label rows of the gap before the layer: their entry
             // cells and their labels. `None` when no drawn link enters the slot.
             let mut row_of = Vec::with_capacity(layer.len());
             // The labels of the links entering each slot: the link's other end and the
@@ -990,7 +1016,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                 }
                 next = wanted.map(|wanted| (slot, wanted)).or(next);
             }
-            // The last cell the previous slots take on the label row: a line, a label, or
+            // The last cell the previous slots take on the label rows: a line, a label, or
             // the border of a frame closing behind them that spans the layer before.
             let mut row_end: Option<isize> = None;
             for (((&slot, wanted), row), labels) in
@@ -1012,13 +1038,13 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     let title_end = frame_start + title_cells(current, &crossings, frame_start)?;
                     end = end.map(|end: isize| (end + frame_margin).max(title_end));
                     // A frame whose members start in this layer has its top border below
-                    // the label row.
+                    // the label rows.
                     if member_layers.get(current)?.0 < layer_index {
                         row_end = row_end.max(end.map(|end| end - 1));
                     }
                 }
                 let lead = frame_margin * signed(chain.len() - kept)?;
-                // The box keeps the gap from the box or frame before. The label row holds
+                // The box keeps the gap from the box or frame before. The label rows hold
                 // no box, so a label reaching past the slot keeps one blank cell from the
                 // lines, labels and frame borders before it there. A frame opening here
                 // encloses the labels of links from its own members, so such a label keeps

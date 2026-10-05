@@ -13,8 +13,8 @@ pub(super) struct Row {
     pub ends: [&'static str; 2],
 }
 
-/// A box drawn as a border row, an optional second border row, the label row and a
-/// border row.
+/// A box drawn as a border row, an optional second border row, a label row for each row
+/// of the label and a border row.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Outline {
     pub top: Row,
@@ -25,12 +25,12 @@ pub(super) struct Outline {
 }
 
 impl Outline {
-    /// Rows the box takes.
-    pub(super) fn height(&self) -> usize {
-        self.label_row() + 2
+    /// Rows the box takes around a label `rows` rows tall.
+    pub(super) fn height(&self, rows: usize) -> usize {
+        self.label_row() + rows + 1
     }
 
-    /// Rows from the box's top row to its label row.
+    /// Rows from the box's top row to its first label row.
     pub(super) fn label_row(&self) -> usize {
         1 + usize::from(self.rim.is_some())
     }

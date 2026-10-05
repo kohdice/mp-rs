@@ -2,6 +2,7 @@
 //! links, then draw.
 
 mod draw;
+mod label;
 mod layout;
 mod outline;
 mod parse;
