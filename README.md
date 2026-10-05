@@ -49,14 +49,15 @@ or redirected, no width limit applies and the content keeps its natural width.
   subroutine, cylinder, circle, double-circle, hexagon, parallelogram, trapezoid and
   asymmetric nodes, `@{ shape: … }` with a `label`, for those shapes, solid, dotted and
   thick links with arrow, circle and cross ends, invisible links `~~~` (a labelled
-  invisible link falls back), longer links, edge labels (on the line between
-  neighbouring layers, as Mermaid draws them; beside the line for longer links and self
-  loops), edge ids (`A e1@--> B`) with `e1@{ … }` data read and ignored, `&` groups,
+  invisible link falls back), longer links, edge labels (on the line, at the middle of
+  the link's span, as Mermaid draws them; beside the line for self loops), edge ids
+  (`A e1@--> B`) with `e1@{ … }` data read and ignored, `&` groups,
   nested `subgraph … end` blocks, `direction` inside a subgraph (ignored, as in Mermaid,
   when one of its nodes links outside), and links to and from subgraphs; a link that
   closes a cycle is drawn backwards. Styling statements
   such as `style` and `classDef`, and a `direction` statement outside a subgraph, are
-  accepted and ignored, as in Mermaid. Every link meets a box at a cell of its own, so a box with several links on
+  accepted and ignored, as in Mermaid.
+  Every link meets a box at a cell of its own, so a box with several links on
   one side is drawn taller (`LR`, `RL`) or wider (`TD`, `BT`) than its label needs.
   When the diagram is wider than the terminal, spacing is tightened; if it still does
   not fit, it renders as the plain code block.

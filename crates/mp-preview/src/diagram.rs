@@ -1556,30 +1556,114 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_label_of_a_back_edge_spanning_several_layers_has_room_of_its_own() {
+    fn mermaid_label_in_the_middle_gap_of_a_three_segment_link() {
+        let output = mermaid("flowchart TD\n    A --> B --> C --> D\n    A -->|x| D\n");
+        let [Some(b), Some(c), Some(d)] = ["B", "C", "D"].map(|label| box_bounds(&output, label))
+        else {
+            panic!("missing box in\n{output}");
+        };
+        let Some((row, col)) = position_of_word(&output, "x") else {
+            panic!("missing label in\n{output}");
+        };
+        let into_d = arrowheads(&output)
+            .into_iter()
+            .filter(|&(at, _, glyph)| at + 1 == d.0 && glyph == '▼')
+            .count();
+
+        assert_eq!(whole_words(&output, "x"), 1, "{output}");
+        assert!(b.2 < row && row < c.0, "{output}");
+        assert!(is_line_glyph(glyph_at(&output, row - 1, col)), "{output}");
+        assert!(is_line_glyph(glyph_at(&output, row + 1, col)), "{output}");
+        assert_eq!(into_d, 2, "{output}");
+        assert_eq!(arrowheads(&output).len(), 4, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C", "D"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_label_in_the_middle_gap_of_a_three_segment_link() {
+        let output = mermaid("flowchart LR\n    A --> B --> C --> D\n    A -->|x| D\n");
+        let [Some(b), Some(c)] = ["B", "C"].map(|label| box_bounds(&output, label)) else {
+            panic!("missing box in\n{output}");
+        };
+        let (row, col) = label_on_line(&output, "x");
+
+        assert_eq!(whole_words(&output, "x"), 1, "{output}");
+        assert!(row > b.2, "{output}");
+        assert_eq!(col, (b.3 + c.1) / 2, "{output}");
+        assert_eq!(count_glyph(&output, '►'), 4, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C", "D"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_label_of_a_two_segment_link_sits_on_the_passing_slot() {
+        let output = mermaid("flowchart TD\n    A --> B --> C\n    A -->|x| C\n");
+        let Some((b_row, _, b_right)) = box_of(&output, "B") else {
+            panic!("missing box in\n{output}");
+        };
+        let Some((row, col)) = position_of_word(&output, "x") else {
+            panic!("missing label in\n{output}");
+        };
+
+        assert_eq!(whole_words(&output, "x"), 1, "{output}");
+        assert_eq!(row, b_row, "{output}");
+        assert!(col > b_right, "{output}");
+        assert_eq!(glyph_at(&output, row - 1, col), Some('│'), "{output}");
+        assert_eq!(glyph_at(&output, row + 1, col), Some('│'), "{output}");
+        assert_eq!(arrowheads(&output).len(), 3, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_td_passing_slot_label_keeps_a_blank_from_its_neighbour() {
+        let output = mermaid("flowchart TD\n    A --> B --> C\n    A -->|wide one| C\n");
+        let Some((b_row, _, b_right)) = box_of(&output, "B") else {
+            panic!("missing box in\n{output}");
+        };
+        let Some((row, col)) = position_of_word(&output, "wide one") else {
+            panic!("missing label in\n{output}");
+        };
+
+        assert_eq!(output.matches("wide one").count(), 1, "{output}");
+        assert_eq!(row, b_row, "{output}");
+        assert!(col >= b_right + 2, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_lr_label_of_a_two_segment_link_runs_along_the_passing_line() {
+        let output = mermaid("flowchart LR\n    A --> B --> C\n    A -->|x| C\n");
+        let Some((_, b_left, b_bottom, b_right)) = box_bounds(&output, "B") else {
+            panic!("missing box in\n{output}");
+        };
+        let (row, col) = label_on_line(&output, "x");
+
+        assert_eq!(whole_words(&output, "x"), 1, "{output}");
+        assert!(row > b_bottom, "{output}");
+        assert!((b_left..=b_right).contains(&col), "{output}");
+        assert_eq!(count_glyph(&output, '►'), 3, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_label_of_a_back_edge_spanning_several_layers_rides_the_passing_line() {
         for direction in ["LR", "RL"] {
             let output = mermaid(&format!(
                 "flowchart {direction}\n    A --> B --> C\n    C -->|back again| A\n"
             ));
-            let Some((row, col)) = position_of_word(&output, "back") else {
-                panic!("missing label in\n{output}");
+            let [Some(b), Some(c)] = ["B", "C"].map(|label| box_bounds(&output, label)) else {
+                panic!("missing box in\n{output}");
             };
-            let after = col + "back again".width();
-            let unlabelled = mermaid(&format!("flowchart {direction}\n    A --> B --> C\n"));
-            // The columns from one box's border to the other's, whichever is on the left.
-            let b_to_c = |output: &str| {
-                let (Some((_, b_left, b_right)), Some((_, c_left, c_right))) =
-                    (box_of(output, "B"), box_of(output, "C"))
-                else {
-                    panic!("missing box in\n{output}");
-                };
-                if b_right < c_left { c_left - b_right } else { b_left - c_right }
-            };
+            let (row, first) = label_on_line(&output, "back again");
+            let last = first + "back again".width() - 1;
 
-            assert_eq!(b_to_c(&output), b_to_c(&unlabelled), "{output}\n{unlabelled}");
             assert_eq!(output.matches("back again").count(), 1, "{output}");
-            assert_eq!(glyph_at(&output, row, col - 1), Some(' '), "{output}");
-            assert!(matches!(glyph_at(&output, row, after), Some(' ') | None), "{output}");
+            assert!(row > b.2, "{output}");
+            if direction == "LR" {
+                assert!(b.1 <= first && last < c.1, "{output}");
+            } else {
+                assert!(last <= b.3 && c.3 < first, "{output}");
+            }
+            assert_eq!(arrowheads(&output).len(), 3, "{output}");
             assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
         }
     }

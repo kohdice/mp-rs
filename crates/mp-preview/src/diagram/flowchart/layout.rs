@@ -240,25 +240,57 @@ pub(super) type Reach = Option<(usize, usize)>;
 
 /// The cells a label `width` cells wide takes on either side of the cell it is centred
 /// on: an odd cell left over goes before it, as the label leans left.
-pub(super) fn label_reach(width: usize) -> (usize, usize) {
+fn label_reach(width: usize) -> (usize, usize) {
     (width / 2, width.saturating_sub(1) - width / 2)
 }
 
-/// The segment of a laid-out `path` whose gap holds the link's label on its line, placed
-/// by the routing: the one segment of a link between neighbouring layers. `None` for
-/// every other link, whose label `place_labels` looks for a place for.
-pub(super) fn routed_label_segment(path: &[usize]) -> Option<usize> {
-    (path.len() == 2).then_some(0)
+/// Where the routing places a link's label on its line: at Mermaid's label rank, half way
+/// between the link's laid-out ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LabelSpot {
+    /// In the gap that this segment of the laid-out path crosses: the middle segment of a
+    /// path with an odd number of segments (a link between neighbouring layers has one).
+    Gap(usize),
+    /// On the passing slot at this index of the laid-out path: the middle slot of a path
+    /// with an even number of segments.
+    Slot(usize),
+}
+
+/// Where the label of a link laid out along `path` goes (see [`LabelSpot`]). `None` for a
+/// self loop, whose label `place_labels` looks for a place for.
+pub(super) fn label_spot(path: &[usize]) -> Option<LabelSpot> {
+    let segments = path.len().checked_sub(1).filter(|&segments| segments > 0)?;
+    let middle = segments / 2;
+    Some(if segments % 2 == 1 { LabelSpot::Gap(middle) } else { LabelSpot::Slot(middle) })
+}
+
+/// The footprint of a passing slot carrying a label `width` cells wide, as
+/// `(main, cross, port_offset)`: the cells it takes along the flow, the cells it takes
+/// across the flow, and the offset of its port, where the line runs, from its first
+/// cell across the flow. Mermaid makes the label's dummy node a box the size of the
+/// label. In a horizontal layout the label runs along the line with a line cell on
+/// either side, so it takes `width + 2` cells along the flow and one row across; in a
+/// vertical one it takes the one row it sits on along the flow and `width` cells
+/// across. Across the flow the label is centred on the port with a blank cell on either
+/// side.
+fn labelled_slot_footprint(axis: Axis, width: usize) -> (usize, usize, usize) {
+    let (main, across) = match axis {
+        Axis::Horizontal => (width + 2, 1),
+        Axis::Vertical => (1, width),
+    };
+    let (before, _) = label_reach(across);
+    (main, across + 2, before + 1)
 }
 
 /// The reach of the label `edge` carries where `segment` of its laid-out `path` enters
-/// the next slot: only the segment of [`routed_label_segment`] carries one. In a vertical
-/// layout the label is centred across the flow on that cell; in a horizontal one it
-/// runs along the line on that cell's row, so it reaches no further across the flow,
-/// but still counts as a label: [`end_gaps`] keeps a blank row between a labelled line
-/// and the end next to it, so that two labels never read as one block of text.
+/// the next slot: only a label in the gap that segment crosses ([`LabelSpot::Gap`]) has
+/// a reach there. In a vertical layout the label is centred across the flow on that
+/// cell; in a horizontal one it runs along the line on that cell's row, so it reaches
+/// no further across the flow, but still counts as a label: [`end_gaps`] keeps a blank
+/// row between a labelled line and the end next to it, so that two labels never read as
+/// one block of text.
 pub(super) fn entry_reach(axis: Axis, edge: &Edge, path: &[usize], segment: usize) -> Reach {
-    if routed_label_segment(path) != Some(segment) {
+    if label_spot(path) != Some(LabelSpot::Gap(segment)) {
         return None;
     }
     edge.label.as_ref().map(|label| match axis {
@@ -453,7 +485,7 @@ fn spread_ports(
     ports
 }
 
-/// A place in a layer: a node's box, or a cell a link longer than one layer passes
+/// A place in a layer: a node's box, or the cells a link longer than one layer passes
 /// through.
 #[derive(Debug)]
 pub(super) struct Slot {
@@ -462,6 +494,12 @@ pub(super) struct Slot {
     pub cross: usize,
     /// The cell across the flow where links leave and enter.
     pub port: usize,
+    /// The cells the slot takes along the flow; `route` sizes a layer as the largest `main`
+    /// of its slots. A node's box takes its size along the flow. A passing slot carrying a
+    /// label takes the label with a line cell on either side in a horizontal layout, and
+    /// the one row the label sits on in a vertical one, so that a layer with no node (as
+    /// under `A -----> B`) still has room for the label. Any other passing slot takes 0.
+    pub main: usize,
 }
 
 #[derive(Debug)]
@@ -631,14 +669,28 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         }
         Some(position)
     };
-    // A passing slot is one cell across the flow, entered and left at that cell. A self
-    // loop runs through the cells after its box.
+    // The footprint of each passing slot that carries a label, keyed by slot index: only a
+    // label on a passing slot (`LabelSpot::Slot`) sizes a slot; a label in a gap gets its
+    // room from `route`'s gap sizing.
+    let slot_footprints: HashMap<usize, (usize, usize, usize)> = chart
+        .edges
+        .iter()
+        .zip(&paths)
+        .filter_map(|(edge, path)| {
+            let Some(LabelSpot::Slot(index)) = label_spot(path) else { return None };
+            Some((*path.get(index)?, labelled_slot_footprint(axis, edge.label.as_ref()?.width())))
+        })
+        .collect();
+    // A passing slot is one cell across the flow, entered and left at that cell, or as
+    // wide as the label it carries. A self loop runs through the cells after its box.
     let extent = |slot: usize| match chart.nodes.get(slot) {
         Some(node) => {
             let loop_cells = if loops.get(slot) > Some(&0) { SELF_LOOP_CELLS } else { 0 };
             (axis.box_cross_size(node) + loop_cells, axis.port_offset(node))
         }
-        None => (1, 0),
+        None => slot_footprints
+            .get(&slot)
+            .map_or((1, 0), |&(_, cross, port_offset)| (cross, port_offset)),
     };
 
     let frame_margin = signed(axis.frame_margins().1)?;
@@ -708,7 +760,10 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     .iter()
                     .map(|&parent| ports.get(parent).copied())
                     .collect::<Option<Vec<_>>>()?;
-                let cells = chart.nodes.get(slot).map_or(0..=0, |node| axis.port_range(node));
+                let cells = chart
+                    .nodes
+                    .get(slot)
+                    .map_or(port_offset..=port_offset, |node| axis.port_range(node));
                 let entries = port_cells(axis, &sources, &reach, &cells, port_offset)?;
                 let mut row: Option<(isize, isize)> = None;
                 let mut labels = Vec::new();
@@ -1050,11 +1105,17 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     let slots = layer_of
         .iter()
         .zip(starts.iter().zip(&ports))
-        .map(|(&layer, (&start, &port))| {
+        .enumerate()
+        .map(|(slot, (&layer, (&start, &port)))| {
+            let main = match chart.nodes.get(slot) {
+                Some(node) => axis.box_main_size(node),
+                None => slot_footprints.get(&slot).map_or(0, |&(main, ..)| main),
+            };
             Some(Slot {
                 layer,
                 cross: usize::try_from(start - origin).ok()?,
                 port: usize::try_from(port - origin).ok()?,
+                main,
             })
         })
         .collect::<Option<_>>()?;
