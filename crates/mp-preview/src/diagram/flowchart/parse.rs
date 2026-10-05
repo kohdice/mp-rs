@@ -153,6 +153,15 @@ pub(super) enum Stroke {
     Dotted,
     /// `==`.
     Thick,
+    /// `~~~`: the link places its target like any other but is not drawn.
+    Invisible,
+}
+
+impl Stroke {
+    /// Whether a link of this stroke is drawn, and so takes cells at its ends.
+    pub(super) fn is_visible(self) -> bool {
+        self != Self::Invisible
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +215,7 @@ pub(super) fn parse(source: &str) -> Result<Flowchart, Failure> {
         index_of: HashMap::new(),
         open: Vec::new(),
         subgraph_ids: Vec::new(),
+        edge_ids: HashSet::new(),
     };
     for (line, text) in statements {
         builder.statement(line, text)?;
@@ -323,6 +333,8 @@ struct Builder<'a> {
     /// The id of every subgraph, indexed like [`Flowchart::subgraphs`], which Mermaid
     /// lets a link point to.
     subgraph_ids: Vec<&'a str>,
+    /// The ids given to links (`A e1@--> B`), which an `e1@{ … }` statement refers to.
+    edge_ids: HashSet<&'a str>,
 }
 
 /// A subgraph whose `end` has not been read yet.
@@ -374,12 +386,31 @@ impl<'a> Builder<'a> {
             }
             return Ok(());
         }
+        // Data for a link declared earlier with an id: its keys (`animate`, `animation`,
+        // `curve`) have no text drawing, and upstream ignores the rest. The multi-line
+        // form, closed on a later line, is not read.
+        let (id, after_id) = split_id(statement);
+        if self.edge_ids.contains(id)
+            && let Some(data) = after_id.strip_prefix("@{")
+        {
+            let end = outside_quotes(data, '}').next().ok_or(Failure::Unsupported)?;
+            if data.get(end + 1..).is_some_and(|after| after.trim().is_empty()) {
+                return Ok(());
+            }
+        }
         let (mut sources, mut rest) = self.group(line, statement)?;
         while !rest.is_empty() {
-            let Some((Link { stroke, tail, head, label, length }, after_link)) = link(rest) else {
+            // An id is an edge id only when a link starts right after its `@`, so that an
+            // `@` inside a link's label stays label text.
+            let with_id = edge_id(rest)
+                .and_then(|(id, after_id)| Some((Some(id), link(after_id)?)))
+                .or_else(|| Some((None, link(rest)?)));
+            let Some((id, (Link { stroke, tail, head, label, length }, after_link))) = with_id
+            else {
                 // Line characters that do not make a whole link are a syntax error in
-                // Mermaid, and so is an id where a link should be, unless an `@` makes it
-                // an edge id (`A e1@--> B`), which is not drawn.
+                // Mermaid, and so is an id where a link should be. An id followed by `@`
+                // may be the edge id of a link form not read here, so it falls back
+                // rather than being reported as a syntax error.
                 if rest.strip_prefix('<').unwrap_or(rest).starts_with(['-', '=']) {
                     return Err(syntax_error(line, "unclosed link"));
                 }
@@ -389,7 +420,14 @@ impl<'a> Builder<'a> {
                 }
                 return Err(Failure::Unsupported);
             };
+            if let Some(id) = id {
+                self.edge_ids.insert(id);
+            }
             let (label, after_link) = match after_link.trim_start().strip_prefix('|') {
+                // Mermaid's grammar accepts a `|text|` label after `~~~`, but a link
+                // that is not drawn has no line to carry the text, so the block falls
+                // back rather than dropping the text.
+                Some(_) if !stroke.is_visible() => return Err(Failure::Unsupported),
                 Some(after_pipe) => {
                     let (label, after_label) = bracket_label(after_pipe, "|")
                         .ok_or_else(|| syntax_error(line, "unclosed edge label"))?;
@@ -861,9 +899,16 @@ struct Link<'a> {
 }
 
 /// Splits a link off the start of `text`. These are the `LINK` tokens of Mermaid's
-/// `flow.jison`, `[xo<]?--+[-xo>]`, `[xo<]?==+[=xo>]` and `[xo<]?-\.+-[xo>]?`, and their
-/// text forms `-- text -->`, `== text ==>` and `-. text .->`.
+/// `flow.jison`, `[xo<]?--+[-xo>]`, `[xo<]?==+[=xo>]`, `[xo<]?-\.+-[xo>]?` and `~~~+`,
+/// and their text forms `-- text -->`, `== text ==>` and `-. text .->`.
 fn link(text: &str) -> Option<(Link<'_>, &str)> {
+    if let Some(after_base) = text.strip_prefix("~~") {
+        let rest = after_base.trim_start_matches('~');
+        // Each tilde past the third lengthens the link, as each extra dash does.
+        let length = after_base.len() - rest.len();
+        let link = Link { stroke: Stroke::Invisible, tail: None, head: None, label: None, length };
+        return (length > 0).then_some((link, rest));
+    }
     let tail = match text.chars().next() {
         Some('<') => Some(Marker::Arrow),
         Some('o') => Some(Marker::Circle),
@@ -898,11 +943,23 @@ fn link(text: &str) -> Option<(Link<'_>, &str)> {
                 after_base.split_at_checked(find_after_quotes(after_base, doubled)?)?;
             (Some(unquoted(label.trim())), closing.get(2..)?)
         }
-        Stroke::Dotted => return None,
+        Stroke::Dotted | Stroke::Invisible => return None,
         Stroke::Solid | Stroke::Thick => (None, after_base),
     };
     let (head, length, rest) = link_end(stroke, closing)?;
     Some((Link { stroke, tail, head, label, length: length + dots }, rest))
+}
+
+/// Splits an edge id and the `@` after it off the start of `text`, for Mermaid's
+/// `LINK_ID` token `[^\s\"]+\@(?=[^\{\"])`, which stands before a link. The id ends at
+/// the first `@`: the token's greedy match may take the last one, which would swallow an
+/// `@` inside a following label, and that `@` stays label text here.
+fn edge_id(text: &str) -> Option<(&str, &str)> {
+    let token = text.split(|c: char| c.is_whitespace() || c == '"').next()?;
+    let at = token.find('@')?;
+    let (id, after_at) = (token.get(..at)?, text.get(at + 1..)?);
+    let next = after_at.chars().next()?;
+    (!id.is_empty() && next != '{' && next != '"').then_some((id, after_at))
 }
 
 /// The byte index of the first `close` in `text`, searching after the double-quoted
@@ -927,7 +984,7 @@ fn unquoted(text: &str) -> &str {
 /// The character repeated in a link of `stroke`, after its first two characters.
 fn line_char(stroke: Stroke) -> char {
     match stroke {
-        Stroke::Solid | Stroke::Dotted => '-',
+        Stroke::Solid | Stroke::Dotted | Stroke::Invisible => '-',
         Stroke::Thick => '=',
     }
 }

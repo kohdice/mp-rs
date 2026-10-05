@@ -138,7 +138,8 @@ fn marker_glyph(marker: Marker, heading: Direction) -> &'static str {
 
 fn line_glyphs(stroke: Stroke) -> LineGlyphs {
     let (horizontal, vertical) = match stroke {
-        Stroke::Solid => ("─", "│"),
+        // A scene holds no invisible link.
+        Stroke::Solid | Stroke::Invisible => ("─", "│"),
         Stroke::Dotted => ("┄", "┆"),
         Stroke::Thick => ("━", "┃"),
     };

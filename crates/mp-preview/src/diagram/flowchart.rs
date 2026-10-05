@@ -42,6 +42,15 @@ fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Lin
         return Err(Failure::Unsupported);
     }
     let axis = chart.direction.axis();
+    // How far apart labelled links must enter a box depends on the order they arrive
+    // in, which only a layout tells.
+    if chart.edges.iter().any(|edge| edge.label.is_some())
+        && let Some(spacing) = axis.spacings().first()
+    {
+        let layered =
+            layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?;
+        layout::grow_for_labels(&mut chart, &layered).ok_or(Failure::Unsupported)?;
+    }
     // The layout depends on the sibling gap alone, so spacings that differ only in the
     // layer gap reuse it.
     let mut cached: Option<(usize, layout::Layered)> = None;
@@ -52,14 +61,16 @@ fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Lin
             cached = Some((spacing.sibling_gap, layered));
         }
         let Some((_, layered)) = &cached else { continue };
-        let mut scene =
+        let (mut scene, routed) =
             route::route(&chart, layered, axis, spacing.layer_gap).ok_or(Failure::Unsupported)?;
         // Labels only add cells, so a scene already too large is not worth placing
         // them on.
         if !fits(&scene, axis, width) {
             continue;
         }
-        route::place_labels(&mut scene, axis);
+        let (labels, cross_shift) = route::place_labels(&scene, &routed, axis);
+        route::shift(&mut scene, &mut [], 0, cross_shift).ok_or(Failure::Unsupported)?;
+        scene.labels = labels;
         if fits(&scene, axis, width) {
             return Ok(draw::draw(&scene, chart.direction));
         }
