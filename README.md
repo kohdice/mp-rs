@@ -25,70 +25,26 @@ blocks:
 
 ### Width
 
-When stdout is a terminal, the output adapts to its width: paragraphs, headings, list
-items, and blockquotes reflow at word boundaries, and tables shrink their widest columns
-(wrapping cell content onto multiple lines) to fit, down to a small per-column minimum
-below which a very wide table can still overflow. A word wider than the available width
-is split between characters, never inside one. Code and HTML blocks are never wrapped.
-Prefixes, indivisible wide characters, and thematic breaks (at least one column) can also
-exceed a narrow width. Reflow drops separator spaces at line edges. When stdout is piped
-or redirected, no width limit applies and the content keeps its natural width.
+When stdout is a terminal, text reflows and tables shrink to fit its width. Code and HTML
+blocks are never wrapped. When stdout is piped or redirected, no width limit applies.
 
-### Rendering
+### Mermaid diagrams
 
-- Blank lines follow the document structure, not the source: consecutive blocks are
-  separated by one blank line however many the source has, and list items are separated
-  by a blank line only when the list is loose.
-- Links show their URL in parentheses after the text, unless the text already is the URL.
-- Alerts render as blockquotes whose first line is the alert label or its custom title.
-- Tabs in code and HTML blocks expand to 4-column tab stops; elsewhere a tab, or a line
-  break written as a reference such as `&#10;`, renders as one space.
-- A ```` ```mermaid ```` block holding a `flowchart` or `graph` diagram renders as boxes
-  joined by box-drawing lines, in place of the code block. Supported: all five
-  directions (`TD`, `TB`, `BT`, `LR`, `RL`), rectangle, rounded, diamond, stadium,
-  subroutine, cylinder, circle, double-circle, hexagon, parallelogram, trapezoid and
-  asymmetric nodes, `@{ shape: … }` with a `label`, for those shapes, solid, dotted and
-  thick links with arrow, circle and cross ends, invisible links `~~~` (a labelled
-  invisible link falls back), longer links, edge labels (on the line, at the middle of
-  the link's span, as Mermaid draws them), self loops (a bump on the border the box's
-  links leave by, with the label just outside the loop), edge ids
-  (`A e1@--> B`) with `e1@{ … }` data read and ignored, `&` groups,
-  nested `subgraph … end` blocks, `direction` inside a subgraph (ignored, as in Mermaid,
-  when one of its nodes links outside), and links to and from subgraphs; a link that
-  closes a cycle is drawn backwards. `%%` comments and a `direction` statement outside
-  a subgraph are skipped, as in Mermaid. `style`, `classDef`, `class`, `linkStyle` and
-  `click` statements are read and ignored: a text drawing has no colors or clicks.
-  Where character output cannot reproduce Mermaid's rendering, the drawing differs
-  from the browser's: shapes are built from box-drawing glyphs (a circle and a double
-  circle are told from a stadium only by their inset top and bottom rows, a cylinder
-  is one row taller than the other shapes, and an asymmetric node's notch is one
-  column deep); lines run horizontally and vertically only, and a link that turns
-  carries its label after its last turn rather than at the middle of a curve; one
-  blank cell separates what Mermaid separates by pixels; a self loop sits after its
-  box's other links instead of at the centre of the border, its label touching the
-  loop (`TD`, `BT`) or one cell from it (`LR`, `RL`), and those other links keep a
-  blank cell from that label; which link of a cycle is drawn backwards follows
-  declaration order; a subgraph with its own `direction` is drawn as a unit whose
-  links meet its frame at port cells; the label of a link entering a subgraph stays
-  outside the frame; and a box is centred over the targets of its drawn links only,
-  not over those of invisible ones.
-  Every link meets a box at a cell of its own, so a box with several links on
-  one side is drawn taller (`LR`, `RL`) or wider (`TD`, `BT`) than its label needs.
-  When the diagram is wider than the terminal, spacing is tightened; if it still does
-  not fit, it renders as the plain code block.
-  A diagram whose drawing would exceed an internal size limit also renders as the plain
-  code block, as does one that cannot be laid out: a subgraph whose frame would have to
-  cover a box outside it, or a subgraph with its own `direction` that a link joins to
-  the outside at a subgraph rather than at a node.
-- A Mermaid block that is not valid Mermaid renders as the plain code block with one line
-  above it naming the problem, such as `mermaid: line 2: unclosed node label`; this also
-  applies to diagrams over Mermaid's limits of 50 000 characters or 500 edges. Other
-  diagram types, a diagram with no nodes, and features not supported yet (the ellipse
-  `(- -)`, images and the other `@{ shape }` names, and multi-line `@{ }`) render as the
-  plain code block without that line.
-- Other control characters, including ones written as references such as `&#27;`, are
-  shown as control pictures such as `␛`, and C1 control characters such as `&#155;` as
-  `�`, so a document can never inject escape sequences into the terminal.
+A ` ```mermaid ` block holding a `flowchart` or `graph` diagram renders as boxes joined by
+box-drawing lines, in place of the code block. The drawing is built from characters, so it
+only approximates what a browser shows: shapes are made of box-drawing glyphs, lines run
+horizontally and vertically only, and a diagram has no colors.
+
+The block renders as a plain code block instead when the diagram is wider than the
+terminal, when it is another diagram type, or when it uses a feature that is not supported
+yet. A block that is not valid Mermaid also renders as a plain code block, with one line
+above it naming the problem, such as `mermaid: line 2: unclosed node label`.
+
+### Safety
+
+Control characters in the document, including ones written as references such as `&#27;`,
+are shown as control pictures such as `␛`, so a document can never inject escape sequences
+into the terminal.
 
 ### Exit status
 
