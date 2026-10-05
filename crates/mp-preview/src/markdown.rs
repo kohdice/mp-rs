@@ -3,6 +3,7 @@
 use comrak::nodes::{AlertType, ListType, NodeValue, TableAlignment};
 use comrak::{Arena, Node, Options, parse_document};
 
+use crate::control::visualize_control;
 use crate::model::{Align, Block, Inline, ListItem};
 
 /// Parses a whole document into blocks; empty or whitespace-only input gives no blocks,
@@ -164,18 +165,6 @@ fn sanitize_block_body(text: &str) -> String {
             _ => visualize_control(character),
         })
         .collect()
-}
-
-/// Replaces a C0 control or DEL with its Unicode Control Picture and a C1 control with
-/// U+FFFD, which stands in for the C1 pictures Unicode lacks, so decoded input cannot
-/// drive the terminal. Any other character is returned unchanged.
-fn visualize_control(character: char) -> char {
-    match character {
-        '\0'..='\x1f' => char::from_u32(0x2400 + u32::from(character)).unwrap_or(character),
-        '\x7f' => '\u{2421}',
-        '\u{80}'..='\u{9f}' => char::REPLACEMENT_CHARACTER,
-        _ => character,
-    }
 }
 
 fn comrak_options() -> Options<'static> {
