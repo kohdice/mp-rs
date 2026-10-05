@@ -36,10 +36,10 @@ Markdown text ──> markdown ──> model ──> layout ──> ansi ──>
 
 The project is a Cargo workspace whose members live under `crates/*`.
 
-| Crate               | Responsibility                                                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, file reading, error-to-exit-code mapping. |
-| `crates/mp-preview` | Library: Markdown parsing, terminal layout, and ANSI encoding behind the single `preview` function.        |
+| Crate               | Responsibility                                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, file reading, error-to-exit-code mapping.                     |
+| `crates/mp-preview` | Library: Markdown parsing, terminal layout, Mermaid flowchart drawing, and ANSI encoding behind the single `preview` function. |
 
 ## Dependency graph
 
@@ -86,3 +86,8 @@ These are guarantees the code relies on; changing one requires updating its cons
 - **Width handling is the library's job.** The binary only detects whether stdout is a
   terminal and how wide it is; every wrapping and table-shrinking decision is made in
   `layout` from the `Options` it receives.
+- **Mermaid diagrams follow upstream Mermaid.** `diagram` accepts the syntax Mermaid
+  accepts, rejects what Mermaid rejects, and applies Mermaid's limits, so a block that
+  renders in a browser renders here and vice versa. It deviates only where character
+  output cannot reproduce Mermaid's result (shapes, curves, label placement), and every
+  such deviation is stated in `README.md` next to the feature it affects.
