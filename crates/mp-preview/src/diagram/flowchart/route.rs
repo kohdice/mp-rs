@@ -9,7 +9,8 @@ use super::layout::{
     entry_reach, exit_cells, frame_width, label_cross_reach, label_spot, port_cells,
     scatter_by_order, self_loop_cells, self_loop_label_at, title_offset,
 };
-use super::parse::{Direction, Edge, End, Flowchart, Node, Subgraph};
+use super::outline::outline;
+use super::parse::{Body, Direction, Edge, End, Flowchart, Node, Subgraph};
 use super::signed;
 
 /// A drawing before it is oriented on screen.
@@ -277,12 +278,14 @@ pub(super) fn route<'a>(
                     let at = (signed(out + along)?, cross);
                     routed.push(RoutedLabel { link: scene.links.len(), label: text, at });
                 }
-                let points = self_loop(axis, node, main, exit_cell);
+                let inset = side_inset(chart.direction, node, true);
+                let points = self_loop(axis, node, main, exit_cell, inset);
                 scene.links.push(Route { edge, points });
                 continue;
             }
             let out = match chart.nodes.get(first) {
-                Some(node) => layer_start.get(first_slot.layer)? + axis.box_main_size(node),
+                Some(node) => (layer_start.get(first_slot.layer)? + axis.box_main_size(node))
+                    .checked_sub(side_inset(chart.direction, node, true))?,
                 None => gap_start(first_slot.layer)?,
             };
             let mut points = vec![(out, exit_cell)];
@@ -359,7 +362,8 @@ pub(super) fn route<'a>(
                 routed.push(RoutedLabel { link: scene.links.len(), label: text, at });
             }
             let entry = *entries.last()?;
-            let into = layer_start.get(slots.get(last)?.layer)?.checked_sub(1)?;
+            let into = layer_start.get(slots.get(last)?.layer)?.checked_sub(1)?
+                + chart.nodes.get(last).map_or(0, |node| side_inset(chart.direction, node, false));
             points.push((into, entry));
             if reversed {
                 points.reverse();
@@ -984,10 +988,33 @@ fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<us
 /// A loop that leaves the box's far border along the flow at `port`, runs on through
 /// the [`SELF_LOOP_CELLS`] cells beyond that border, and re-enters the border
 /// [`SELF_LOOP_SPAN`] cells further across the flow, as Mermaid draws a self loop as a
-/// rectangle on the side its node's links leave by.
-fn self_loop(axis: Axis, node: &Node, main: usize, port: usize) -> Vec<(usize, usize)> {
+/// rectangle on the side its node's links leave by. Its legs start `inset` cells inside
+/// that border (see [`side_inset`]).
+fn self_loop(
+    axis: Axis,
+    node: &Node,
+    main: usize,
+    port: usize,
+    inset: usize,
+) -> Vec<(usize, usize)> {
     let out = main + axis.box_main_size(node);
     let far = out + SELF_LOOP_CELLS - 1;
     let back = port + SELF_LOOP_SPAN;
-    vec![(out, port), (far, port), (far, back), (out, back)]
+    let side = out.saturating_sub(inset);
+    vec![(side, port), (far, port), (far, back), (side, back)]
+}
+
+/// Cells from `node`'s bounding edge to its side glyph on the label rows, on the side
+/// links leave it by when `leaving` and on the one they enter it by otherwise: a link
+/// along a horizontal flow runs on through them, so that it meets the side as upstream's
+/// meets the shape's outline. None along a vertical flow, whose ports lie between the
+/// border's ends (see [`Axis::port_range`]).
+fn side_inset(direction: Direction, node: &Node, leaving: bool) -> usize {
+    match (&node.body, direction.axis()) {
+        // The side links leave by is the right one on screen, unless the flow points left.
+        (Body::Box { shape, .. }, Axis::Horizontal) => {
+            outline(*shape).side_inset(leaving != direction.points_backward())
+        }
+        _ => 0,
+    }
 }

@@ -193,6 +193,19 @@ mod tests {
         (row, col)
     }
 
+    /// The part of `line` from display column `col` on, counted as [`glyph_at`] counts;
+    /// empty when the line ends before it.
+    fn from_column(line: &str, col: usize) -> &str {
+        let mut start = 0;
+        for (at, c) in line.char_indices() {
+            if start >= col {
+                return line.get(at..).unwrap_or_default();
+            }
+            start += c.width().unwrap_or(0);
+        }
+        ""
+    }
+
     /// The character whose first display column is `col` on line `row`.
     fn glyph_at(output: &str, row: usize, col: usize) -> Option<char> {
         let mut start = 0;
@@ -533,15 +546,161 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_deferred_node_shapes_fall_back_without_a_reason_line() {
-        for body in [
-            "flowchart LR\n    A(-x-)\n",
-            "flowchart LR\n    A@{ shape: cloud }\n",
-            "flowchart LR\n    A@{ icon: \"fa:bell\" }\n",
-            "flowchart LR\n    A@{\n    shape: rect\n    }\n",
-        ] {
-            assert_eq!(mermaid(body), format!("```mermaid\n{body}```"), "{body}");
+    fn mermaid_icon_shape_falls_back_without_a_reason_line() {
+        let body = "flowchart LR\n    A@{ icon: \"fa:bell\" }\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+    }
+
+    #[test]
+    fn mermaid_multi_line_shape_data_is_read() {
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    A@{\n        shape: stadium\n        label: \"Done\"\n    }\n"
+            ),
+            "╭──────╮\n( Done )\n╰──────╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_multi_line_shape_data_allows_a_trailing_comma() {
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    A@{\n        shape: stadium,\n        label: \"Done\"\n    }\n"
+            ),
+            "╭──────╮\n( Done )\n╰──────╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_line_break_in_a_double_quoted_shape_data_value_breaks_the_label() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ label: \"two\n        rows\" }\n"),
+            mermaid("flowchart LR\n    A[\"two<br>rows\"]\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_line_break_in_a_single_quoted_shape_data_value_folds_to_a_blank() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ label: 'two\n        rows' }\n"),
+            mermaid("flowchart LR\n    A[two rows]\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_empty_shape_data_values_are_ignored() {
+        for data in ["shape: ", "label: \"\" ", "label: "] {
+            assert_eq!(
+                mermaid(&format!("flowchart LR\n    A@{{ {data}}}\n")),
+                mermaid("flowchart LR\n    A\n"),
+                "{data}"
+            );
         }
+    }
+
+    #[test]
+    fn mermaid_shape_data_comment_runs_to_the_end_of_its_line() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{\n        shape: stadium # process\n    }\n"),
+            "╭───╮\n( A )\n╰───╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_shape_data_colon_without_a_blank_after_it_is_part_of_the_key() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{shape:stadium}\n"),
+            mermaid("flowchart LR\n    A\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_shape_data_comment_swallowing_the_closing_brace_is_a_syntax_error() {
+        let body = "flowchart LR\n    A@{ shape: stadium # process }\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 2: unclosed shape data\n```mermaid\n{body}```")
+        );
+    }
+
+    #[test]
+    fn mermaid_at_brace_in_an_edge_text_is_label_text() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A -- x@{y --> B\n    B --> C\n"),
+            "┌───┐       ┌───┐     ┌───┐\n│ A │─x@{y─►│ B │────►│ C │\n└───┘       └───┘     └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_single_quoted_shape_data_value_drops_its_quotes() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ label: 'it''s' }\n"),
+            "┌──────┐\n│ it's │\n└──────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_escaped_quotes_in_shape_data_values_are_kept() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ label: \"a \\\"b\\\" c\" }\n"),
+            "┌─────────┐\n│ a \"b\" c │\n└─────────┘"
+        );
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ label: \"a \\\\ b\" }\n"),
+            "┌───────┐\n│ a \\ b │\n└───────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_unclosed_multi_line_shape_data_is_a_syntax_error() {
+        let body = "flowchart LR\n    A@{\n        shape: stadium\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 2: unclosed shape data\n```mermaid\n{body}```")
+        );
+    }
+
+    #[test]
+    fn mermaid_unknown_shape_beside_an_icon_is_a_syntax_error_in_either_order() {
+        for data in ["icon: x, shape: bogus", "shape: bogus, icon: x"] {
+            let body = format!("flowchart LR\n    A@{{ {data} }}\n");
+            assert_eq!(
+                mermaid(&body),
+                format!("mermaid: line 2: no such shape \"bogus\"\n```mermaid\n{body}```"),
+                "{data}"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_text_after_a_quoted_shape_data_value_is_a_syntax_error() {
+        let body = "flowchart LR\n    A@{ label: \"Done\" shape: cloud }\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 2: invalid shape data\n```mermaid\n{body}```")
+        );
+    }
+
+    #[test]
+    fn mermaid_unclosed_multi_line_edge_data_is_a_syntax_error() {
+        let body = "flowchart LR\n    A e1@--> B\n    e1@{\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 3: unclosed shape data\n```mermaid\n{body}```")
+        );
+    }
+
+    #[test]
+    fn mermaid_multi_line_edge_data_is_read_and_dropped() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A e1@--> B\n    e1@{\n        animate: true\n    }\n"),
+            mermaid(LR_A_TO_B)
+        );
     }
 
     #[test]
@@ -653,6 +812,21 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_ellipse_node_is_wider_than_a_circle() {
+        assert_eq!(mermaid("flowchart LR\n    A(-Done-)\n"), "  ╭────╮\n ( Done )\n  ╰────╯");
+    }
+
+    #[test]
+    fn mermaid_unclosed_ellipse_is_a_syntax_error() {
+        let body = "flowchart LR\n    A(-x)\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 2: unclosed node label\n```mermaid\n{body}```")
+        );
+    }
+
+    #[test]
     fn mermaid_cylinder_node_has_an_elliptical_top() {
         assert_eq!(
             mermaid("flowchart LR\n    A[(Done)]\n"),
@@ -695,11 +869,7 @@ mod tests {
 
     #[test]
     fn mermaid_shape_data_sets_the_shape_and_keeps_the_id_as_label() {
-        for body in
-            ["flowchart LR\n    A@{ shape: stadium }\n", "flowchart LR\n    A@{shape:stadium}\n"]
-        {
-            assert_eq!(mermaid(body), "╭───╮\n( A )\n╰───╯", "{body}");
-        }
+        assert_eq!(mermaid("flowchart LR\n    A@{ shape: stadium }\n"), "╭───╮\n( A )\n╰───╯");
     }
 
     #[test]
@@ -737,7 +907,7 @@ mod tests {
 
     #[test]
     fn mermaid_unknown_shape_data_shape_is_a_syntax_error() {
-        for name in ["blob", "Rect"] {
+        for name in ["blob", "Rect", "squareRect", "rect_left_inv_arrow"] {
             let body = format!("flowchart LR\n    A@{{ shape: {name} }}\n");
             assert_eq!(
                 mermaid(&body),
@@ -757,7 +927,7 @@ mod tests {
             (&["fr-rect", "framed-rectangle", "subproc", "subprocess", "subroutine"], "A[[A]]"),
             (&["cyl", "cylinder", "database", "db"], "A[(A)]"),
             (&["circle", "circ"], "A((A))"),
-            (&["dbl-circ", "double-circle"], "A(((A)))"),
+            (&["dbl-circ", "double-circle", "doublecircle"], "A(((A)))"),
             (&["hex", "hexagon", "prepare"], "A{{A}}"),
             (&["lean-r", "lean-right", "in-out"], "A[/A/]"),
             (&["lean-l", "lean-left", "out-in"], "A[\\A\\]"),
@@ -773,6 +943,256 @@ mod tests {
                 let body = format!("flowchart LR\n    A@{{ shape: {name} }}\n");
                 assert_eq!(mermaid(&body), expected, "{name}");
             }
+        }
+    }
+
+    /// Asserts that each `(name, rows)` node `A@{ shape: name, label: Done }` renders
+    /// exactly `rows`, one under another.
+    fn assert_shapes_render(shapes: &[(&str, &[&str])]) {
+        for (name, rows) in shapes {
+            let body = format!("flowchart LR\n    A@{{ shape: {name}, label: Done }}\n");
+            assert_eq!(mermaid(&body), rows.join("\n"), "{name}");
+        }
+    }
+
+    #[test]
+    fn mermaid_rectangle_family_shapes_render() {
+        assert_shapes_render(&[
+            ("notch-rect", &[" ╱─────┐", "│ Done │", "└──────┘"]),
+            ("lin-rect", &["┌┬──────┐", "││ Done │", "└┴──────┘"]),
+            ("div-rect", &["┌──────┐", "├──────┤", "│ Done │", "└──────┘"]),
+            ("tag-rect", &["┌──────┐", "│ Done │", "└──────╱┘"]),
+            ("notch-pent", &[" ╱────╲", "│ Done │", "└──────┘"]),
+            ("sl-rect", &["  ╱─────┐", " ╱ Done │", "└───────┘"]),
+            ("delay", &["┌──────╮", "│ Done )", "└──────╯"]),
+            ("bow-rect", &["╭──────╮", ") Done )", "╰──────╯"]),
+            ("curv-trap", &[" ╱─────╮", "< Done )", " ╲─────╯"]),
+            ("console", &["┏━━━━━━┓", "┃ Done ┃", "┗━━━━━━┛"]),
+            ("browser", &["┌○─────┐", "│ Done │", "└──────┘"]),
+            ("bucket", &["╭──────╮", "│ Done │", " ╲────╱"]),
+        ]);
+    }
+
+    #[test]
+    fn mermaid_document_family_shapes_render() {
+        assert_shapes_render(&[
+            ("doc", &["┌──────┐", "│ Done │", "└~~~~~~┘"]),
+            ("lin-doc", &["┌┬──────┐", "││ Done │", "└┴~~~~~~┘"]),
+            ("tag-doc", &["┌──────┐", "│ Done │", "└~~~~~~╱┘"]),
+            ("flag", &["┌~~~~~~┐", "│ Done │", "└~~~~~~┘"]),
+            ("docs", &[" ┌──────┐", "┌┴─────┐│", "│ Done ├┘", "└~~~~~~┘"]),
+            ("st-rect", &[" ┌──────┐", "┌┴─────┐│", "│ Done ├┘", "└──────┘"]),
+            ("folder", &["┌───┐", "├───┴──┐", "│ Done │", "└──────┘"]),
+        ]);
+    }
+
+    #[test]
+    fn mermaid_storage_family_shapes_render() {
+        assert_shapes_render(&[
+            ("win-pane", &["┌┬──────┐", "├┼──────┤", "││ Done │", "└┴──────┘"]),
+            ("h-cyl", &["╭┬──────╮", "(│ Done )", "╰┴──────╯"]),
+            ("lin-cyl", &["╭──────╮", "╞══════╡", "│ Done │", "╰──────╯"]),
+            ("datastore", &["━━━━━━━━", "  Done", "━━━━━━━━"]),
+        ]);
+    }
+
+    #[test]
+    fn mermaid_triangle_family_shapes_render() {
+        assert_shapes_render(&[
+            ("tri", &["  ╱────╲", " ╱ Done ╲", "└────────┘"]),
+            ("flip-tri", &["┌────────┐", " ╲ Done ╱", "  ╲────╱"]),
+            ("hourglass", &["┌──────┐", "╲ Done ╱", "╱──────╲", "└──────┘"]),
+        ]);
+    }
+
+    #[test]
+    fn mermaid_comment_shapes_render_as_braces() {
+        assert_shapes_render(&[
+            ("brace", &["╭", "┤ Done", "╰"]),
+            ("brace-r", &["       ╮", "  Done ├", "       ╯"]),
+            ("braces", &["╭      ╮", "┤ Done ├", "╰      ╯"]),
+        ]);
+    }
+
+    #[test]
+    fn mermaid_pictorial_shapes_render() {
+        assert_shapes_render(&[
+            ("bang", &["╲^^^^^^╱", "> Done <", "╱vvvvvv╲"]),
+            ("cloud", &["╭~~~~~~╮", "( Done )", "╰~~~~~~╯"]),
+            ("bolt", &[" ╲─────╲", "╱ Done ╱", " ╲─────╲"]),
+            ("person", &["   ╭╮", "╭──┴┴──╮", "│ Done │", "╰──────╯"]),
+        ]);
+    }
+
+    #[test]
+    fn mermaid_text_block_has_no_border() {
+        assert_eq!(mermaid("flowchart LR\n    A@{ shape: text, label: Done }\n"), "\n Done\n");
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ shape: text } --> B\n"),
+            "        ┌───┐\n A ────►│ B │\n        └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_label_free_shapes_hide_their_label() {
+        let shapes: [(&str, &[&str]); 5] = [
+            ("fork", &["▄▄▄▄▄▄▄▄", "████████", "▀▀▀▀▀▀▀▀"]),
+            ("sm-circ", &[" ╭─╮", "(   )", " ╰─╯"]),
+            ("fr-circ", &[" ╭─╮", "( ● )", " ╰─╯"]),
+            ("f-circ", &[" ╭─╮", "(███)", " ╰─╯"]),
+            ("cross-circ", &[" ╭─╮", "( ╳ )", " ╰─╯"]),
+        ];
+        assert_shapes_render(&shapes);
+    }
+
+    #[test]
+    fn mermaid_every_documented_shape_alias_renders_like_its_short_name() {
+        let names: [(&str, &[&str]); 30] = [
+            ("notch-rect", &["card", "notched-rectangle"]),
+            ("lin-rect", &["lined-rectangle", "lined-process", "lin-proc", "shaded-process"]),
+            ("div-rect", &["div-proc", "divided-rectangle", "divided-process"]),
+            ("tag-rect", &["tagged-rectangle", "tag-proc", "tagged-process"]),
+            ("doc", &["document"]),
+            ("lin-doc", &["lined-document"]),
+            ("tag-doc", &["tagged-document"]),
+            ("docs", &["documents", "st-doc", "stacked-document"]),
+            ("st-rect", &["procs", "processes", "stacked-rectangle"]),
+            ("folder", &["directory"]),
+            ("fork", &["join"]),
+            ("delay", &["half-rounded-rectangle"]),
+            ("tri", &["extract", "triangle"]),
+            ("flip-tri", &["manual-file", "flipped-triangle"]),
+            ("sl-rect", &["manual-input", "sloped-rectangle"]),
+            ("curv-trap", &["curved-trapezoid", "display"]),
+            ("notch-pent", &["loop-limit", "notched-pentagon"]),
+            ("hourglass", &["collate"]),
+            ("bow-rect", &["stored-data", "bow-tie-rectangle"]),
+            ("win-pane", &["internal-storage", "window-pane"]),
+            ("h-cyl", &["das", "horizontal-cylinder"]),
+            ("lin-cyl", &["disk", "lined-cylinder"]),
+            ("brace", &["comment", "brace-l"]),
+            ("bolt", &["com-link", "lightning-bolt"]),
+            ("datastore", &["data-store"]),
+            ("sm-circ", &["start", "small-circle"]),
+            ("fr-circ", &["stop", "framed-circle"]),
+            ("f-circ", &["junction", "filled-circle"]),
+            ("cross-circ", &["summary", "crossed-circle"]),
+            ("flag", &["paper-tape"]),
+        ];
+        let node = |name: &str| {
+            mermaid(&format!("flowchart LR\n    A@{{ shape: {name}, label: Done }}\n"))
+        };
+        for (short, aliases) in names {
+            let expected = node(short);
+            for alias in aliases {
+                assert_eq!(node(alias), expected, "{alias}");
+            }
+        }
+    }
+
+    #[test]
+    fn mermaid_lr_link_into_a_four_row_shape_enters_on_its_label_row() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A --> B@{ shape: docs, label: D }\n"),
+            "           ┌───┐\n┌───┐     ┌┴──┐│\n│ A │────►│ D ├┘\n└───┘     └~~~┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_td_links_into_an_inset_top_border_end_on_the_border() {
+        for target in ["D(-x-)", "D@{ shape: tri, label: x }"] {
+            let output =
+                mermaid(&format!("flowchart TD\n    A --> {target}\n    B --> D\n    C --> D\n"));
+            let heads = arrowheads(&output);
+            assert_eq!(heads.len(), 3, "{target}\n{output}");
+            for (row, col, _) in heads {
+                let below = glyph_at(&output, row + 1, col);
+                assert!(below.is_some_and(|glyph| glyph != ' '), "{target}\n{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn mermaid_td_links_out_of_an_inset_bottom_border_start_on_the_border() {
+        let output = mermaid(
+            "flowchart TD\n    D@{ shape: flip-tri, label: x } --> A\n    D --> B\n    D --> C\n",
+        );
+        let Some((label_row, _)) = position_of_word(&output, "x") else { panic!("{output}") };
+        let bottom = label_row + 1;
+        let Some(width) = output.lines().nth(bottom + 1).map(UnicodeWidthStr::width) else {
+            panic!("{output}");
+        };
+        let exits: Vec<usize> =
+            (0..width).filter(|&col| glyph_at(&output, bottom + 1, col) == Some('│')).collect();
+        assert_eq!(exits.len(), 3, "{output}");
+        for col in exits {
+            let border = glyph_at(&output, bottom, col);
+            assert!(border.is_some_and(|glyph| glyph != ' '), "{output}");
+        }
+    }
+
+    #[test]
+    fn mermaid_lr_link_into_an_inset_label_row_meets_its_side() {
+        for (body, expected) in [
+            (
+                "flowchart LR\n    A --> B(-x-)\n",
+                "┌───┐       ╭─╮\n│ A │─────►( x )\n└───┘       ╰─╯",
+            ),
+            (
+                "flowchart RL\n    A --> B(-x-)\n",
+                "  ╭─╮       ┌───┐\n ( x )◄─────│ A │\n  ╰─╯       └───┘",
+            ),
+            (
+                "flowchart LR\n    A --> B>x]\n",
+                "┌───┐     ╲────┐\n│ A │─────►> x │\n└───┘     ╱────┘",
+            ),
+        ] {
+            assert_eq!(mermaid(body), expected, "{body}");
+        }
+    }
+
+    #[test]
+    fn mermaid_brace_points_once_on_the_middle_label_row() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ shape: brace, label: \"two<br>rows\" }\n"),
+            "╭\n┤ two\n│ rows\n╰"
+        );
+    }
+
+    #[test]
+    fn mermaid_stacked_shape_second_sheet_ends_beside_the_last_label_row() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A@{ shape: docs, label: \"a<br>b\" }\n"),
+            " ┌───┐\n┌┴──┐│\n│ a ││\n│ b ├┘\n└~~~┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_grown_shapes_keep_their_own_sides() {
+        let shapes: [(&str, &[&str]); 5] = [
+            ("datastore", &["━━━━━━━━", "", "  Done", "", "━━━━━━━━"]),
+            ("console", &["┏━━━━━━┓", "┃      ┃", "┃ Done ┃", "┃      ┃", "┗━━━━━━┛"]),
+            ("brace", &["╭", "│", "┤ Done", "│", "╰"]),
+            ("fork", &["▄▄▄▄▄▄▄▄", "████████", "████████", "████████", "▀▀▀▀▀▀▀▀"]),
+            (
+                "docs",
+                &[" ┌──────┐", "┌┴─────┐│", "│      ││", "│ Done ││", "│      ├┘", "└~~~~~~┘"],
+            ),
+        ];
+        for (name, rows) in shapes {
+            let output = mermaid(&format!(
+                "flowchart LR\n    A --> D@{{ shape: {name}, label: Done }}\n    B --> D\n    C --> D\n"
+            ));
+            // D's column lies past the sources' boxes and the arrowheads before it.
+            let Some(arrowhead) = arrowheads(&output).first().map(|&(_, col, _)| col) else {
+                panic!("{output}");
+            };
+            let d_cols: Vec<&str> =
+                output.lines().map(|line| from_column(line, arrowhead + 1)).collect();
+            let first = d_cols.iter().position(|line| !line.is_empty());
+            let last = d_cols.iter().rposition(|line| !line.is_empty());
+            let (Some(first), Some(last)) = (first, last) else { panic!("{output}") };
+            assert_eq!(d_cols.get(first..=last), Some(rows), "{name}\n{output}");
         }
     }
 

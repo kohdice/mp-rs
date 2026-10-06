@@ -115,6 +115,12 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Grows the canvas to at least `row + 1` rows, so that a row left blank, such as a
+    /// text block's border, still becomes a line.
+    pub(crate) fn reach_row(&mut self, row: usize) {
+        self.cells(row, 0);
+    }
+
     /// Row `row`, grown to at least `len` cells.
     fn cells(&mut self, row: usize, len: usize) -> Option<&mut Vec<Cell<'a>>> {
         if self.rows.len() <= row {

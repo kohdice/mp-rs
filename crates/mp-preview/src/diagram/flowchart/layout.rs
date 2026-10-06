@@ -9,7 +9,7 @@ use crate::style::Line;
 
 use super::label::Label;
 use super::outline::outline;
-use super::parse::{Body, Direction, Edge, End, Flowchart, Node};
+use super::parse::{Body, Direction, Edge, End, Flowchart, Node, Shape};
 use super::signed;
 
 /// Cells a self loop runs through beyond its box along the flow: its legs leave and
@@ -107,7 +107,9 @@ impl Axis {
     /// The cells across the flow, counted from a box's first cell, where links may meet
     /// its borders along the flow: in a horizontal layout the middle label row and the
     /// rows the box grew by around it, as many on either side as its spread, which leaves
-    /// out a cylinder's arc row; in a vertical one every column between the corners.
+    /// out a cylinder's arc row; in a vertical one every column between the corners of
+    /// both the top and the bottom border, so that a border inset further than one
+    /// column, as an ellipse's or a triangle's is, keeps links off the blanks beside it.
     pub(super) fn port_range(self, node: &Node) -> RangeInclusive<usize> {
         match (self, &node.body) {
             // A drawing's frame is never grown: its links meet any row between the corners.
@@ -117,9 +119,11 @@ impl Axis {
                 first..=first + 2 * node.spread
             }
             (Self::Vertical, Body::Hidden) => 0..=2 * node.spread,
-            (Self::Vertical, Body::Box { .. } | Body::Drawing(_)) => {
-                1..=self.box_cross_size(node).saturating_sub(2)
+            (Self::Vertical, Body::Box { shape, .. }) => {
+                let inset = vertical_port_inset(*shape);
+                inset..=self.box_cross_size(node).saturating_sub(1 + inset)
             }
+            (Self::Vertical, Body::Drawing(_)) => 1..=self.box_cross_size(node).saturating_sub(2),
         }
     }
 
@@ -174,11 +178,12 @@ pub(super) struct Spacing {
     pub sibling_gap: usize,
 }
 
-/// The label plus the cells its shape takes around it; one cell for a hidden node, and
-/// the drawing's widest line for a node holding one.
+/// The label plus the cells its shape takes around it, or the shape's own width when it
+/// hides the label; one cell for a hidden node, and the drawing's widest line for a node
+/// holding one.
 pub(super) fn box_width(node: &Node) -> usize {
     match &node.body {
-        Body::Box { label, shape } => label.width() + outline(*shape).padding(),
+        Body::Box { label, shape } => outline(*shape).width(label),
         Body::Hidden => 1,
         Body::Drawing(drawing) => {
             let line_width = |line: &Line| line.iter().map(|span| span.text.width()).sum::<usize>();
@@ -191,7 +196,7 @@ pub(super) fn box_width(node: &Node) -> usize {
 /// holding one.
 fn box_height(node: &Node) -> usize {
     match &node.body {
-        Body::Box { label, shape } => outline(*shape).height(label.height()),
+        Body::Box { label, shape } => outline(*shape).height(label),
         Body::Hidden => 1,
         Body::Drawing(drawing) => drawing.len(),
     }
@@ -201,7 +206,7 @@ fn box_height(node: &Node) -> usize {
 /// or to the middle row of a drawing.
 fn label_row(node: &Node) -> usize {
     match &node.body {
-        Body::Box { label, shape } => outline(*shape).label_row() + label.middle_row(),
+        Body::Box { label, shape } => outline(*shape).middle_label_row(label),
         Body::Hidden => 0,
         Body::Drawing(drawing) => drawing.len() / 2,
     }
@@ -752,14 +757,22 @@ fn spread_for(node: &Node, axis: Axis, reach: usize) -> usize {
         // The middle label row is a port row, and every row the box grew by around it
         // is one more on either side; a hidden node's every cell is a port.
         (Body::Box { .. }, Axis::Horizontal) | (Body::Hidden, _) => reach,
-        // The port cells run from one column inside the left corner to one inside
-        // the right corner, around the centre column.
-        (Body::Box { .. }, Axis::Vertical) => {
-            let width = box_width(node);
+        // The port cells run from the left end of `port_range` to its right end, around
+        // the centre column.
+        (Body::Box { shape, .. }, Axis::Vertical) => {
+            let (width, inset) = (box_width(node), vertical_port_inset(*shape));
             let centre = width / 2;
-            (reach + 1).saturating_sub(centre).max((reach + centre + 2).saturating_sub(width))
+            (reach + inset)
+                .saturating_sub(centre)
+                .max((reach + centre + 1 + inset).saturating_sub(width))
         }
     }
+}
+
+/// Columns from either side of a box of `shape` to its first port cell in a vertical
+/// layout: one past the corner, or past the blanks before a border inset further.
+fn vertical_port_inset(shape: Shape) -> usize {
+    outline(shape).border_inset().max(1)
 }
 
 /// Grows each box further where the labels of the links entering it need their entries

@@ -9,7 +9,7 @@ use crate::theme::solarized::DARK_PALETTE;
 
 use super::label::{Label, Run, row_width};
 use super::layout::{Axis, box_width, label_reach};
-use super::outline::{Row, outline};
+use super::outline::{EndsOn, MarkAt, Row, outline};
 use super::parse::{Body, Direction, Marker, Node, Stroke};
 use super::route::Scene;
 
@@ -237,49 +237,83 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
     };
     let width = box_width(node) + 2 * extra_cols;
     let outline = outline(shape);
-    let rows = label.height();
-    let bottom = top + outline.height(rows) + 2 * extra_rows - 1;
-    let rim = outline.rim.map(|rim| (top + 1, rim));
-    for (row, outline_row) in [(top, outline.top), (bottom, outline.bottom)].into_iter().chain(rim)
-    {
-        if let Some((start, end)) = draw_row_ends(canvas, row, left, width, outline_row) {
-            for col in start..end {
-                canvas.put(row, col, "─", LINE);
-            }
-        }
-    }
+    let rows = outline.label_height(label);
     let first_label_row = top + outline.label_row() + extra_rows;
     let label_rows = first_label_row..first_label_row + rows;
-    // The rows the box grew by carry its sides on, as plain lines where the label rows
-    // have the shape's own glyphs.
-    let side = Row { inset: outline.label.inset, ends: outline.label.ends.map(plain_side) };
-    for row in first_label_row - extra_rows..label_rows.end + extra_rows {
-        let ends = if label_rows.contains(&row) { outline.label } else { side };
-        draw_row_ends(canvas, row, left, width, ends);
+    let below_top = label_rows.end + extra_rows;
+    for (row, outline_row) in (top..).zip(outline.above).chain((below_top..).zip(outline.below)) {
+        draw_row(canvas, row, left, width, *outline_row);
     }
-    let label_left = left + outline.label_offset() + extra_cols;
-    draw_label(canvas, (first_label_row, label_left), label, RowAlign::Centred);
+    // The middle rows: the label rows and the rows the box grew by around them. Those
+    // that do not carry the label row's own side glyphs continue its sides.
+    let middle = first_label_row - extra_rows..below_top;
+    let continued = Row {
+        ends: outline.continued.unwrap_or(outline.label.ends.map(plain_side)),
+        mark: None,
+        ..outline.label
+    };
+    for row in middle.clone() {
+        let own = match outline.label_ends_on {
+            EndsOn::LabelRows => label_rows.contains(&row),
+            EndsOn::LastRow => row + 1 == middle.end,
+            EndsOn::PortRow => row == top + outline.middle_label_row(label) + extra_rows,
+        };
+        draw_row(canvas, row, left, width, if own { outline.label } else { continued });
+    }
+    if outline.shows_label() {
+        let label_left = left + outline.label_offset() + extra_cols;
+        draw_label(canvas, (first_label_row, label_left), label, RowAlign::Centred);
+    }
 }
 
-/// A run of `│` as wide as the side glyphs `end`.
-fn plain_side(end: &str) -> &'static str {
-    if end.width() > 1 { "││" } else { "│" }
+/// A run of `│` as wide as the side glyphs `end`, but a heavy side stays heavy and an
+/// open side open.
+fn plain_side(end: &'static str) -> &'static str {
+    match end {
+        "" | "┃" => end,
+        _ if end.width() > 1 => "││",
+        _ => "│",
+    }
 }
 
-/// Draws the end glyphs of `row` on a box `width` cells wide from `left`, and returns
-/// the cells between them.
-fn draw_row_ends(
-    canvas: &mut Canvas<'_>,
-    row: usize,
-    left: usize,
-    width: usize,
-    outline_row: Row,
-) -> Option<(usize, usize)> {
+/// Draws `outline_row` on a box `width` cells wide from `left`: its end glyphs, its fill
+/// between them, and its mark over the fill. Blanks are not drawn, so a row leaves no
+/// trailing blanks behind.
+fn draw_row(canvas: &mut Canvas<'_>, row: usize, left: usize, width: usize, outline_row: Row) {
     let [inset_left, inset_right] = outline_row.inset;
     let [end_left, end_right] = outline_row.ends;
     let start = left + inset_left;
-    let right_start = (left + width).checked_sub(inset_right + end_right.width())?;
-    canvas.put(row, start, end_left, LINE);
-    canvas.put(row, right_start, end_right, LINE);
-    Some((start + end_left.width(), right_start))
+    // The cell after the row's last one, counted from the box's left side.
+    let end = match outline_row.reach {
+        Some(reach) => (inset_left + reach).min(width.saturating_sub(1)),
+        None => width.saturating_sub(inset_right),
+    };
+    let Some(right_start) = (left + end).checked_sub(end_right.width()) else {
+        return;
+    };
+    canvas.reach_row(row);
+    put_glyphs(canvas, row, start, end_left);
+    put_glyphs(canvas, row, right_start, end_right);
+    for col in start + end_left.width()..right_start {
+        put_glyphs(canvas, row, col, outline_row.fill);
+    }
+    if let Some((at, mark)) = outline_row.mark {
+        let col = match at {
+            MarkAt::Column(col) => col.min(width.saturating_sub(2)),
+            MarkAt::Centre => width.saturating_sub(mark.width()) / 2,
+        };
+        canvas.put(row, left + col, mark, LINE);
+    }
+}
+
+/// Draws `glyphs` from `(row, col)` one character at a time, skipping blanks.
+fn put_glyphs(canvas: &mut Canvas<'_>, row: usize, mut col: usize, glyphs: &'static str) {
+    for (at, c) in glyphs.char_indices() {
+        // The range comes from `char_indices`, so it lies on char boundaries.
+        let glyph = &glyphs[at..at + c.len_utf8()];
+        if c != ' ' {
+            canvas.put(row, col, glyph, LINE);
+        }
+        col += glyph.width();
+    }
 }

@@ -168,11 +168,20 @@ impl Label {
     /// [`label_text`].
     pub(super) fn parse(source: &str) -> Self {
         let text = unquoted(source);
-        if text.len() < source.len()
-            && let Some(markdown) = text.strip_prefix('`').and_then(|text| text.strip_suffix('`'))
-        {
-            return Self::markdown(markdown);
+        if text.len() < source.len() { Self::string(text) } else { Self::text(text) }
+    }
+
+    /// The label of a quoted string whose content is `content`: a markdown string when
+    /// wrapped in backticks, and otherwise read as [`Label::parse`] reads plain text.
+    pub(super) fn string(content: &str) -> Self {
+        match content.strip_circumfix("`", "`") {
+            Some(markdown) => Self::markdown(markdown),
+            None => Self::text(content),
         }
+    }
+
+    /// A row for each part of `text` between line breaks.
+    fn text(text: &str) -> Self {
         let rows = split_rows(text)
             .into_iter()
             .map(|row| vec![Run::plain(label_text(&joined_lines(row)))]);
