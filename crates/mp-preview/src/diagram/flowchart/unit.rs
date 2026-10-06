@@ -10,6 +10,7 @@ use crate::style::Line;
 
 use super::parse::{Body, Edge, End, Flowchart, Node};
 use super::render_chart;
+use super::styling::Styling;
 
 /// Replaces each outermost subgraph that is laid out in a direction of its own (see
 /// [`own_direction`]) by one node holding its drawing: its members, the links among
@@ -158,7 +159,11 @@ fn outer_chart(
                 *unit_node.get_mut(unit).ok_or(Failure::Unsupported)? = Some(outer_nodes.len());
                 let drawing =
                     drawings.get_mut(unit).and_then(Option::take).ok_or(Failure::Unsupported)?;
-                outer_nodes.push(Node { body: Body::Drawing(drawing), spread: 0 });
+                outer_nodes.push(Node {
+                    body: Body::Drawing(drawing),
+                    spread: 0,
+                    styling: Styling::default(),
+                });
             }
             Some(_) => {}
         }

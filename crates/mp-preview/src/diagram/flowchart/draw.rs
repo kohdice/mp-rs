@@ -2,16 +2,17 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::diagram::canvas::{Canvas, LineGlyphs};
+use crate::diagram::canvas::{Canvas, HEAVY_JUNCTIONS, LIGHT_JUNCTIONS, LineGlyphs};
 use crate::style::{Line, Span, Style};
 use crate::theme::Rgb;
 use crate::theme::solarized::DARK_PALETTE;
 
 use super::label::{Label, Run, row_width};
 use super::layout::{Axis, box_width, label_reach};
-use super::outline::{EndsOn, MarkAt, Row, outline};
-use super::parse::{Body, Direction, Marker, Node, Stroke};
+use super::outline::{EndsOn, MarkAt, Outline, Row, outline};
+use super::parse::{Body, Direction, Edge, Marker, Node, Stroke};
 use super::route::Scene;
+use super::styling::Styling;
 
 const LINE: Style = plain_style(DARK_PALETTE.muted);
 const TEXT: Style = plain_style(DARK_PALETTE.body);
@@ -19,6 +20,7 @@ const TEXT: Style = plain_style(DARK_PALETTE.body);
 const fn plain_style(fg: Rgb) -> Style {
     Style {
         fg: Some(fg),
+        bg: None,
         bold: false,
         dim: false,
         italic: false,
@@ -99,21 +101,23 @@ pub(super) fn draw(scene: &Scene<'_>, direction: Direction) -> Vec<Line> {
             (row_a.max(row_b), col_a.max(col_b)),
             placed.title,
             placed.title_offset,
+            placed.styling,
         );
     }
     for link in &scene.links {
         let points: Vec<_> =
             link.points.iter().map(|&(main, cross)| frame.cell(main, cross)).collect();
-        canvas.line(&points, line_glyphs(link.edge.stroke), LINE);
+        let style = Style { fg: link.edge.styling.stroke.rgb().or(LINE.fg), ..LINE };
+        canvas.line(&points, link_glyphs(link.edge), style);
         if let (Some(head), Some((row, col, heading))) =
             (link.edge.head, arrival(points.iter().rev().copied()))
         {
-            canvas.put(row, col, marker_glyph(head, heading), LINE);
+            canvas.put(row, col, marker_glyph(head, heading), style);
         }
         if let (Some(tail), Some((row, col, heading))) =
             (link.edge.tail, arrival(points.iter().copied()))
         {
-            canvas.put(row, col, marker_glyph(tail, heading), LINE);
+            canvas.put(row, col, marker_glyph(tail, heading), style);
         }
     }
     for placed in &scene.labels {
@@ -123,7 +127,8 @@ pub(super) fn draw(scene: &Scene<'_>, direction: Direction) -> Vec<Line> {
             Axis::Horizontal => RowAlign::Centred,
             Axis::Vertical => RowAlign::OnLine,
         };
-        draw_label(&mut canvas, (top, left), placed.label, align);
+        let text = scene.links.get(placed.link).map_or(TEXT, |link| text_style(link.edge.styling));
+        draw_label(&mut canvas, (top, left), placed.label, align, text);
     }
     canvas.into_lines()
 }
@@ -145,6 +150,7 @@ fn draw_label<'a>(
     (top, left): (usize, usize),
     label: &'a Label,
     align: RowAlign,
+    text: Style,
 ) {
     let width = label.width();
     for (row, runs) in (top..).zip(label.rows()) {
@@ -153,15 +159,22 @@ fn draw_label<'a>(
             RowAlign::Centred => (width - row_width) / 2,
             RowAlign::OnLine => label_reach(width).0 - label_reach(row_width).0,
         };
-        draw_runs(canvas, (row, left + offset), runs);
+        draw_runs(canvas, (row, left + offset), runs, text);
     }
 }
 
-/// Draws `runs` one after another from `(row, col)`, each in the label text style with
-/// its own emphasis.
-fn draw_runs<'a>(canvas: &mut Canvas<'a>, (row, mut col): (usize, usize), runs: &'a [Run]) {
+/// Draws `runs` one after another from `(row, col)`, each in `text` with its own bold
+/// and italic added.
+fn draw_runs<'a>(
+    canvas: &mut Canvas<'a>,
+    (row, mut col): (usize, usize),
+    runs: &'a [Run],
+    text: Style,
+) {
     for run in runs {
-        canvas.put(row, col, &run.text, Style { bold: run.bold, italic: run.italic, ..TEXT });
+        let emphasis =
+            Style { bold: text.bold || run.bold, italic: text.italic || run.italic, ..text };
+        canvas.put(row, col, &run.text, emphasis);
         col += run.text.width();
     }
 }
@@ -197,14 +210,28 @@ fn marker_glyph(marker: Marker, heading: Direction) -> &'static str {
     }
 }
 
-fn line_glyphs(stroke: Stroke) -> LineGlyphs {
-    let (horizontal, vertical) = match stroke {
-        // A scene holds no invisible link.
-        Stroke::Solid | Stroke::Invisible => ("─", "│"),
-        Stroke::Dotted => ("┄", "┆"),
-        Stroke::Thick => ("━", "┃"),
+/// The glyphs of `edge`'s line: heavy for a thick link and dotted for a dotted one,
+/// unless its `stroke-width` or `stroke-dasharray` says otherwise, as upstream's inline
+/// style overrides the stroke its link syntax gives.
+fn link_glyphs(edge: &Edge) -> LineGlyphs {
+    let heavy = edge.styling.heavy.unwrap_or(edge.stroke == Stroke::Thick);
+    let dotted = edge.styling.dotted.unwrap_or(edge.stroke == Stroke::Dotted);
+    line_glyphs(heavy, dotted)
+}
+
+/// The glyphs of a line, heavy or dotted as asked. A heavy line turns and joins in
+/// heavy glyphs too, as upstream draws a thick stroke along its whole path and a heavy
+/// run meeting a light corner shows a break; the dotted forms exist for straight runs
+/// only, so a dotted line turns in solid glyphs.
+fn line_glyphs(heavy: bool, dotted: bool) -> LineGlyphs {
+    let (horizontal, vertical) = match (heavy, dotted) {
+        (false, false) => ("─", "│"),
+        (false, true) => ("┄", "┆"),
+        (true, false) => ("━", "┃"),
+        (true, true) => ("┅", "┇"),
     };
-    LineGlyphs { horizontal, vertical }
+    let junctions = if heavy { &HEAVY_JUNCTIONS } else { &LIGHT_JUNCTIONS };
+    LineGlyphs { horizontal, vertical, junctions }
 }
 
 /// Draws a frame with the corners `top_left` and `bottom_right` and `title` in its top
@@ -215,16 +242,23 @@ fn draw_subgraph_frame<'a>(
     (bottom, right): (usize, usize),
     title: &'a Label,
     title_offset: usize,
+    styling: Styling,
 ) {
     let corners = [(top, left), (top, right), (bottom, right), (bottom, left), (top, left)];
-    canvas.line(&corners, line_glyphs(Stroke::Solid), LINE);
+    // Upstream paints `fill` behind a subgraph's members; here the cells inside the frame
+    // are those members' boxes, lines and labels, which a background would recolor, so
+    // a frame takes no `fill`.
+    let border = Style { fg: styling.stroke.rgb().or(LINE.fg), ..LINE };
+    let text = text_style(styling);
+    let glyphs = line_glyphs(styling.heavy == Some(true), styling.dotted == Some(true));
+    canvas.line(&corners, glyphs, border);
     let start = left + title_offset;
-    canvas.put(top, start, " ", TEXT);
+    canvas.put(top, start, " ", text);
     // A title is one row (see `Label::joined`).
     for runs in title.rows() {
-        draw_runs(canvas, (top, start + 1), runs);
+        draw_runs(canvas, (top, start + 1), runs, text);
     }
-    canvas.put(top, start + 1 + title.width(), " ", TEXT);
+    canvas.put(top, start + 1 + title.width(), " ", text);
 }
 
 /// Draws `node`'s box with its top-left cell at `(top, left)`, grown by its spread on
@@ -255,12 +289,19 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
     };
     let width = box_width(node) + 2 * extra_cols;
     let outline = outline(shape);
+    let pen = Pen {
+        border: Style { fg: node.styling.stroke.rgb().or(LINE.fg), ..LINE },
+        interior: node.styling.fill.rgb().map(|fill| Style { bg: Some(fill), ..Style::default() }),
+        heavy: node.styling.heavy == Some(true) && has_heavy_form(&outline),
+        dotted: node.styling.dotted == Some(true),
+    };
+    let text = Style { bg: node.styling.fill.rgb(), ..text_style(node.styling) };
     let rows = outline.label_height(label);
     let first_label_row = top + outline.label_row() + extra_rows;
     let label_rows = first_label_row..first_label_row + rows;
     let below_top = label_rows.end + extra_rows;
     for (row, outline_row) in (top..).zip(outline.above).chain((below_top..).zip(outline.below)) {
-        draw_row(canvas, row, left, width, *outline_row);
+        draw_row(canvas, row, left, width, *outline_row, Pen { interior: None, ..pen });
     }
     // The middle rows: the label rows and the rows the box grew by around them. Those
     // that do not carry the label row's own side glyphs continue its sides.
@@ -276,11 +317,11 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
             EndsOn::LastRow => row + 1 == middle.end,
             EndsOn::PortRow => row == top + outline.middle_label_row(label) + extra_rows,
         };
-        draw_row(canvas, row, left, width, if own { outline.label } else { continued });
+        draw_row(canvas, row, left, width, if own { outline.label } else { continued }, pen);
     }
     if outline.shows_label() {
         let label_left = left + outline.label_offset() + extra_cols;
-        draw_label(canvas, (first_label_row, label_left), label, RowAlign::Centred);
+        draw_label(canvas, (first_label_row, label_left), label, RowAlign::Centred, text);
     }
 }
 
@@ -295,9 +336,16 @@ fn plain_side(end: &'static str) -> &'static str {
 }
 
 /// Draws `outline_row` on a box `width` cells wide from `left`: its end glyphs, its fill
-/// between them, and its mark over the fill. Blanks are not drawn, so a row leaves no
-/// trailing blanks behind.
-fn draw_row(canvas: &mut Canvas<'_>, row: usize, left: usize, width: usize, outline_row: Row) {
+/// between them, and its mark over the fill. Blanks are drawn only where `pen` paints
+/// the interior, so an unpainted row leaves no trailing blanks behind.
+fn draw_row(
+    canvas: &mut Canvas<'_>,
+    row: usize,
+    left: usize,
+    width: usize,
+    outline_row: Row,
+    pen: Pen,
+) {
     let [inset_left, inset_right] = outline_row.inset;
     let [end_left, end_right] = outline_row.ends;
     let start = left + inset_left;
@@ -310,28 +358,107 @@ fn draw_row(canvas: &mut Canvas<'_>, row: usize, left: usize, width: usize, outl
         return;
     };
     canvas.reach_row(row);
-    put_glyphs(canvas, row, start, end_left);
-    put_glyphs(canvas, row, right_start, end_right);
+    put_glyphs(canvas, row, start, end_left, pen);
+    put_glyphs(canvas, row, right_start, end_right, pen);
     for col in start + end_left.width()..right_start {
-        put_glyphs(canvas, row, col, outline_row.fill);
+        put_glyphs(canvas, row, col, outline_row.fill, pen);
     }
     if let Some((at, mark)) = outline_row.mark {
         let col = match at {
             MarkAt::Column(col) => col.min(width.saturating_sub(2)),
             MarkAt::Centre => width.saturating_sub(mark.width()) / 2,
         };
-        canvas.put(row, left + col, mark, LINE);
+        put_glyphs(canvas, row, left + col, mark, Pen { interior: None, ..pen });
     }
 }
 
-/// Draws `glyphs` from `(row, col)` one character at a time, skipping blanks.
-fn put_glyphs(canvas: &mut Canvas<'_>, row: usize, mut col: usize, glyphs: &'static str) {
+/// Draws `glyphs` from `(row, col)` one character at a time in `pen`'s border style, and
+/// their blanks only when `pen` paints the interior.
+fn put_glyphs(canvas: &mut Canvas<'_>, row: usize, mut col: usize, glyphs: &'static str, pen: Pen) {
     for (at, c) in glyphs.char_indices() {
         // The range comes from `char_indices`, so it lies on char boundaries.
         let glyph = &glyphs[at..at + c.len_utf8()];
-        if c != ' ' {
-            canvas.put(row, col, glyph, LINE);
+        match (c, pen.interior) {
+            (' ', Some(interior)) => canvas.put(row, col, glyph, interior),
+            (' ', None) => {}
+            _ => canvas.put(row, col, pen.glyph(c, glyph), pen.border),
         }
         col += glyph.width();
+    }
+}
+
+/// How a box's outline is drawn.
+#[derive(Debug, Clone, Copy)]
+struct Pen {
+    /// The style of its glyphs.
+    border: Style,
+    /// The style of the blanks inside it, which are left undrawn when `None`.
+    interior: Option<Style>,
+    /// Whether its glyphs are drawn in their heavy forms.
+    heavy: bool,
+    /// Whether its straight runs are drawn dotted.
+    dotted: bool,
+}
+
+impl Pen {
+    /// The glyph this pen draws for the character `c`, given as the string `glyph`.
+    fn glyph(self, c: char, glyph: &'static str) -> &'static str {
+        let weighed = if self.heavy { heavy(c).unwrap_or(glyph) } else { glyph };
+        if self.dotted { dotted(weighed) } else { weighed }
+    }
+}
+
+/// The dotted form of a straight line glyph, light or heavy; any other glyph is itself,
+/// as the box-drawing glyphs have dotted forms of straight runs only.
+fn dotted(glyph: &'static str) -> &'static str {
+    match glyph {
+        "─" => "┄",
+        "━" => "┅",
+        "│" => "┆",
+        "┃" => "┇",
+        _ => glyph,
+    }
+}
+
+/// The heavy form of the box-drawing glyph `glyph`, which is itself when heavy already;
+/// `None` for a glyph with no heavy form, such as a round corner or a diagonal.
+fn heavy(glyph: char) -> Option<&'static str> {
+    Some(match glyph {
+        '─' | '━' => "━",
+        '│' | '┃' => "┃",
+        '┌' | '┏' => "┏",
+        '┐' | '┓' => "┓",
+        '└' | '┗' => "┗",
+        '┘' | '┛' => "┛",
+        '├' | '┣' => "┣",
+        '┤' | '┫' => "┫",
+        '┬' | '┳' => "┳",
+        '┴' | '┻' => "┻",
+        '┼' | '╋' => "╋",
+        _ => return None,
+    })
+}
+
+/// Whether every glyph of `outline` has a heavy form. Upstream thickens any outline's
+/// stroke; Unicode has no heavy round corners, diagonals, brackets or waves, and a heavy
+/// line meeting a light corner shows a break, so a shape drawn with any of them keeps
+/// its light glyphs whatever its `stroke-width`.
+fn has_heavy_form(outline: &Outline) -> bool {
+    let rows = outline.above.iter().chain(outline.below).chain([&outline.label]);
+    rows.flat_map(|row| {
+        row.ends.into_iter().chain([row.fill]).chain(row.mark.map(|(_, mark)| mark))
+    })
+    .chain(outline.continued.into_iter().flatten())
+    .flat_map(str::chars)
+    .all(|c| c == ' ' || heavy(c).is_some())
+}
+
+/// The label text style with what `styling` sets: its `color`, bold and italic.
+fn text_style(styling: Styling) -> Style {
+    Style {
+        fg: styling.color.rgb().or(TEXT.fg),
+        bold: styling.bold == Some(true),
+        italic: styling.italic == Some(true),
+        ..TEXT
     }
 }

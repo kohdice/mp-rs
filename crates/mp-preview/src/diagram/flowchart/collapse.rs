@@ -72,8 +72,12 @@ fn collapse_nodes(
         }
     }
     let box_node = |subgraph: usize| {
-        let title = subgraphs.get(subgraph)?.title.clone();
-        Some(Node { body: Body::Box { label: title, shape: Shape::Rectangle }, spread: 0 })
+        let subgraph = subgraphs.get(subgraph)?;
+        Some(Node {
+            body: Body::Box { label: subgraph.title.clone(), shape: Shape::Rectangle },
+            spread: 0,
+            styling: subgraph.styling,
+        })
     };
     let mut box_index = vec![None; subgraphs.len()];
     let mut node_index = Vec::with_capacity(nodes.len());

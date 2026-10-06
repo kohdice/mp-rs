@@ -8,6 +8,7 @@ mod layout;
 mod outline;
 mod parse;
 mod route;
+mod styling;
 mod unit;
 
 use crate::diagram::Failure;

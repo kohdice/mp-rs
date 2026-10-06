@@ -10,10 +10,14 @@ const DOWN: u8 = 2;
 const LEFT: u8 = 4;
 const RIGHT: u8 = 8;
 
-/// Glyphs indexed by connection bits. A bare run in one direction is replaced by the
-/// line's own straight glyph, so only turns and junctions come from this table.
-const JUNCTIONS: [&str; 16] =
+/// Light glyphs indexed by connection bits. A bare run in one direction is replaced by
+/// the line's own straight glyph, so only turns and junctions come from this table.
+pub(super) const LIGHT_JUNCTIONS: [&str; 16] =
     [" ", "│", "│", "│", "─", "┘", "┐", "┤", "─", "└", "┌", "├", "─", "┴", "┬", "┼"];
+
+/// [`LIGHT_JUNCTIONS`] in heavy glyphs.
+pub(super) const HEAVY_JUNCTIONS: [&str; 16] =
+    [" ", "┃", "┃", "┃", "━", "┛", "┓", "┫", "━", "┗", "┏", "┣", "━", "┻", "┳", "╋"];
 
 #[derive(Debug, Clone, Copy, Default)]
 enum Cell<'a> {
@@ -30,11 +34,13 @@ enum Cell<'a> {
     },
 }
 
-/// The glyphs of a straight horizontal and a straight vertical run of one line style.
+/// The glyphs of a straight horizontal and a straight vertical run of one line style,
+/// and of its turns and junctions.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct LineGlyphs {
     pub horizontal: &'static str,
     pub vertical: &'static str,
+    pub junctions: &'static [&'static str; 16],
 }
 
 #[derive(Debug, Default)]
@@ -175,7 +181,7 @@ fn line_glyph(connections: u8, glyphs: LineGlyphs) -> &'static str {
     } else if connections & (LEFT | RIGHT) == 0 {
         glyphs.vertical
     } else {
-        JUNCTIONS.get(usize::from(connections)).copied().unwrap_or(" ")
+        glyphs.junctions.get(usize::from(connections)).copied().unwrap_or(" ")
     }
 }
 

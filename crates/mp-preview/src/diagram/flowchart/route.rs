@@ -12,6 +12,7 @@ use super::layout::{
 use super::outline::outline;
 use super::parse::{Body, Direction, Edge, End, Flowchart, Node, Subgraph};
 use super::signed;
+use super::styling::Styling;
 
 /// A drawing before it is oriented on screen.
 #[derive(Debug)]
@@ -54,6 +55,8 @@ pub(super) struct Route<'a> {
 /// down the screen.
 #[derive(Debug)]
 pub(super) struct PlacedLabel<'a> {
+    /// The index of the label's link in [`Scene::links`].
+    pub link: usize,
     pub label: &'a Label,
     pub main: usize,
     pub cross: usize,
@@ -62,6 +65,8 @@ pub(super) struct PlacedLabel<'a> {
 /// A subgraph frame, given by the cells of its borders along and across the flow.
 #[derive(Debug)]
 pub(super) struct PlacedFrame<'a> {
+    /// What the subgraph's classes and `style` statements set.
+    pub styling: Styling,
     pub title: &'a Label,
     /// Cells on screen from the top-left corner to the blank before the title.
     pub title_offset: usize,
@@ -505,7 +510,9 @@ pub(super) fn route<'a>(
         let main = moved(frame.main, main_shift)?;
         let cross = moved(frame.cross, cross_shift)?;
         *frame_of.get_mut(index)? = Some(main.clone());
+        let styling = chart.subgraphs.get(index)?.styling;
         scene.frames.push(PlacedFrame {
+            styling,
             title: frame.title,
             title_offset: frame.title_offset,
             main,
@@ -802,8 +809,9 @@ pub(super) fn place_labels<'a>(routed: &[RoutedLabel<'a>]) -> (Vec<PlacedLabel<'
     let cross_shift = routed.iter().map(|label| -label.at.1).max().unwrap_or(0).max(0);
     let labels = routed
         .iter()
-        .filter_map(|&RoutedLabel { label, at: (main, cross), .. }| {
+        .filter_map(|&RoutedLabel { link, label, at: (main, cross) }| {
             Some(PlacedLabel {
+                link,
                 label,
                 main: unsigned(main)?,
                 cross: unsigned(cross + cross_shift)?,

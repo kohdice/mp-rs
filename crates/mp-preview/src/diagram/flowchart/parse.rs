@@ -9,6 +9,7 @@ use crate::diagram::{Failure, SyntaxError};
 use crate::style::Line;
 
 use super::label::{Label, is_entity_name_char, shown_text, unquoted};
+use super::styling::Styling;
 
 #[derive(Debug)]
 pub(super) struct Flowchart {
@@ -34,6 +35,10 @@ pub(super) struct Node {
     /// every link end on one of its borders has a cell of its own; set by
     /// [`grow_boxes`](super::layout::grow_boxes).
     pub spread: usize,
+    /// What the `default` and `node` classes, then the classes attached to the node's
+    /// id in the order they were attached, and then the `style` statements naming it
+    /// set, each over the ones before.
+    pub styling: Styling,
 }
 
 /// What a node is drawn as.
@@ -173,6 +178,10 @@ pub(super) struct Edge {
     pub label: Option<Label>,
     /// The fewest layers the link spans: one, plus one for each extra `-`, `=` or `.`.
     pub length: usize,
+    /// What the classes attached to the link's id, in the order they were attached,
+    /// then the last `linkStyle default` statement and then the last `linkStyle`
+    /// statement naming the link's index set, each over the ones before.
+    pub styling: Styling,
 }
 
 /// One end of a link.
@@ -221,6 +230,10 @@ pub(super) struct Subgraph {
     /// Whether the last `view` an `id@{ view: … }` statement gives the subgraph's id is
     /// `collapsed`, which draws it as one box (see [`collapse`](super::collapse::collapse)).
     pub collapsed: bool,
+    /// What the classes attached to the subgraph's id, in the order they were attached,
+    /// and then the `style` statements naming it set, each over the ones before; unlike
+    /// a node, a subgraph takes no `default` or `node` class.
+    pub styling: Styling,
 }
 
 impl Subgraph {
@@ -283,8 +296,13 @@ const BRACKETS: [(&str, &[(&str, Shape)]); 13] = [
 /// Mermaid's default `flowchart.maxEdges`.
 const MAX_EDGES: usize = 500;
 
-/// Statements that only affect colors or interaction, which a text drawing cannot show.
-const IGNORED_KEYWORDS: [&str; 5] = ["style", "classDef", "class", "linkStyle", "click"];
+/// Statements that only affect interaction, which a text drawing cannot show.
+const IGNORED_KEYWORDS: [&str; 1] = ["click"];
+
+/// The classes upstream's `getData` compiles for every node before the node's own,
+/// so that `classDef default` and `classDef node` style every node, its own classes
+/// overriding them.
+const NODE_CLASSES: [&str; 2] = ["default", "node"];
 
 /// A diagram's source split at its frontmatter.
 pub(super) struct FrontMatter<'a> {
@@ -401,6 +419,13 @@ pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failur
         subgraph_ids: Vec::new(),
         edge_ids: HashSet::new(),
         collapsed: HashSet::new(),
+        closed_subgraphs: HashSet::new(),
+        styles: HashMap::new(),
+        class_defs: HashMap::new(),
+        classes: HashMap::new(),
+        edge_names: Vec::new(),
+        link_styles: HashMap::new(),
+        default_link_style: Styling::default(),
     };
     for (line, text) in statements {
         builder.statement(line, text)?;
@@ -408,6 +433,7 @@ pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failur
     if let Some(open) = builder.open.last() {
         return Err(syntax_error(open.line, "subgraph is not closed with \"end\""));
     }
+    builder.apply_styles();
     builder.resolve_subgraph_ids()?;
     let mut chart = builder.chart;
     // Mermaid draws an empty subgraph as a frame showing only its title, placed in the
@@ -417,7 +443,7 @@ pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failur
     for subgraph in chart.innermost_first() {
         if chart.subgraphs.get(subgraph).is_some_and(|subgraph| subgraph.members.is_empty()) {
             let hidden = chart.nodes.len();
-            chart.nodes.push(Node { body: Body::Hidden, spread: 0 });
+            chart.nodes.push(Node { body: Body::Hidden, spread: 0, styling: Styling::default() });
             for holder in std::iter::once(subgraph).chain(chart.enclosing(subgraph)) {
                 if let Some(holder) = chart.subgraphs.get_mut(holder) {
                     holder.members.push(hidden);
@@ -665,6 +691,22 @@ struct Builder<'a> {
     edge_ids: HashSet<&'a str>,
     /// The ids whose last `view` in `@{ … }` data is `collapsed`.
     collapsed: HashSet<&'a str>,
+    /// The ids of the subgraphs whose `end` has been read, which upstream's
+    /// `addSubGraph` registers only then.
+    closed_subgraphs: HashSet<&'a str>,
+    /// What the `style` statements naming each id set, the later ones over the earlier.
+    styles: HashMap<&'a str, Styling>,
+    /// What the `classDef` statements naming each class set, the later ones over the
+    /// earlier.
+    class_defs: HashMap<&'a str, Styling>,
+    /// The classes attached to each id, in the order they were attached.
+    classes: HashMap<&'a str, Vec<&'a str>>,
+    /// The id of each link, indexed like [`Flowchart::edges`].
+    edge_names: Vec<Option<&'a str>>,
+    /// What the last `linkStyle` statement naming each link's index sets.
+    link_styles: HashMap<usize, Styling>,
+    /// What the last `linkStyle default` statement sets.
+    default_link_style: Styling,
 }
 
 /// A subgraph whose `end` has not been read yet.
@@ -698,9 +740,97 @@ impl<'a> Builder<'a> {
             return self.open_subgraph(line, rest);
         }
         if statement == "end" {
-            self.open
+            let closed = self
+                .open
                 .pop()
                 .ok_or_else(|| syntax_error(line, "\"end\" without an open subgraph"))?;
+            if let Some(&id) = self.subgraph_ids.get(closed.index) {
+                self.closed_subgraphs.insert(id);
+            }
+            return Ok(());
+        }
+        // Upstream's grammar needs every part of a styling statement, so a statement
+        // missing one is a syntax error.
+        if let Some((id, list)) = keyword_statement(statement, "style") {
+            if id.is_empty() {
+                return Err(syntax_error(line, "style has no node id"));
+            }
+            if list.is_empty() {
+                return Err(syntax_error(line, "style has no property list"));
+            }
+            // Upstream's `styleStatement` passes the whole id, commas included, to
+            // `addVertex`, which declares a node; a node whose id names a subgraph is
+            // turned into that subgraph by `resolve_subgraph_ids`, as upstream's
+            // `getData` merges the two.
+            self.declare(id);
+            let styles = self.styles.entry(id).or_default();
+            *styles = styles.then(Styling::parse(list));
+            return Ok(());
+        }
+        if let Some((names, list)) = keyword_statement(statement, "classDef") {
+            if names.is_empty() {
+                return Err(syntax_error(line, "classDef has no class name"));
+            }
+            if list.is_empty() {
+                return Err(syntax_error(line, "classDef has no property list"));
+            }
+            let styling = Styling::parse(list);
+            for name in names.split(',') {
+                let class = self.class_defs.entry(name).or_default();
+                *class = class.then(styling);
+            }
+            return Ok(());
+        }
+        if let Some((positions, list)) = keyword_statement(statement, "linkStyle") {
+            if positions.is_empty() {
+                return Err(syntax_error(line, "linkStyle has no link index"));
+            }
+            // `default` stands alone in upstream's grammar; anything else is a list of
+            // numbers (`numList`).
+            let indexes = match positions {
+                "default" => None,
+                _ => Some(
+                    positions
+                        .split(',')
+                        .map(|position| link_index(line, position, self.chart.edges.len()))
+                        .collect::<Result<Vec<usize>, Failure>>()?,
+                ),
+            };
+            // `interpolate` and a curve name choose the curve upstream draws the link
+            // along; lines of glyphs run along rows and columns only, so the curve is
+            // read and dropped, and a statement giving no style list after it leaves
+            // the style as it was, as upstream's `updateLinkInterpolate` does.
+            let list = match keyword_statement(list, "interpolate") {
+                Some(("", _)) => {
+                    return Err(syntax_error(line, "linkStyle interpolate has no curve name"));
+                }
+                Some((_, "")) => return Ok(()),
+                Some((_, after_curve)) => after_curve,
+                None => list,
+            };
+            if list.is_empty() {
+                return Err(syntax_error(line, "linkStyle has no property list"));
+            }
+            // Each statement replaces the style it names, as upstream's `updateLink`
+            // assigns the list rather than appending to it.
+            let styling = Styling::parse(list);
+            let Some(indexes) = indexes else {
+                self.default_link_style = styling;
+                return Ok(());
+            };
+            for index in indexes {
+                self.link_styles.insert(index, styling);
+            }
+            return Ok(());
+        }
+        // Upstream's `setClass` splits the ids at commas but not the class name.
+        if let Some((ids, class)) = keyword_statement(statement, "class") {
+            if ids.is_empty() || class.is_empty() || class.contains(|c: char| c.is_whitespace()) {
+                return Err(syntax_error(line, "class needs one node id list and one class name"));
+            }
+            for id in ids.split(',') {
+                self.attach_class(id, class);
+            }
             return Ok(());
         }
         if statement
@@ -761,9 +891,9 @@ impl<'a> Builder<'a> {
                 }
                 return Err(Failure::Unsupported);
             };
-            if let Some(id) = id {
-                self.edge_ids.insert(id);
-            }
+            // An id that an earlier link already took names no link here, as upstream's
+            // `addSingleLink` gives a repeated id a generated one instead.
+            let mut id = id.filter(|&id| self.edge_ids.insert(id));
             let (label, after_link) = match after_link.trim_start().strip_prefix('|') {
                 // Mermaid's grammar accepts a `|text|` label after `~~~`, but a link
                 // that is not drawn has no line to carry the text, so the block falls
@@ -780,6 +910,11 @@ impl<'a> Builder<'a> {
                 return Err(syntax_error(line, "edge has no target"));
             }
             let (targets, after_targets) = self.group(line, after_link)?;
+            // Upstream's `addLink` passes the id only for the link from the last source
+            // to the first target; every other link of the group gets a generated one. The
+            // id is taken once, as a group naming a node twice (`A & A`) repeats that pair
+            // and `addSingleLink` refuses the id the second time.
+            let named = (sources.last().copied(), targets.first().copied());
             for &from in &sources {
                 for &to in &targets {
                     if self.chart.edges.len() == MAX_EDGES {
@@ -788,6 +923,8 @@ impl<'a> Builder<'a> {
                             &format!("too many edges (limit {MAX_EDGES})"),
                         ));
                     }
+                    let name = if (Some(from), Some(to)) == named { id.take() } else { None };
+                    self.edge_names.push(name);
                     self.chart.edges.push(Edge {
                         from: End::Node(from),
                         to: End::Node(to),
@@ -796,6 +933,7 @@ impl<'a> Builder<'a> {
                         head,
                         label: label.map(Label::parse),
                         length,
+                        styling: Styling::default(),
                     });
                 }
             }
@@ -835,6 +973,7 @@ impl<'a> Builder<'a> {
             direction: None,
             spread: 0,
             collapsed: false,
+            styling: Styling::default(),
         });
         Ok(())
     }
@@ -948,6 +1087,82 @@ impl<'a> Builder<'a> {
         Ok((nodes, rest))
     }
 
+    /// The index of the node `id` names, declared as a box showing the id when new.
+    fn declare(&mut self, id: &'a str) -> usize {
+        *self.index_of.entry(id).or_insert_with(|| {
+            self.chart.nodes.push(Node {
+                body: Body::Box { label: Label::plain(id), shape: Shape::Rectangle },
+                spread: 0,
+                styling: Styling::default(),
+            });
+            self.chart.nodes.len() - 1
+        })
+    }
+
+    /// Gives each node, link and subgraph what its classes and its `style` or
+    /// `linkStyle` statements set (see [`Node::styling`], [`Edge::styling`] and
+    /// [`Subgraph::styling`]).
+    /// Classes are looked up only now, so that a `classDef` may follow the `class`
+    /// statement using it, as upstream compiles them when the diagram is drawn.
+    fn apply_styles(&mut self) {
+        let resolved: Vec<(usize, Styling)> = self
+            .index_of
+            .iter()
+            .map(|(id, &index)| (index, self.styling_of(id, &NODE_CLASSES)))
+            .collect();
+        for (index, styling) in resolved {
+            if let Some(node) = self.chart.nodes.get_mut(index) {
+                node.styling = styling;
+            }
+        }
+        // Upstream applies a link's classes as compiled styles and its `linkStyle` lists,
+        // the default one first, as inline styles over them.
+        let link_stylings: Vec<Styling> = (0..self.chart.edges.len())
+            .map(|index| {
+                let name = self.edge_names.get(index).copied().flatten();
+                let classes = name.map(|id| self.class_styling(id, &[])).unwrap_or_default();
+                let own = self.link_styles.get(&index).copied().unwrap_or_default();
+                classes.then(self.default_link_style).then(own)
+            })
+            .collect();
+        for (edge, styling) in self.chart.edges.iter_mut().zip(link_stylings) {
+            edge.styling = styling;
+        }
+        // Upstream compiles no `default` class for a subgraph, only its own classes.
+        let subgraph_stylings: Vec<Styling> =
+            self.subgraph_ids.iter().map(|id| self.styling_of(id, &[])).collect();
+        for (subgraph, styling) in self.chart.subgraphs.iter_mut().zip(subgraph_stylings) {
+            subgraph.styling = styling;
+        }
+    }
+
+    /// What the classes `base` and then the classes attached to `id` set, in order, and
+    /// then the `style` statements naming it.
+    fn styling_of(&self, id: &str, base: &[&str]) -> Styling {
+        self.class_styling(id, base).then(self.styles.get(id).copied().unwrap_or_default())
+    }
+
+    /// What the classes `base` and then the classes attached to `id` set, in order; a
+    /// class no `classDef` defines sets nothing.
+    fn class_styling(&self, id: &str, base: &[&str]) -> Styling {
+        let classes = base.iter().chain(self.classes.get(id).into_iter().flatten());
+        classes
+            .filter_map(|class| self.class_defs.get(class))
+            .fold(Styling::default(), |styling, &later| styling.then(later))
+    }
+
+    /// Attaches `class` to `id` when a node, a link or a subgraph whose `end` has been
+    /// read has the id, as upstream's `setClass` does: an id declared only later gets
+    /// nothing.
+    fn attach_class(&mut self, id: &'a str, class: &'a str) {
+        let known = self.index_of.contains_key(id)
+            || self.edge_ids.contains(id)
+            || self.closed_subgraphs.contains(id);
+        if known {
+            self.classes.entry(id).or_default().push(class);
+        }
+    }
+
     /// Reads one node reference at the start of `text`, declaring the node on first
     /// use, and returns its index with the text after it.
     fn node(&mut self, line: usize, text: &'a str) -> Result<(usize, &'a str), Failure> {
@@ -958,13 +1173,7 @@ impl<'a> Builder<'a> {
         if id == "end" {
             return Err(syntax_error(line, "\"end\" cannot be a node id"));
         }
-        let index = *self.index_of.entry(id).or_insert_with(|| {
-            self.chart.nodes.push(Node {
-                body: Body::Box { label: Label::plain(id), shape: Shape::Rectangle },
-                spread: 0,
-            });
-            self.chart.nodes.len() - 1
-        });
+        let index = self.declare(id);
         // A node referenced in a nested block is a member of every enclosing one too.
         for open in &mut self.open {
             if open.members.insert(index)
@@ -997,7 +1206,14 @@ impl<'a> Builder<'a> {
             }
             None => rest,
         };
-        let rest = rest.strip_prefix(":::").map_or(rest, |class| split_id(class).1);
+        let rest = match rest.strip_prefix(":::") {
+            Some(after) => {
+                let (class, after_class) = split_id(after);
+                self.attach_class(id, class);
+                after_class
+            }
+            None => rest,
+        };
         let rest = match rest.strip_prefix("@{") {
             Some(after_open) => {
                 let (data, after_data) = shape_data(line, after_open)?;
@@ -1532,6 +1748,38 @@ fn head_marker(c: char) -> Option<Marker> {
 
 fn syntax_error(line: usize, message: &str) -> Failure {
     Failure::Syntax(SyntaxError { line: Some(line), message: message.to_owned() })
+}
+
+/// The word after `keyword` and the rest of `statement` after that word, both trimmed
+/// and possibly empty, when `statement` is `keyword` alone or `keyword` and a blank;
+/// `None` otherwise.
+fn keyword_statement<'a>(statement: &'a str, keyword: &str) -> Option<(&'a str, &'a str)> {
+    let rest = statement.strip_prefix(keyword)?;
+    if !(rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace())) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (word, after) = rest.split_once(|c: char| c.is_ascii_whitespace()).unwrap_or((rest, ""));
+    Some((word, after.trim()))
+}
+
+/// The link index `position` of a `linkStyle` statement on `line`, after `links` links:
+/// digits only, as upstream's `NUM` token reads it, and below `links`, as upstream's
+/// `updateLink` and `updateLinkInterpolate` fail on a link not defined yet.
+fn link_index(line: usize, position: &str, links: usize) -> Result<usize, Failure> {
+    let digits = !position.is_empty() && position.bytes().all(|byte| byte.is_ascii_digit());
+    let index: usize = digits.then(|| position.parse().ok()).flatten().ok_or_else(|| {
+        syntax_error(line, &format!("linkStyle index \"{position}\" is not a number"))
+    })?;
+    if index >= links {
+        let range = match links.checked_sub(1) {
+            Some(last) => format!("0 to {last}"),
+            None => "no links".to_owned(),
+        };
+        let message = format!("linkStyle index {index} is out of range ({range})");
+        return Err(syntax_error(line, &message));
+    }
+    Ok(index)
 }
 
 /// Splits the longest id prefix off `text`.
