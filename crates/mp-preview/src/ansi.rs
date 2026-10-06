@@ -63,6 +63,11 @@ fn push_sgr_params(encoded: &mut String, style: Style) {
     if let Some(Rgb { r, g, b }) = style.fg {
         // Formatting into a `String` cannot fail.
         let _ = write!(encoded, "{separator}38;2;{r};{g};{b}");
+        separator = ";";
+    }
+    if let Some(Rgb { r, g, b }) = style.bg {
+        // Formatting into a `String` cannot fail.
+        let _ = write!(encoded, "{separator}48;2;{r};{g};{b}");
     }
 }
 
@@ -108,6 +113,7 @@ mod tests {
     fn to_ansi_encodes_all_attributes_in_order_and_resets_at_line_end() {
         let every_attribute = Style {
             fg: Some(Rgb { r: 1, g: 2, b: 3 }),
+            bg: None,
             bold: true,
             dim: true,
             italic: true,
@@ -150,6 +156,27 @@ mod tests {
         let lines = vec![vec![span("X", colored)]];
 
         assert_eq!(to_ansi(&lines, ColorMode::Ansi), "\x1b[38;2;1;2;3mX\x1b[0m");
+    }
+
+    #[test]
+    fn to_ansi_encodes_a_background_in_ansi_mode_only() {
+        let painted = Style { bg: Some(Rgb { r: 1, g: 2, b: 3 }), ..Style::default() };
+        let lines = vec![vec![span("X", painted)]];
+
+        assert_eq!(to_ansi(&lines, ColorMode::Ansi), "\x1b[48;2;1;2;3mX\x1b[0m");
+        assert_eq!(to_ansi(&lines, ColorMode::Plain), "X");
+    }
+
+    #[test]
+    fn to_ansi_encodes_foreground_then_background() {
+        let both = Style {
+            fg: Some(Rgb { r: 1, g: 2, b: 3 }),
+            bg: Some(Rgb { r: 4, g: 5, b: 6 }),
+            ..Style::default()
+        };
+        let lines = vec![vec![span("X", both)]];
+
+        assert_eq!(to_ansi(&lines, ColorMode::Ansi), "\x1b[38;2;1;2;3;48;2;4;5;6mX\x1b[0m");
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::theme::Rgb;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Style {
     pub fg: Option<Rgb>,
+    pub bg: Option<Rgb>,
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
