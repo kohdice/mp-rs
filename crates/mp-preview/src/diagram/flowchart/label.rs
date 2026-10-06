@@ -9,13 +9,18 @@ use unicode_width::UnicodeWidthStr;
 use crate::control::visualize_control;
 
 /// The text a node label, edge label or subgraph title shows for `source`: entity codes
-/// decoded (see [`decode_entities`]), each tab or no-break space a space, and any other
-/// control character, written or decoded, shown as [`visualize_control`] does, so that a
-/// label never drives the terminal. A tab has no display width of its own, so it would
-/// leave the box narrower than the text shown in it.
+/// decoded (see [`decode_entities`]), then made safe to show (see [`shown_text`]), a
+/// control character a code decodes to included.
 fn label_text(source: &str) -> String {
-    decode_entities(source)
-        .chars()
+    shown_text(&decode_entities(source))
+}
+
+/// `text` with each tab or no-break space a space and any other control character shown
+/// as [`visualize_control`] does, so that text drawn from the source never drives the
+/// terminal. A tab has no display width of its own, so it would leave the box narrower
+/// than the text shown in it.
+pub(super) fn shown_text(text: &str) -> String {
+    text.chars()
         .map(|character| match character {
             '\t' | '\u{a0}' => ' ',
             _ => visualize_control(character),
@@ -180,18 +185,20 @@ impl Label {
         }
     }
 
-    /// A row for each part of `text` between line breaks.
+    /// A row for each part of `text` between line breaks, without FontAwesome icons (see
+    /// [`without_icons`]).
     fn text(text: &str) -> Self {
         let rows = split_rows(text)
             .into_iter()
-            .map(|row| vec![Run::plain(label_text(&joined_lines(row)))]);
+            .map(|row| vec![Run::plain(label_text(&without_icons(&joined_lines(row))))]);
         Self { rows: rows.collect() }
     }
 
     /// The label of the markdown string whose content between the backticks is `source`:
     /// a row for each source line and each `<br>`, its leading and trailing blanks and
-    /// blank lines dropped (upstream's markdown collapses them), and the emphasis of
-    /// each row read by [`emphasis_runs`]. Upstream also wraps a markdown string at a
+    /// blank lines dropped (upstream's markdown collapses them), the emphasis of each row
+    /// read by [`emphasis_runs`], and then FontAwesome icons dropped from its runs (see
+    /// [`without_icon_runs`]). Upstream also wraps a markdown string at a
     /// pixel width (`wrappingWidth`); a text drawing has no such width, so rows break only
     /// where the source does.
     fn markdown(source: &str) -> Self {
@@ -200,7 +207,7 @@ impl Label {
             .flat_map(|row| row.split('\n'))
             .map(str::trim)
             .filter(|line| !line.is_empty())
-            .map(emphasis_runs)
+            .map(|line| without_icon_runs(emphasis_runs(line)))
             .collect();
         if rows.is_empty() {
             return Self::plain("");
@@ -251,6 +258,103 @@ impl Label {
     pub(super) fn middle_row(&self) -> usize {
         (self.height() - 1) / 2
     }
+}
+
+/// The prefixes of a FontAwesome icon token `prefix:fa-name`: those of upstream's
+/// `replaceIconSubstring` in `packages/mermaid/src/rendering-util/createText.ts`, which
+/// matches `(fa[bklrs]?):fa-([\w-]+)`.
+// The docs' "Supported prefixes: fa, fab, fas, far, fal, fad"
+// (<https://mermaid.js.org/syntax/flowchart.html>) describe registering icon packs and
+// do not match the drawing code: a browser shows `fad:fa-x` as written, so it stays text.
+const ICON_PREFIXES: [&str; 6] = ["fab", "fas", "far", "fal", "fak", "fa"];
+
+/// The byte length of the icon token `text` starts with and the icon's name without its
+/// `fa-`, if it starts with one.
+fn icon_token(text: &str) -> Option<(usize, &str)> {
+    let after_prefix =
+        ICON_PREFIXES.iter().find_map(|prefix| text.strip_prefix(prefix)?.strip_prefix(":fa-"))?;
+    let name_length = after_prefix
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(after_prefix.len());
+    let name = after_prefix.get(..name_length).filter(|name| !name.is_empty())?;
+    Some((text.len() - after_prefix.len() + name_length, name))
+}
+
+/// `row` without its FontAwesome icon tokens (see [`ICON_PREFIXES`]), each dropped with
+/// the blanks after it, or, at the end of the row or before other text, the blanks
+/// before it; a row of nothing but icons shows their names. Upstream draws each token as
+/// its icon; a terminal has no icon font, so the token is dropped rather than shown as
+/// text upstream never shows, and an icon-only row keeps the one text that still says
+/// what the icon was, instead of leaving the box empty.
+fn without_icons(row: &str) -> Cow<'_, str> {
+    let (kept, names) = drop_icons(row);
+    if names.is_empty() {
+        kept
+    } else if kept.trim().is_empty() {
+        Cow::Owned(names.join(" "))
+    } else {
+        kept
+    }
+}
+
+/// `row` without its icon tokens, dropped as [`without_icons`] drops them, and the names
+/// of the icons dropped, in order.
+fn drop_icons(row: &str) -> (Cow<'_, str>, Vec<&str>) {
+    let mut kept = String::with_capacity(row.len());
+    let mut names = Vec::new();
+    let mut rest = row;
+    while let Some(c) = rest.chars().next() {
+        match icon_token(rest) {
+            Some((length, name)) => {
+                names.push(name);
+                let after = rest.get(length..).unwrap_or_default();
+                let after_blanks = after.trim_start_matches([' ', '\t']);
+                if after_blanks.len() == after.len() {
+                    kept.truncate(kept.trim_end_matches([' ', '\t']).len());
+                }
+                rest = after_blanks;
+            }
+            None => {
+                kept.push(c);
+                rest = rest.get(c.len_utf8()..).unwrap_or_default();
+            }
+        }
+    }
+    if names.is_empty() { (Cow::Borrowed(row), names) } else { (Cow::Owned(kept), names) }
+}
+
+/// The runs of a markdown string's `row` without their icon tokens, each run's dropped as
+/// [`without_icons`] drops them: upstream's `createText.ts` applies
+/// `replaceIconSubstring` to the HTML `markdownToHTML` gives, so `**fa:fa-car**` is an
+/// icon in bold and its markers are not shown. Where runs meet, a blank after a blank is
+/// dropped, and so are the blanks at the row's ends, as HTML collapses them. A row of
+/// nothing but icons shows their names in the style of the first run holding one.
+fn without_icon_runs(row: Row) -> Row {
+    let mut names = Vec::new();
+    let mut icon_style = None;
+    let mut kept: Row = Vec::new();
+    for run in &row {
+        let (text, run_names) = drop_icons(&run.text);
+        if !run_names.is_empty() {
+            icon_style.get_or_insert((run.bold, run.italic));
+            names.extend(run_names);
+        }
+        let text = match kept.last() {
+            Some(last) if !last.text.ends_with([' ', '\t']) => &text,
+            _ => text.trim_start_matches([' ', '\t']),
+        };
+        if !text.is_empty() {
+            kept.push(Run { text: text.to_owned(), bold: run.bold, italic: run.italic });
+        }
+    }
+    let Some((bold, italic)) = icon_style else { return row };
+    if let Some(last) = kept.last_mut() {
+        last.text.truncate(last.text.trim_end_matches([' ', '\t']).len());
+    }
+    if kept.iter().all(|run| run.text.trim().is_empty()) {
+        return vec![Run { text: names.join(" "), bold, italic }];
+    }
+    kept
 }
 
 /// The rows of `source` between line breaks, upstream's `lineBreakRegex`

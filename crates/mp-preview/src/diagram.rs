@@ -5132,4 +5132,72 @@ mod tests {
 
         assert_eq!(mermaid(&body), format!("```mermaid\n{body}```"));
     }
+
+    #[test]
+    fn mermaid_fontawesome_token_is_dropped_from_a_label() {
+        assert_eq!(
+            mermaid("flowchart TD\n    B[\"fa:fa-twitter for peace\"]\n"),
+            "┌───────────┐\n│ for peace │\n└───────────┘"
+        );
+        assert_eq!(
+            mermaid("flowchart TD\n    C[fa:fa-ban forbidden]\n"),
+            "┌───────────┐\n│ forbidden │\n└───────────┘"
+        );
+        assert_eq!(
+            mermaid("flowchart TD\n    E(A fa:fa-camera-retro perhaps?)\n"),
+            "╭────────────╮\n│ A perhaps? │\n╰────────────╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_icon_only_label_shows_the_icon_name() {
+        assert_eq!(
+            mermaid("flowchart TD\n    D(fa:fa-spinner)\n"),
+            "╭─────────╮\n│ spinner │\n╰─────────╯"
+        );
+    }
+
+    #[test]
+    fn mermaid_every_fontawesome_prefix_is_recognised() {
+        for prefix in ["fab", "fas", "far", "fal", "fak"] {
+            let output = mermaid(&format!("flowchart TD\n    A[\"{prefix}:fa-x y\"]\n"));
+
+            assert!(output.lines().any(|line| line == "│ y │"), "{prefix}: {output}");
+        }
+    }
+
+    #[test]
+    fn mermaid_unknown_icon_prefixes_stay_text() {
+        for unknown in ["fad:fa-x y", "fx:fa-x y"] {
+            let output = mermaid(&format!("flowchart TD\n    A[\"{unknown}\"]\n"));
+
+            assert!(output.lines().any(|line| line == format!("│ {unknown} │")), "{output}");
+        }
+    }
+
+    #[test]
+    fn mermaid_fontawesome_token_is_dropped_from_a_markdown_label() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A[\"`fa:fa-car **go**`\"]\n"),
+            "┌────┐\n│ go │\n└────┘"
+        );
+        assert_eq!(mermaid("flowchart TD\n    A[\"`fa:fa-car`\"]\n"), "┌─────┐\n│ car │\n└─────┘");
+    }
+
+    #[test]
+    fn mermaid_fontawesome_token_in_an_edge_label_is_dropped() {
+        assert_eq!(mermaid("flowchart LR\n    A -->|fa:fa-check yes| B\n"), A_YES_B);
+    }
+
+    #[test]
+    fn mermaid_fontawesome_token_inside_emphasis_is_dropped() {
+        assert_eq!(
+            mermaid("flowchart TD\n    A[\"`**fa:fa-car** go`\"]\n"),
+            "┌────┐\n│ go │\n└────┘"
+        );
+        assert_eq!(
+            mermaid("flowchart TD\n    A[\"`**fa:fa-car**`\"]\n"),
+            "┌─────┐\n│ car │\n└─────┘"
+        );
+    }
 }
