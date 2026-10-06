@@ -218,6 +218,9 @@ pub(super) struct Subgraph {
     /// every link end on one of its borders has a cell of its own; set by
     /// [`grow_frames`](super::layout::grow_frames).
     pub spread: usize,
+    /// Whether the last `view` an `id@{ view: … }` statement gives the subgraph's id is
+    /// `collapsed`, which draws it as one box (see [`collapse`](super::collapse::collapse)).
+    pub collapsed: bool,
 }
 
 impl Subgraph {
@@ -397,6 +400,7 @@ pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failur
         open: Vec::new(),
         subgraph_ids: Vec::new(),
         edge_ids: HashSet::new(),
+        collapsed: HashSet::new(),
     };
     for (line, text) in statements {
         builder.statement(line, text)?;
@@ -659,6 +663,8 @@ struct Builder<'a> {
     subgraph_ids: Vec<&'a str>,
     /// The ids given to links (`A e1@--> B`), which an `e1@{ … }` statement refers to.
     edge_ids: HashSet<&'a str>,
+    /// The ids whose last `view` in `@{ … }` data is `collapsed`.
+    collapsed: HashSet<&'a str>,
 }
 
 /// A subgraph whose `end` has not been read yet.
@@ -828,6 +834,7 @@ impl<'a> Builder<'a> {
             parent,
             direction: None,
             spread: 0,
+            collapsed: false,
         });
         Ok(())
     }
@@ -836,8 +843,13 @@ impl<'a> Builder<'a> {
     /// after it, into a reference to the subgraph, as Mermaid reads it: a link end
     /// becomes [`End::Subgraph`], a subgraph listed inside another's block is nested in
     /// it, and the node declared for the id is dropped. A subgraph listed in two blocks
-    /// that do not nest, or nested in itself through such lists, is not drawn.
+    /// that do not nest, or nested in itself through such lists, is not drawn. Each
+    /// subgraph whose id was last given `view: collapsed` is marked
+    /// [`Subgraph::collapsed`].
     fn resolve_subgraph_ids(&mut self) -> Result<(), Failure> {
+        for (subgraph, id) in self.chart.subgraphs.iter_mut().zip(&self.subgraph_ids) {
+            subgraph.collapsed = self.collapsed.contains(id);
+        }
         let mut named = vec![None; self.chart.nodes.len()];
         for (subgraph, id) in self.subgraph_ids.iter().enumerate() {
             if let Some(&node) = self.index_of.get(id)
@@ -999,6 +1011,11 @@ impl<'a> Builder<'a> {
                         *label = data_label;
                     }
                 }
+                match data.collapsed {
+                    Some(true) => _ = self.collapsed.insert(id),
+                    Some(false) => _ = self.collapsed.remove(id),
+                    None => {}
+                }
                 after_data
             }
             None => rest,
@@ -1012,6 +1029,9 @@ struct ShapeData {
     shape: Option<Shape>,
     /// Replaces the label, also one given in brackets.
     label: Option<Label>,
+    /// Whether the `view` value is `collapsed`, when one is given; it matters only on a
+    /// subgraph's id.
+    collapsed: Option<bool>,
 }
 
 /// Upstream's short names and aliases of every shape, the `shape` values of `@{ … }`,
@@ -1178,13 +1198,14 @@ fn shape_data(line: usize, text: &str) -> Result<(ShapeData, &str), Failure> {
     if pairs.iter().any(|pair| !pair.after_value.trim().is_empty()) {
         return Err(syntax_error(line, "invalid shape data"));
     }
-    let mut data = ShapeData { shape: None, label: None };
+    let mut data = ShapeData { shape: None, label: None, collapsed: None };
     let mut image = false;
     for DataPair { key, value, .. } in pairs {
         match key {
             "shape" | "label" if value.text().is_empty() => {}
             "shape" => data.shape = Some(shape_named(line, &value.text())?),
             "label" => data.label = Some(value.label()),
+            "view" => data.collapsed = Some(value.text() == "collapsed"),
             // An image has no text drawing; every other pair is checked first, so that
             // an error beside it is reported whatever the order of the keys.
             "icon" | "img" => image = true,

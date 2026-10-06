@@ -5223,6 +5223,79 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_collapsed_subgraph_is_one_box_with_its_title() {
+        let output = mermaid(
+            "flowchart TD\n    Start --> one\n    subgraph one [My Group]\n        A --> B\n        B --> C\n    end\n    one --> End\n    one@{ view: collapsed }\n",
+        );
+
+        let row = |label| box_of(&output, label).map(|(row, ..)| row);
+        let (start, group, end) = (row("Start"), row("My Group"), row("End"));
+        assert!(start.is_some() && group.is_some() && end.is_some(), "{output}");
+        assert!(start < group && group < end, "{output}");
+        for member in ["A", "B", "C"] {
+            assert_eq!(box_of(&output, member), None, "{output}");
+        }
+        assert_eq!(frame_of(&output, "My Group"), None, "{output}");
+        assert_eq!(output.matches('▼').count(), 2, "{output}");
+        assert!(boxes_intact(&output, &["Start", "My Group", "End"]), "{output}");
+    }
+
+    #[test]
+    fn mermaid_collapsed_subgraph_without_a_title_shows_its_id() {
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    subgraph one\n    A --> B\n    end\n    one@{ view: collapsed }\n"
+            ),
+            "┌─────┐\n│ one │\n└─────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_link_to_a_member_of_a_collapsed_subgraph_lands_on_its_box() {
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    Start --> A\n    subgraph one [G]\n    A --> B\n    end\n    one@{ view: collapsed }\n"
+            ),
+            "┌───────┐     ┌───┐\n│ Start │────►│ G │\n└───────┘     └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_collapse_statement_may_precede_the_subgraph() {
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    one@{ view: collapsed }\n    subgraph one [G]\n    A --> B\n    end\n"
+            ),
+            "┌───┐\n│ G │\n└───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_expanded_view_draws_the_subgraph_normally() {
+        let expanded = "flowchart LR\n    subgraph one [G]\n    A\n    end\n";
+
+        assert_eq!(
+            mermaid(&format!("{expanded}    one@{{ view: expanded }}\n")),
+            mermaid(expanded)
+        );
+    }
+
+    #[test]
+    fn mermaid_nested_collapse_resolves_to_the_outermost_collapsed_subgraph() {
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    S --> A\n    subgraph outer [O]\n    subgraph inner [I]\n    A --> B\n    end\n    B --> C\n    end\n    outer@{ view: collapsed }\n    inner@{ view: collapsed }\n"
+            ),
+            "┌───┐     ┌───┐\n│ S │────►│ O │\n└───┘     └───┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_collapse_of_an_unknown_id_declares_a_node() {
+        assert_eq!(mermaid("flowchart LR\n    x@{ view: collapsed }\n"), "┌───┐\n│ x │\n└───┘");
+    }
+
+    #[test]
     fn mermaid_fontawesome_token_is_dropped_from_a_label() {
         assert_eq!(
             mermaid("flowchart TD\n    B[\"fa:fa-twitter for peace\"]\n"),
@@ -5404,6 +5477,37 @@ mod tests {
                 format!("mermaid: line 5: edge has no target\n```mermaid\n{body}```")
             );
         }
+    }
+
+    #[test]
+    fn mermaid_collapsed_subgraph_inside_an_expanded_one_is_a_box_in_its_frame() {
+        let output = mermaid(
+            "flowchart LR\n    subgraph outer [O]\n    subgraph inner [I]\n    A --> B\n    end\n    C\n    end\n    inner@{ view: collapsed }\n",
+        );
+
+        let frame = frame_of(&output, "O");
+        assert!(frame.is_some(), "{output}");
+        for label in ["I", "C"] {
+            let inside = box_of(&output, label)
+                .zip(frame)
+                .is_some_and(|(placed, frame)| box_inside_frame(placed, frame));
+            assert!(inside, "{label}: {output}");
+        }
+        for member in ["A", "B"] {
+            assert_eq!(box_of(&output, member), None, "{output}");
+        }
+    }
+
+    #[test]
+    fn mermaid_last_view_statement_wins() {
+        let plain = "flowchart LR\n    subgraph one [G]\n    A\n    end\n";
+
+        assert_eq!(
+            mermaid(&format!(
+                "{plain}    one@{{ view: collapsed }}\n    one@{{ view: expanded }}\n"
+            )),
+            mermaid(plain)
+        );
     }
 
     #[test]

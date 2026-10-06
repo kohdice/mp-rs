@@ -1,6 +1,7 @@
-//! Flowcharts (`flowchart` / `graph` diagrams): parse, lay out in layers, route the
-//! links, then draw.
+//! Flowcharts (`flowchart` / `graph` diagrams): parse, collapse the subgraphs marked
+//! collapsed, lay out in layers, route the links, then draw.
 
+mod collapse;
 mod draw;
 mod label;
 mod layout;
@@ -28,11 +29,13 @@ fn signed(value: usize) -> Option<isize> {
     isize::try_from(value).ok()
 }
 
-/// Parses `source` and draws it as [`render_chart`] does, under the frontmatter's title when it gives one; a syntax error comes from
+/// Parses `source`, collapses its collapsed subgraphs and draws it as [`render_chart`]
+/// does, under the frontmatter's title when it gives one; a syntax error comes from
 /// parsing.
 pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
     let front = parse::front_matter(source)?;
     let chart = parse::parse(front.body, front.first_line)?;
+    let chart = collapse::collapse(chart).ok_or(Failure::Unsupported)?;
     render_chart(chart, width, front.title.as_deref())
 }
 
