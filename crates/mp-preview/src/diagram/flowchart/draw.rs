@@ -3,7 +3,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::diagram::canvas::{Canvas, LineGlyphs};
-use crate::style::{Line, Style};
+use crate::style::{Line, Span, Style};
 use crate::theme::Rgb;
 use crate::theme::solarized::DARK_PALETTE;
 
@@ -57,6 +57,24 @@ impl Frame {
         };
         self.cell(near_end, cross)
     }
+}
+
+/// Display cells the title row of `title` takes.
+pub(super) fn title_width(title: &str) -> usize {
+    title.width()
+}
+
+/// `drawing` under a row showing `title`, centred over the drawing's widest line with the
+/// odd spare cell after it, or from the first column when wider, and a blank row.
+pub(super) fn titled(drawing: Vec<Line>, title: &str) -> Vec<Line> {
+    let drawing_width = drawing
+        .iter()
+        .map(|line| line.iter().map(|span| span.text.width()).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let indent = drawing_width.saturating_sub(title_width(title)) / 2;
+    let title_row = vec![Span { text: format!("{}{title}", " ".repeat(indent)), style: TEXT }];
+    [title_row, Vec::new()].into_iter().chain(drawing).collect()
 }
 
 pub(super) fn draw(scene: &Scene<'_>, direction: Direction) -> Vec<Line> {

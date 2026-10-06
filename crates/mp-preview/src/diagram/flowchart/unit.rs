@@ -132,7 +132,7 @@ fn draw_unit(chart: &Flowchart, units: &Units, unit: usize) -> Result<Vec<Line>,
         edge.to = end_in(edge.to)?;
         edges.push(edge);
     }
-    render_chart(Flowchart { direction, nodes, edges, subgraphs }, None)
+    render_chart(Flowchart { direction, nodes, edges, subgraphs }, None, None)
 }
 
 /// `chart` with each unit replaced by one node holding its drawing from `drawings`,

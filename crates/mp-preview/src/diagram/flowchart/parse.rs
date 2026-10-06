@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::diagram::{Failure, SyntaxError};
 use crate::style::Line;
 
-use super::label::{Label, is_entity_name_char, unquoted};
+use super::label::{Label, is_entity_name_char, shown_text, unquoted};
 
 #[derive(Debug)]
 pub(super) struct Flowchart {
@@ -283,8 +283,109 @@ const MAX_EDGES: usize = 500;
 /// Statements that only affect colors or interaction, which a text drawing cannot show.
 const IGNORED_KEYWORDS: [&str; 5] = ["style", "classDef", "class", "linkStyle", "click"];
 
-pub(super) fn parse(source: &str) -> Result<Flowchart, Failure> {
-    let mut statements = split_statements(source)
+/// A diagram's source split at its frontmatter.
+pub(super) struct FrontMatter<'a> {
+    /// The `title` the frontmatter gives, which upstream draws above the diagram.
+    pub title: Option<String>,
+    /// The source after the frontmatter.
+    pub body: &'a str,
+    /// The 1-based line of `source` that `body` starts on.
+    pub first_line: usize,
+}
+
+/// Splits off the frontmatter `source` starts with, as upstream's `extractFrontMatter`
+/// (`packages/mermaid/src/diagram-api/frontmatter.ts`) does, and reads its top-level
+/// `title`. The block opens with a first non-blank line `---`, which may be indented, and
+/// closes with the next line that is the same indent followed by `---`, as
+/// `frontMatterRegex` in `diagram-api/regexes.ts` (`([^\S\n\r]*)-{3}` … `\1-{3}`) reads
+/// it; that indent is removed from each line between before its keys are read, and a
+/// line without it is skipped. Every key but `title` is skipped: upstream applies
+/// `config` (theme, curve, HTML labels, …) to the SVG it draws, and none of it has a
+/// counterpart in box-drawing text.
+pub(super) fn front_matter(source: &str) -> Result<FrontMatter<'_>, Failure> {
+    let none = FrontMatter { title: None, body: source, first_line: 1 };
+    let mut lines = source.split_inclusive('\n').zip(1..);
+    let mut offset = 0;
+    let (opening, indent) = loop {
+        let Some((line, number)) = lines.next() else { return Ok(none) };
+        offset += line.len();
+        if !line.trim().is_empty() {
+            let fence =
+                line.trim_start_matches(|c: char| c.is_whitespace() && c != '\n' && c != '\r');
+            if !is_fence(fence) {
+                return Ok(none);
+            }
+            break (number, line.get(..line.len() - fence.len()).unwrap_or_default());
+        }
+    };
+    let mut title = None;
+    for (line, number) in lines {
+        offset += line.len();
+        // A line without the indent is neither the closing fence, which `\1-{3}` needs
+        // to repeat it, nor a top-level key.
+        let Some(line) = line.strip_prefix(indent) else { continue };
+        if is_fence(line) {
+            let body = source.get(offset..).unwrap_or_default();
+            return Ok(FrontMatter { title, body, first_line: number + 1 });
+        }
+        if let Some(value) = title_value(line) {
+            title = value;
+        }
+    }
+    Err(syntax_error(opening, "unclosed front matter"))
+}
+
+/// Whether `line` is a frontmatter fence: `---` and nothing after it but blanks.
+fn is_fence(line: &str) -> bool {
+    line.strip_prefix("---").is_some_and(|after| after.trim().is_empty())
+}
+
+/// The title a frontmatter `line`, its block's indent removed, gives when it holds the
+/// top-level `title` key: `Some(None)` when the value is falsy, `None` when the line
+/// holds another key. Only a value on the key's line is read, not a block scalar (`|`,
+/// `>`) or a plain scalar continued on the lines after it.
+fn title_value(line: &str) -> Option<Option<String>> {
+    let after_key = line.strip_prefix("title:")?.trim_end_matches(['\n', '\r']);
+    // In YAML, a `:` separates a key from its value only before a blank or the line's
+    // end, so `title:x` is one plain scalar and no key.
+    if !(after_key.is_empty() || after_key.starts_with([' ', '\t'])) {
+        return None;
+    }
+    let value = after_key.trim_start_matches([' ', '\t']);
+    let text = match value.starts_with(['"', '\'']).then(|| scalar(value)).flatten() {
+        // A quoted value is a string, falsy only when empty.
+        Some((quoted, _)) => Some(quoted.text()).filter(|text| !text.is_empty()),
+        // A bare value, which YAML's block context lets hold commas and braces, runs to
+        // the end of the line or to a comment, a `#` after a blank (YAML 1.2 §6.6); the
+        // blank after the colon counts, so `title: # note` is a comment alone. A `#`
+        // right after other text, as in `Hello#tag`, is part of the value.
+        None => {
+            let end = after_key
+                .match_indices('#')
+                .find(|&(at, _)| {
+                    after_key.get(..at).is_some_and(|before| before.ends_with([' ', '\t']))
+                })
+                .map_or(after_key.len(), |(at, _)| at);
+            let plain = after_key.get(..end).unwrap_or_default().trim();
+            (!is_falsy_plain_scalar(plain)).then_some(Cow::Borrowed(plain))
+        }
+    };
+    Some(text.map(|text| shown_text(&text)))
+}
+
+/// Whether the bare YAML scalar `value` reads as a falsy JavaScript value under js-yaml's
+/// `JSON_SCHEMA`, which upstream's `extractFrontMatter` loads the frontmatter with before
+/// keeping the title only `if (parsed.title)`: empty, `~` or `null` (null), `false`
+/// (boolean), or a number equal to 0.
+fn is_falsy_plain_scalar(value: &str) -> bool {
+    matches!(value, "" | "~" | "null" | "Null" | "NULL" | "false" | "False" | "FALSE")
+        || value.parse::<f64>().is_ok_and(|number| number == 0.0)
+}
+
+/// Parses the flowchart `source`, whose first line is line `first_line` of the
+/// diagram's source.
+pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failure> {
+    let mut statements = split_statements(source, first_line)
         .into_iter()
         .map(|(line, text)| (line, text.trim()))
         .filter(|(_, text)| !text.is_empty());
@@ -379,48 +480,90 @@ fn direction_word(word: &str) -> Option<Direction> {
     }
 }
 
-/// Splits `source` into statements, each with the 1-based line it starts on, for error
-/// reports: at each line break and `;`, and drops each `%%` comment up to the end of its
-/// line, ignoring all three inside double quotes, so that a quoted string may span lines
-/// as `flow.jison`'s `string` lexer state lets it, inside `@{ … }` shape data up to its
+/// Splits `source`, whose first line is line `first_line`, into statements, each with the
+/// 1-based line it starts on, for error reports: at each line break and `;`, and drops
+/// each `%%` comment up to the end of its line and the text [`passed_over`] names,
+/// ignoring all of them inside double quotes, so that a quoted string may span lines as
+/// `flow.jison`'s `string` lexer state lets it, inside `@{ … }` shape data up to its
 /// closing brace (see [`shape_data_end`]), which upstream's `shapeData` lexer state reads
 /// across lines, and inside the text of a `-- text -->` link on its line. The `;` closing
 /// an entity code such as `#quot;` splits nothing: upstream's `encodeEntities` in
 /// `packages/mermaid/src/utils.ts` replaces every `#\w+;` in the source before parsing
 /// it.
-fn split_statements(source: &str) -> Vec<(usize, &str)> {
-    let mut statements = Vec::new();
+fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
+    let mut statements: Vec<(usize, &str)> = Vec::new();
     let mut in_quotes = false;
-    let mut line = 1;
+    let mut line = first_line;
     // The line and byte index the current statement starts at.
-    let (mut start_line, mut start) = (1, 0);
+    let (mut start_line, mut start) = (first_line, 0);
     // Where a `%%` comment cut the current statement short.
     let mut comment: Option<usize> = None;
     // How many name characters follow the last `#`, while they may still make an entity
     // code; `None` outside one.
     let mut entity_name: Option<usize> = None;
+    // Whether the current statement holds nothing but blanks so far. An accessibility
+    // statement is read only where a statement starts: this scanner does not track
+    // bracket labels, so "accDescr:" inside A[see accDescr: x] must stay text, as
+    // upstream's lexer keeps it in its text state.
+    let mut blank = true;
+    // Whether a statement with text, the header, has been split off.
+    let mut after_header = false;
+    // The byte index of the line break ending the line being read, or of the source's
+    // end, found once per line for the `-- text -->` check.
+    let mut line_end = 0;
     let mut chars = source.char_indices().peekable();
     while let Some((index, c)) = chars.next() {
         let mut ends_statement = false;
+        // Whether a statement starts right after the text this character begins: after
+        // text passed over, the next statement starts on the same line, so that point is
+        // the start of a statement.
+        let mut restarts = false;
         match c {
             '\n' => ends_statement = !in_quotes,
             _ if comment.is_some() => {}
             '"' => in_quotes = !in_quotes,
             ';' => ends_statement = !in_quotes && !entity_name.is_some_and(|length| length > 0),
-            '%' if !in_quotes && chars.peek().is_some_and(|&(_, next)| next == '%') => {
-                comment = Some(index);
+            '%' | 'a' if !in_quotes => {
+                let rest = source.get(index..).unwrap_or_default();
+                match passed_over(rest, after_header, blank) {
+                    Some(length) => {
+                        let before = source.get(start..index).unwrap_or_default();
+                        after_header |= !before.trim().is_empty();
+                        statements.push((start_line, before));
+                        while let Some(&(at, skipped)) = chars.peek()
+                            && at < index + length
+                        {
+                            line += usize::from(skipped == '\n');
+                            chars.next();
+                        }
+                        start = index + length;
+                        start_line = line;
+                        restarts = true;
+                    }
+                    None if c == '%' && rest.starts_with("%%") => comment = Some(index),
+                    None => {}
+                }
             }
             '-' | '=' if !in_quotes => {
                 // Upstream reads the text of a `-- text -->` link in exclusive lexer
                 // states (`edgeText` and its thick and dotted kin), where `@{`, `;` and
                 // `%%` are text, so the link is passed over whole, up to its end on the
                 // line.
-                let line_rest = source.get(index..).and_then(|rest| rest.split('\n').next());
-                if let Some(line_rest) = line_rest
-                    && let Some((Link { label: Some(_), .. }, after)) = link(line_rest)
-                {
-                    let end = index + line_rest.len() - after.len();
-                    while chars.next_if(|&(at, _)| at < end).is_some() {}
+                if line_end <= index {
+                    line_end = source
+                        .get(index..)
+                        .and_then(|rest| rest.find('\n'))
+                        .map_or(source.len(), |at| index + at);
+                }
+                let line_rest = source.get(index..line_end).unwrap_or_default();
+                match link(line_rest) {
+                    Some((Link { label: Some(_), .. }, after)) => {
+                        let end = index + line_rest.len() - after.len();
+                        while chars.next_if(|&(at, _)| at < end).is_some() {}
+                    }
+                    // The rest of a run of line characters starts no link with text:
+                    // upstream's lexer takes the run as one `LINK` token.
+                    _ => while chars.next_if(|&(_, next)| next == c).is_some() {},
                 }
             }
             '@' if !in_quotes && chars.peek().is_some_and(|&(_, next)| next == '{') => {
@@ -442,10 +585,13 @@ fn split_statements(source: &str) -> Vec<(usize, &str)> {
         }
         if ends_statement {
             let end = comment.take().unwrap_or(index);
-            statements.push((start_line, source.get(start..end).unwrap_or_default()));
+            let text = source.get(start..end).unwrap_or_default();
+            after_header |= !text.trim().is_empty();
+            statements.push((start_line, text));
             start = index + c.len_utf8();
             start_line = line + usize::from(c == '\n');
         }
+        blank = ends_statement || restarts || (blank && c.is_whitespace());
         line += usize::from(c == '\n');
         entity_name = match c {
             '#' => Some(0),
@@ -456,6 +602,51 @@ fn split_statements(source: &str) -> Vec<(usize, &str)> {
     let end = comment.unwrap_or(source.len());
     statements.push((start_line, source.get(start..end).unwrap_or_default()));
     statements
+}
+
+/// The byte length of the text at the start of `rest` that [`split_statements`] passes
+/// over whole, ending the statement before it, where `after_header` tells whether the
+/// header has been read and `blank` whether `rest` starts a statement:
+///
+/// - A directive, `%%{` and a keyword (`init: …`), on one line or several, up to and
+///   including its `}%%`: upstream applies its configuration to the SVG, which a text
+///   drawing has no counterpart for. Upstream's `directiveRegex` (`%{2}{\s*(?:(\w+)\s*:|
+///   (\w+))`, `packages/mermaid/src/diagram-api/regexes.ts`) needs the keyword, so `%%{`
+///   without one is a comment. An unclosed directive runs to the end of the source.
+/// - An accessibility statement (see [`accessibility_end`]) after the header, which
+///   draws nothing upstream. Before the header it is not passed over: upstream's
+///   detector needs the text, without frontmatter, directives and comments, to start
+///   with `flowchart` or `graph`.
+fn passed_over(rest: &str, after_header: bool, blank: bool) -> Option<usize> {
+    if let Some(after_open) = rest.strip_prefix("%%{") {
+        let keyword =
+            after_open.trim_start().starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+        return keyword.then(|| rest.find("}%%").map_or(rest.len(), |at| at + "}%%".len()));
+    }
+    if after_header && blank { accessibility_end(rest) } else { None }
+}
+
+/// The byte length of the accessibility statement `text` starts with, `flow.jison`'s
+/// `acc_title` and `acc_descr` rules: `accTitle:` or `accDescr:` and the rest of the
+/// line, `;` included, or `accDescr {` up to the closing `}`. `None` when `text` starts
+/// with none, or with an `accDescr {` that nothing closes.
+fn accessibility_end(text: &str) -> Option<usize> {
+    let blank = [' ', '\t'];
+    let rest = match text.strip_prefix("accTitle") {
+        Some(after) => after.trim_start_matches(blank).strip_prefix(':')?,
+        None => {
+            let after = text.strip_prefix("accDescr")?;
+            match after.trim_start_matches(blank).strip_prefix(':') {
+                Some(after_colon) => after_colon,
+                None => {
+                    let after_brace = after.trim_start().strip_prefix('{')?;
+                    let close = after_brace.find('}')?;
+                    return Some(text.len() - after_brace.len() + close + 1);
+                }
+            }
+        }
+    };
+    Some(text.len() - rest.len() + rest.find('\n').unwrap_or(rest.len()))
 }
 
 struct Builder<'a> {
@@ -486,6 +677,15 @@ impl<'a> Builder<'a> {
     /// the group after it.
     /// `line` is the statement's 1-based line number in the source, for error reports.
     fn statement(&mut self, line: usize, statement: &'a str) -> Result<(), Failure> {
+        // A closed `accDescr {` block never reaches here (see [`accessibility_end`]); an
+        // unclosed one is an error, as upstream's `acc_descr_multiline` lexer state reads
+        // up to a `}` and fails at the end of the text.
+        if statement
+            .strip_prefix("accDescr")
+            .is_some_and(|after| after.trim_start().starts_with('{'))
+        {
+            return Err(syntax_error(line, "unclosed accessibility description"));
+        }
         if let Some(rest) = statement.strip_prefix("subgraph")
             && (rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
         {

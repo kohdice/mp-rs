@@ -28,10 +28,12 @@ fn signed(value: usize) -> Option<isize> {
     isize::try_from(value).ok()
 }
 
-/// Parses `source` and draws it as [`render_chart`] does; a syntax error comes from
+/// Parses `source` and draws it as [`render_chart`] does, under the frontmatter's title when it gives one; a syntax error comes from
 /// parsing.
 pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
-    render_chart(parse::parse(source)?, width)
+    let front = parse::front_matter(source)?;
+    let chart = parse::parse(front.body, front.first_line)?;
+    render_chart(chart, width, front.title.as_deref())
 }
 
 /// Lays the chart out with the default spacing and then tighter spacings, stopping at
@@ -40,8 +42,14 @@ pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Fa
 /// container and never grows past its natural size; a terminal has a fixed number of
 /// columns and cells that cannot shrink, so the drawing tightens its gaps and otherwise
 /// falls back. A subgraph laid out in a direction of its own is drawn
-/// first and placed as one box.
-fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Line>, Failure> {
+/// first and placed as one box. A `title` is drawn above the drawing and counts toward
+/// both bounds.
+fn render_chart(
+    chart: parse::Flowchart,
+    width: Option<usize>,
+    title: Option<&str>,
+) -> Result<Vec<Line>, Failure> {
+    let title_width = title.map(draw::title_width);
     let mut chart = unit::embed_units(chart)?;
     layout::grow_boxes(&mut chart).ok_or(Failure::Unsupported)?;
     if chart.nodes.is_empty() {
@@ -100,29 +108,36 @@ fn render_chart(chart: parse::Flowchart, width: Option<usize>) -> Result<Vec<Lin
             route::route(&chart, layered, axis, spacing.layer_gap).ok_or(Failure::Unsupported)?;
         // Labels only add cells, so a scene already too large is not worth placing
         // them on.
-        if !fits(&scene, axis, width) {
+        if !fits(&scene, axis, width, title_width) {
             continue;
         }
         let (labels, cross_shift) = route::place_labels(&routed);
         route::shift(&mut scene, &mut [], 0, cross_shift).ok_or(Failure::Unsupported)?;
         scene.labels = labels;
-        if fits(&scene, axis, width) {
-            return Ok(draw::draw(&scene, chart.direction));
+        if fits(&scene, axis, width, title_width) {
+            let drawing = draw::draw(&scene, chart.direction);
+            return Ok(match title {
+                Some(title) => draw::titled(drawing, title),
+                None => drawing,
+            });
         }
     }
     Err(Failure::Unsupported)
 }
 
-/// Whether the scene is at most `width` columns wide on screen and spans at most
+/// Whether the scene, under a title row `title_width` columns wide and a blank row when
+/// there is a title, is at most `width` columns wide on screen and spans at most
 /// [`MAX_CELLS`].
-fn fits(scene: &Scene<'_>, axis: Axis, width: Option<usize>) -> bool {
+fn fits(scene: &Scene<'_>, axis: Axis, width: Option<usize>, title_width: Option<usize>) -> bool {
     let (main, cross) = scene.extent(axis);
-    if main.checked_mul(cross).is_none_or(|cells| cells > MAX_CELLS) {
+    let (rows, columns) = match axis {
+        Axis::Horizontal => (cross, main),
+        Axis::Vertical => (main, cross),
+    };
+    let (title_rows, columns) = title_width.map_or((0, columns), |width| (2, columns.max(width)));
+    let rows = rows.checked_add(title_rows);
+    if rows.and_then(|rows| rows.checked_mul(columns)).is_none_or(|cells| cells > MAX_CELLS) {
         return false;
     }
-    let columns = match axis {
-        Axis::Horizontal => main,
-        Axis::Vertical => cross,
-    };
     width.is_none_or(|width| columns <= width)
 }

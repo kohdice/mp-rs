@@ -5134,6 +5134,95 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_frontmatter_title_is_drawn_centred_above_the_diagram() {
+        assert_eq!(
+            mermaid("---\ntitle: Hello Title\n---\nflowchart LR\n    A --> B\n"),
+            format!("  Hello Title\n\n{A_TO_B}")
+        );
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_may_be_double_quoted() {
+        assert_eq!(
+            mermaid("---\ntitle: \"Hello Title\"\n---\nflowchart LR\n    A --> B\n"),
+            mermaid("---\ntitle: Hello Title\n---\nflowchart LR\n    A --> B\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_wider_than_the_drawing_starts_at_column_0() {
+        assert_eq!(
+            mermaid("---\ntitle: A much longer diagram title\n---\nflowchart LR\n    A --> B\n"),
+            format!("A much longer diagram title\n\n{A_TO_B}")
+        );
+    }
+
+    #[test]
+    fn mermaid_frontmatter_config_is_read_and_ignored() {
+        let upstream = "---\ntitle: Hello Title\nconfig:\n  theme: base\n  themeVariables:\n    primaryColor: \"#00ff00\"\n---\nflowchart\n\tHello --> World\n";
+
+        assert_eq!(
+            mermaid(upstream),
+            mermaid("---\ntitle: Hello Title\n---\nflowchart\n\tHello --> World\n")
+        );
+        assert_eq!(
+            mermaid(
+                "---\nconfig:\n  flowchart:\n    curve: stepBefore\n---\nflowchart LR\n    A --> B\n"
+            ),
+            A_TO_B
+        );
+    }
+
+    #[test]
+    fn mermaid_unclosed_frontmatter_is_a_syntax_error() {
+        let body = "---\ntitle: x\nflowchart LR\n    A --> B\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 1: unclosed front matter\n```mermaid\n{body}```")
+        );
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_counts_toward_the_width() {
+        // A title wider than the drawing alone decides whether the block fits.
+        let wide = "---\ntitle: A much longer diagram title\n---\nflowchart LR\n    A --> B\n";
+        assert_eq!(mermaid_in(LR_A_TO_B, Some(26)), A_TO_B);
+        assert_eq!(mermaid_in(wide, Some(26)), format!("```mermaid\n{wide}```"));
+        assert_eq!(mermaid_in(wide, Some(27)), format!("A much longer diagram title\n\n{A_TO_B}"));
+    }
+
+    #[test]
+    fn mermaid_init_directive_before_the_header_is_ignored() {
+        let body = "%%{init: { \"flowchart\": { \"htmlLabels\": true, \"curve\": \"linear\" } } }%%\ngraph TD\n    A --> B\n";
+
+        assert_eq!(mermaid(body), mermaid(TD_A_TO_B));
+    }
+
+    #[test]
+    fn mermaid_multi_line_init_directive_is_ignored() {
+        let body = "%%{\n  init: {\n    \"theme\": \"dark\",\n    \"flowchart\": { \"curve\": \"linear\" }\n  }\n}%%\nflowchart LR\n    A --> B\n";
+
+        assert_eq!(mermaid(body), A_TO_B);
+    }
+
+    #[test]
+    fn mermaid_acc_title_and_acc_descr_are_ignored() {
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    accTitle: My title\n    accDescr: A description\n    A --> B\n"
+            ),
+            A_TO_B
+        );
+        assert_eq!(
+            mermaid(
+                "flowchart LR\n    accDescr {\n      Several lines\n      of text\n    }\n    A --> B\n"
+            ),
+            A_TO_B
+        );
+    }
+
+    #[test]
     fn mermaid_fontawesome_token_is_dropped_from_a_label() {
         assert_eq!(
             mermaid("flowchart TD\n    B[\"fa:fa-twitter for peace\"]\n"),
@@ -5185,8 +5274,74 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_frontmatter_title_drops_a_yaml_comment() {
+        assert_eq!(
+            mermaid("---\ntitle: Hello # a comment\n---\nflowchart LR\n    A --> B\n"),
+            format!("     Hello\n\n{A_TO_B}")
+        );
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_keeps_a_hash_without_a_blank_before_it() {
+        assert_eq!(
+            mermaid("---\ntitle: Hello#tag\n---\nflowchart LR\n    A --> B\n"),
+            format!("   Hello#tag\n\n{A_TO_B}")
+        );
+    }
+
+    #[test]
     fn mermaid_fontawesome_token_in_an_edge_label_is_dropped() {
         assert_eq!(mermaid("flowchart LR\n    A -->|fa:fa-check yes| B\n"), A_YES_B);
+    }
+
+    #[test]
+    fn mermaid_empty_frontmatter_title_draws_no_title_row() {
+        for title in ["title:", "title: \"\"", "title: null"] {
+            assert_eq!(
+                mermaid(&format!("---\n{title}\n---\nflowchart LR\n    A --> B\n")),
+                A_TO_B,
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_without_a_blank_after_the_colon_is_not_a_title() {
+        assert_eq!(mermaid("---\ntitle:x\n---\nflowchart LR\n    A --> B\n"), A_TO_B);
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_that_is_only_a_yaml_comment_is_no_title() {
+        assert_eq!(mermaid("---\ntitle: # note\n---\nflowchart LR\n    A --> B\n"), A_TO_B);
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_under_config_is_not_the_title() {
+        assert_eq!(mermaid("---\nconfig:\n  title: x\n---\nflowchart LR\n    A --> B\n"), A_TO_B);
+    }
+
+    #[test]
+    fn mermaid_indented_frontmatter_fences_are_read_with_their_indent() {
+        assert_eq!(
+            mermaid("  ---\n  title: Hi\n  ---\nflowchart LR\n    A --> B\n"),
+            format!("      Hi\n\n{A_TO_B}")
+        );
+    }
+
+    #[test]
+    fn mermaid_frontmatter_with_crlf_line_endings_renders_like_lf() {
+        assert_eq!(
+            mermaid("---\r\ntitle: Hello Title\r\n---\r\nflowchart LR\r\n    A --> B\r\n"),
+            mermaid("---\ntitle: Hello Title\n---\nflowchart LR\n    A --> B\n")
+        );
+    }
+
+    #[test]
+    fn mermaid_frontmatter_title_may_be_single_quoted() {
+        assert_eq!(
+            mermaid("---\ntitle: 'Hello Title'\n---\nflowchart LR\n    A --> B\n"),
+            mermaid("---\ntitle: Hello Title\n---\nflowchart LR\n    A --> B\n")
+        );
     }
 
     #[test]
@@ -5198,6 +5353,66 @@ mod tests {
         assert_eq!(
             mermaid("flowchart TD\n    A[\"`**fa:fa-car**`\"]\n"),
             "┌─────┐\n│ car │\n└─────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_percent_brace_without_a_keyword_is_a_comment() {
+        assert_eq!(mermaid("%%{ -- note\nflowchart LR\n    A --> B\n"), A_TO_B);
+    }
+
+    #[test]
+    fn mermaid_unclosed_init_directive_swallows_the_rest() {
+        let body = "%%{init: {\nflowchart LR\n    A --> B\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+    }
+
+    #[test]
+    fn mermaid_accessibility_statement_before_the_header_falls_back() {
+        let body = "accTitle: x\nflowchart LR\n    A --> B\n";
+
+        assert_eq!(mermaid(body), format!("```mermaid\n{body}```"));
+    }
+
+    #[test]
+    fn mermaid_unclosed_acc_descr_block_is_a_syntax_error() {
+        let body = "flowchart LR\n    accDescr {\n    A --> B\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 2: unclosed accessibility description\n```mermaid\n{body}```")
+        );
+    }
+
+    #[test]
+    fn mermaid_acc_descr_inside_a_label_is_text() {
+        assert_eq!(
+            mermaid("flowchart LR\n    A[see accDescr: x]\n"),
+            "┌─────────────────┐\n│ see accDescr: x │\n└─────────────────┘"
+        );
+    }
+
+    #[test]
+    fn mermaid_error_lines_count_the_frontmatter_and_directives() {
+        for body in [
+            "---\ntitle: x\n---\nflowchart LR\n    A -->\n",
+            "%%{\n  init: {}\n}%%\nflowchart LR\n    A -->\n",
+        ] {
+            assert_eq!(
+                mermaid(body),
+                format!("mermaid: line 5: edge has no target\n```mermaid\n{body}```")
+            );
+        }
+    }
+
+    #[test]
+    fn mermaid_frontmatter_closing_fence_needs_the_opening_fences_indent() {
+        let body = "  ---\n  title: Hi\n---\nflowchart LR\n    A --> B\n";
+
+        assert_eq!(
+            mermaid(body),
+            format!("mermaid: line 1: unclosed front matter\n```mermaid\n{body}```")
         );
     }
 }
