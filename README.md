@@ -9,9 +9,11 @@ mp [--render <auto|always|never>] [--color <auto|always|never>] [-f] <file.md>
 ```
 
 `mp` reads a Markdown file and writes it to stdout: rendered for the terminal when stdout
-is a terminal, unchanged otherwise (see [Rendering](#rendering)). It understands CommonMark plus the GitHub extensions for tables, strikethrough, task
-lists, autolinks, and alerts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`,
-`> [!CAUTION]`).
+is a terminal, unchanged otherwise (see [Rendering](#rendering)). It understands
+CommonMark plus the GitHub extensions for tables, strikethrough, task lists, autolinks,
+and alerts (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`).
+With color output on, an alert's title and quote bar are colored by its type: NOTE blue,
+TIP green, IMPORTANT violet, WARNING yellow, CAUTION red.
 
 ### Rendering
 
