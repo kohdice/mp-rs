@@ -5,7 +5,7 @@ Command to preview Markdown in the terminal.
 ## Usage
 
 ```bash
-cargo run -p mp -- [--color <auto|always|never>] <file.md>
+mp [--color <auto|always|never>] <file.md>
 ```
 
 `mp` reads a Markdown file, renders it for the terminal, and writes the result to stdout.
@@ -32,8 +32,9 @@ blocks are never wrapped. When stdout is piped or redirected, no width limit app
 
 A ` ```mermaid ` block holding a `flowchart` or `graph` diagram renders as boxes joined by
 box-drawing lines, in place of the code block. The drawing is built from characters, so it
-only approximates what a browser shows: shapes are made of box-drawing glyphs, lines run
-horizontally and vertically only, and a diagram has no colors.
+only approximates what a browser shows: shapes are made of box-drawing glyphs and lines run
+horizontally and vertically only. Colors set with `style`, `classDef`, `class`, `:::` and
+`linkStyle` are applied when color output is on.
 
 The block renders as a plain code block instead when the diagram is wider than the
 terminal, when it is another diagram type, or when it uses a feature that is not supported
