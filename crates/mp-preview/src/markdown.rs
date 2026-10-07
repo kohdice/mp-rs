@@ -4,7 +4,7 @@ use comrak::nodes::{AlertType, ListType, NodeValue, TableAlignment};
 use comrak::{Arena, Node, Options, parse_document};
 
 use crate::control::visualize_control;
-use crate::model::{Align, Block, Inline, ListItem};
+use crate::model::{AlertKind, Align, Block, Inline, ListItem};
 
 /// Parses a whole document into blocks; empty or whitespace-only input gives no blocks,
 /// and parsing never fails. The comrak arena is dropped before returning, so callers
@@ -27,14 +27,12 @@ fn convert_block(node: Node<'_>) -> Option<Block> {
         }
         NodeValue::BlockQuote => Some(Block::BlockQuote(convert_blocks(node))),
         NodeValue::Alert(alert) => {
+            let kind = convert_alert_kind(alert.alert_type);
             let title = match &alert.title {
                 Some(title) => sanitize_inline(title),
-                None => alert_label(alert.alert_type).to_owned(),
+                None => kind.label().to_owned(),
             };
-            let label = Block::Paragraph(vec![Inline::Strong(vec![Inline::Text(title)])]);
-            Some(Block::BlockQuote(
-                std::iter::once(label).chain(node.children().filter_map(convert_block)).collect(),
-            ))
+            Some(Block::Alert { kind, title, blocks: convert_blocks(node) })
         }
         NodeValue::CodeBlock(code) => Some(Block::CodeBlock {
             info: sanitize_inline(&code.info),
@@ -75,13 +73,13 @@ fn convert_align(alignment: &TableAlignment) -> Align {
     }
 }
 
-fn alert_label(alert_type: AlertType) -> &'static str {
+fn convert_alert_kind(alert_type: AlertType) -> AlertKind {
     match alert_type {
-        AlertType::Note => "NOTE",
-        AlertType::Tip => "TIP",
-        AlertType::Important => "IMPORTANT",
-        AlertType::Warning => "WARNING",
-        AlertType::Caution => "CAUTION",
+        AlertType::Note => AlertKind::Note,
+        AlertType::Tip => AlertKind::Tip,
+        AlertType::Important => AlertKind::Important,
+        AlertType::Warning => AlertKind::Warning,
+        AlertType::Caution => AlertKind::Caution,
     }
 }
 
@@ -408,15 +406,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_converts_alerts_to_quotes_with_bold_labels() {
-        for kind in ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"] {
+    fn parse_converts_alerts_to_alert_blocks_with_their_kind() {
+        for (label, kind) in [
+            ("NOTE", AlertKind::Note),
+            ("TIP", AlertKind::Tip),
+            ("IMPORTANT", AlertKind::Important),
+            ("WARNING", AlertKind::Warning),
+            ("CAUTION", AlertKind::Caution),
+        ] {
             assert_eq!(
-                parse(&format!("> [!{kind}]\n> body\n")),
-                vec![Block::BlockQuote(vec![
-                    Block::Paragraph(vec![Inline::Strong(vec![text(kind)])]),
-                    paragraph("body"),
-                ])],
-                "alert kind {kind}"
+                parse(&format!("> [!{label}]\n> body\n")),
+                vec![Block::Alert {
+                    kind,
+                    title: label.to_owned(),
+                    blocks: vec![paragraph("body")],
+                }],
+                "alert kind {label}"
             );
         }
     }
@@ -425,10 +430,11 @@ mod tests {
     fn parse_uses_custom_alert_titles_in_place_of_the_label() {
         assert_eq!(
             parse("> [!NOTE] Custom &#27;title\n> body\n"),
-            vec![Block::BlockQuote(vec![
-                Block::Paragraph(vec![Inline::Strong(vec![text("Custom ␛title")])]),
-                paragraph("body"),
-            ])]
+            vec![Block::Alert {
+                kind: AlertKind::Note,
+                title: "Custom ␛title".to_owned(),
+                blocks: vec![paragraph("body")],
+            }]
         );
     }
 

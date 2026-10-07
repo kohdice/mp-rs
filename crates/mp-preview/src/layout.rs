@@ -30,6 +30,9 @@ pub(crate) fn lay_out_block(
             text::lay_out_inlines(inlines, heading_style(*level), width)
         }
         Block::BlockQuote(blocks) => quote::lay_out_quote(blocks, width, color, depth),
+        Block::Alert { kind, title, blocks } => {
+            quote::lay_out_alert(*kind, title, blocks, width, color, depth)
+        }
         Block::List { start, tight, items } => {
             list::lay_out_list(*start, *tight, items, width, color, depth)
         }
@@ -88,7 +91,9 @@ mod tests {
     use crate::markdown::parse;
     use crate::model::{Block, ListItem};
     use crate::style::{Line, Span, Style};
-    use crate::theme::solarized::{BLUE, CYAN, DARK_PALETTE, MAGENTA, ORANGE, VIOLET, YELLOW};
+    use crate::theme::solarized::{
+        BLUE, CYAN, DARK_PALETTE, GREEN, MAGENTA, ORANGE, RED, VIOLET, YELLOW,
+    };
     use unicode_width::UnicodeWidthStr;
 
     fn lay_out(markdown: &str, width: Option<usize>) -> Vec<Line> {
@@ -423,12 +428,73 @@ mod tests {
     }
 
     #[test]
-    fn alert_quotes_start_with_a_bold_label() {
+    fn note_alert_colors_its_bar_and_title_blue() {
         let lines = lay_out("> [!NOTE]\n> body\n", None);
 
         assert_eq!(to_ansi(&lines, ColorMode::Plain), "│ NOTE\n│\n│ body");
-        let label = lines[0].iter().find(|span| span.text == "NOTE").map(|span| span.style.bold);
-        assert_eq!(label, Some(true), "{lines:?}");
+        let bar = Style { fg: Some(BLUE), ..Style::default() };
+        let title = Style { fg: Some(BLUE), bold: true, ..Style::default() };
+        assert_eq!(lines[0], vec![span("│ ", bar), span("NOTE", title)]);
+        assert_eq!(lines[1], vec![span("│", bar)]);
+        assert_eq!(lines[2].first(), Some(&span("│ ", bar)), "{lines:?}");
+    }
+
+    #[test]
+    fn each_alert_kind_has_its_own_bar_and_title_color() {
+        for (kind, color) in
+            [("TIP", GREEN), ("IMPORTANT", VIOLET), ("WARNING", YELLOW), ("CAUTION", RED)]
+        {
+            let lines = lay_out(&format!("> [!{kind}]\n> body\n"), None);
+
+            let title = Style { fg: Some(color), bold: true, ..Style::default() };
+            assert!(lines[0].contains(&span(kind, title)), "{kind}: {lines:?}");
+            let bar = Style { fg: Some(color), ..Style::default() };
+            assert!(
+                lines.iter().all(|line| line.first().map(|span| span.style) == Some(bar)),
+                "{kind}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn alert_body_keeps_the_body_color() {
+        let lines = lay_out("> [!CAUTION]\n> body **strong**\n", None);
+
+        let body = Style { fg: Some(DARK_PALETTE.body), ..Style::default() };
+        let strong = Style { bold: true, ..body };
+        assert_eq!(lines[2][1..], [span("body ", body), span("strong", strong)], "{lines:?}");
+    }
+
+    #[test]
+    fn custom_alert_title_is_colored_by_its_kind() {
+        let lines = lay_out("> [!TIP] Custom title\n> body\n", None);
+
+        assert_eq!(to_ansi(&lines, ColorMode::Plain), "│ Custom title\n│\n│ body");
+        let title = Style { fg: Some(GREEN), bold: true, ..Style::default() };
+        assert!(lines[0].contains(&span("Custom title", title)), "{lines:?}");
+        let bar = Style { fg: Some(GREEN), ..Style::default() };
+        assert!(
+            lines.iter().all(|line| line.first().map(|span| span.style) == Some(bar)),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn quote_nested_in_an_alert_keeps_the_muted_inner_bar() {
+        let lines = lay_out("> [!NOTE]\n> > inner\n", None);
+
+        assert_eq!(to_ansi(&lines, ColorMode::Plain), "│ NOTE\n│\n│ │ inner");
+        let outer = Style { fg: Some(BLUE), ..Style::default() };
+        let inner = Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() };
+        assert_eq!(lines[2][..2], [span("│ ", outer), span("│ ", inner)], "{lines:?}");
+    }
+
+    #[test]
+    fn alert_without_a_body_is_a_single_title_line() {
+        let lines = lay_out("> [!NOTE]\n", None);
+
+        assert_eq!(to_ansi(&lines, ColorMode::Plain), "│ NOTE");
+        assert_eq!(lines.len(), 1, "{lines:?}");
     }
 
     #[test]

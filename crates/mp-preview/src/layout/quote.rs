@@ -3,7 +3,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use crate::ansi::ColorMode;
-use crate::model::Block;
+use crate::model::{AlertKind, Block, Inline};
 use crate::style::{Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
@@ -16,11 +16,45 @@ pub(super) fn lay_out_quote(
     color: ColorMode,
     depth: usize,
 ) -> Vec<Line> {
-    let style = Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() };
+    let lines =
+        super::lay_out_blocks(blocks, true, super::narrow(width, BAR.width()), color, depth);
+    with_bar(lines, Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() })
+}
+
+/// Lays out an alert as a quote headed by the bold `title`, separated from the body by a
+/// blank line when both are non-empty; the bar and the title take the color of `kind`.
+pub(super) fn lay_out_alert(
+    kind: AlertKind,
+    title: &str,
+    blocks: &[Block],
+    width: Option<usize>,
+    color: ColorMode,
+    depth: usize,
+) -> Vec<Line> {
+    let alert = DARK_PALETTE.alert;
+    let kind_color = match kind {
+        AlertKind::Note => alert.note,
+        AlertKind::Tip => alert.tip,
+        AlertKind::Important => alert.important,
+        AlertKind::Warning => alert.warning,
+        AlertKind::Caution => alert.caution,
+    };
+    let inner = super::narrow(width, BAR.width());
+    let title_style = Style { fg: Some(kind_color), bold: true, ..Style::default() };
+    let mut lines =
+        super::text::lay_out_inlines(&[Inline::Text(title.to_owned())], title_style, inner);
+    let body = super::lay_out_blocks(blocks, true, inner, color, depth);
+    if !lines.is_empty() && !body.is_empty() {
+        lines.push(Line::new());
+    }
+    lines.extend(body);
+    with_bar(lines, Style { fg: Some(kind_color), ..Style::default() })
+}
+
+/// Prefixes every line with a bar in `style`; with no lines, gives a single bare bar.
+fn with_bar(mut lines: Vec<Line>, style: Style) -> Vec<Line> {
     let bar = Span { text: BAR.to_owned(), style };
     let bare_bar = Span { text: BAR.trim_end().to_owned(), style };
-    let mut lines =
-        super::lay_out_blocks(blocks, true, super::narrow(width, BAR.width()), color, depth);
     if lines.is_empty() {
         lines.push(Line::new());
     }
