@@ -51,14 +51,13 @@ always` or `-f`), no width limit applies.
 
 ### Mermaid diagrams
 
-A ` ```mermaid ` block holding a `flowchart` or `graph` diagram renders as boxes joined by
-box-drawing lines, in place of the code block. The drawing is built from characters, so it
-only approximates what a browser shows: shapes are made of box-drawing glyphs and lines run
-horizontally and vertically only. Colors set with `style`, `classDef`, `class`, `:::` and
-`linkStyle` are applied when color output is on.
+A ` ```mermaid ` block whose diagram type is supported renders as a character drawing in
+place of the code block. A drawing is built from characters, so it only approximates what
+a browser shows. [docs/mermaid.md](./docs/mermaid.md) lists the supported types and, for
+each, the syntax that is supported and how the drawing differs from a browser.
 
 The block renders as a plain code block instead when the diagram is wider than the
-terminal, when it is another diagram type, or when it uses a feature that is not supported
+terminal, when its type is not supported, or when it uses a feature that is not supported
 yet. A block that is not valid Mermaid also renders as a plain code block, with one line
 above it naming the problem, such as `mermaid: line 2: unclosed node label`.
 

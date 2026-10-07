@@ -99,4 +99,4 @@ These are guarantees the code relies on; changing one requires updating its cons
   accepts, rejects what Mermaid rejects, and applies Mermaid's limits, so a block that
   renders in a browser renders here and vice versa. It deviates only where character
   output cannot reproduce Mermaid's result (shapes, curves, label placement), and every
-  such deviation is stated in `README.md` next to the feature it affects.
+  such deviation is stated in `docs/mermaid.md` under the diagram type it affects.
