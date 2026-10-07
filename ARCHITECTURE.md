@@ -9,8 +9,10 @@ for that.
 ## Bird's-eye view
 
 `mp` reads a Markdown file, hands the text to `mp-preview`, and writes the rendered result
-to stdout. File-system access, terminal detection, and the color policy live in the binary;
-parsing, layout, and ANSI encoding are library code that never touch the file system.
+to stdout. File-system access, terminal detection, the render policy, and the color policy
+live in the binary; when not rendering, the binary writes the file unchanged and
+`mp-preview` is not involved. Parsing, layout, and ANSI encoding are library code that
+never touch the file system.
 
 Inside `mp-preview` the text flows through four stages. Each stage is a pure function from
 its input to its output, and only the last step writes anything:
@@ -36,10 +38,10 @@ Markdown text ──> markdown ──> model ──> layout ──> ansi ──>
 
 The project is a Cargo workspace whose members live under `crates/*`.
 
-| Crate               | Responsibility                                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, file reading, error-to-exit-code mapping.                     |
-| `crates/mp-preview` | Library: Markdown parsing, terminal layout, Mermaid flowchart drawing, and ANSI encoding behind the single `preview` function. |
+| Crate               | Responsibility                                                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, render policy (pass-through on piped stdout), file reading, error-to-exit-code mapping. |
+| `crates/mp-preview` | Library: Markdown parsing, terminal layout, Mermaid flowchart drawing, and ANSI encoding behind the single `preview` function.                           |
 
 ## Dependency graph
 
@@ -85,8 +87,11 @@ These are guarantees the code relies on; changing one requires updating its cons
   references, so later stages can print text verbatim. `diagram` decodes Mermaid entity
   codes (`#27;`) in labels and runs the result through the same replacement
   (`control::visualize_control`), so a drawing is as safe as the text it came from.
-- **Non-empty output ends with exactly one trailing newline.** `preview` appends the newline
-  to every encoded block, and empty input writes nothing.
+- **Non-empty rendering ends with exactly one trailing newline.** `preview` appends the
+  newline to every encoded block, and empty input writes nothing. This holds for the
+  rendering only: pass-through writes the file byte for byte (a file that is not valid
+  UTF-8 is a read error in both modes, because the file is read once with
+  `read_to_string`).
 - **Width handling is the library's job.** The binary only detects whether stdout is a
   terminal and how wide it is; every wrapping and table-shrinking decision is made in
   `layout` from the `Options` it receives.

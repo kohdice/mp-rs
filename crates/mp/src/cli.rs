@@ -21,7 +21,8 @@ pub struct Env {
     pub stdout_width: Option<usize>,
 }
 
-/// Runs the CLI: renders the requested file to `stdout` and maps failures to exit codes.
+/// Runs the CLI: writes the requested file to `stdout`, rendered or unchanged according to
+/// the flags and `env`, and maps failures to exit codes.
 ///
 /// Errors are reported on `stderr` with an `mp:` prefix; a broken pipe on `stdout` is
 /// treated as success so piping into `head` and friends stays quiet.
@@ -30,7 +31,7 @@ where
     W: Write,
     E: Write,
 {
-    let render = render_file(&cli.file, cli.color, env, stdout);
+    let render = render_file(&cli.file, resolve_output(cli, env), env.stdout_width, stdout);
     // Flush before reporting so a partial render reaches the terminal ahead of any
     // diagnostic. `and_then` would skip the flush after a render error; `and` runs it
     // and still reports the render error as the root cause when both fail.
@@ -51,18 +52,37 @@ where
 #[derive(Debug, ClapParser)]
 #[command(name = "mp", version, about = "Preview Markdown in the terminal")]
 pub struct Cli {
-    /// When to colorize output: auto (a terminal, unless NO_COLOR), always, or never.
-    #[arg(long, value_enum, default_value_t = ColorPolicy::Auto)]
-    color: ColorPolicy,
+    /// When to render for the terminal: auto (stdout is a terminal), always, or
+    /// never. When not rendering, the file is written unchanged, like `cat`.
+    #[arg(long, value_enum, default_value_t = When::Auto)]
+    render: When,
+    /// When to colorize the rendering: auto (a terminal, unless NO_COLOR), always,
+    /// or never. Has no effect when not rendering.
+    #[arg(long, value_enum, default_value_t = When::Auto)]
+    color: When,
+    /// Alias for `--render always --color always`; keeps the rendering when piping
+    /// into a program such as `less -R`. Cannot be combined with `--render` or
+    /// `--color`.
+    #[arg(short = 'f', long, conflicts_with_all = ["render", "color"])]
+    force_render: bool,
     /// Path to the Markdown file to preview.
     file: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ColorPolicy {
+enum When {
     Auto,
     Always,
     Never,
+}
+
+/// What `mp` writes to stdout, decided once from the flags and the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// The file contents, byte for byte.
+    PassThrough,
+    /// The terminal rendering, with or without ANSI styling.
+    Render(ColorMode),
 }
 
 #[derive(Debug)]
@@ -93,8 +113,8 @@ impl std::error::Error for CliError {
 
 fn render_file<W>(
     path: &Path,
-    color_policy: ColorPolicy,
-    env: Env,
+    output: Output,
+    width: Option<usize>,
     stdout: &mut W,
 ) -> Result<(), CliError>
 where
@@ -102,32 +122,49 @@ where
 {
     let markdown = std::fs::read_to_string(path)
         .map_err(|source| CliError::Read { path: path.to_path_buf(), source })?;
-    let options = Options { width: env.stdout_width, color: resolve_color_mode(color_policy, env) };
-    mp_preview::preview(&markdown, &options, stdout).map_err(CliError::WriteStdout)
+    match output {
+        Output::PassThrough => stdout.write_all(markdown.as_bytes()),
+        Output::Render(color) => mp_preview::preview(&markdown, &Options { width, color }, stdout),
+    }
+    .map_err(CliError::WriteStdout)
 }
 
-const fn resolve_color_mode(color_policy: ColorPolicy, env: Env) -> ColorMode {
+const fn resolve_output(cli: &Cli, env: Env) -> Output {
+    let (render_policy, color_policy) =
+        if cli.force_render { (When::Always, When::Always) } else { (cli.render, cli.color) };
+    let render = match render_policy {
+        When::Always => true,
+        When::Never => false,
+        When::Auto => env.stdout_is_terminal,
+    };
+    if render { Output::Render(resolve_color_mode(color_policy, env)) } else { Output::PassThrough }
+}
+
+const fn resolve_color_mode(color_policy: When, env: Env) -> ColorMode {
     match color_policy {
         // An explicit `--color always` wins over `NO_COLOR` (per no-color.org).
-        ColorPolicy::Always => ColorMode::Ansi,
-        ColorPolicy::Never => ColorMode::Plain,
-        ColorPolicy::Auto if env.stdout_is_terminal && !env.no_color => ColorMode::Ansi,
-        ColorPolicy::Auto => ColorMode::Plain,
+        When::Always => ColorMode::Ansi,
+        When::Never => ColorMode::Plain,
+        When::Auto if env.stdout_is_terminal && !env.no_color => ColorMode::Ansi,
+        When::Auto => ColorMode::Plain,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::ffi::OsStr;
     use std::fs;
     use std::io;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use clap::Parser as _;
+    use clap::error::ErrorKind;
     use mp_preview::ColorMode;
     use unicode_width::UnicodeWidthStr;
 
-    use super::{Cli, ColorPolicy, Env, render_file, resolve_color_mode, run};
+    use super::{Cli, Env, Output, When, render_file, resolve_color_mode, run};
 
     static TEMP_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -135,7 +172,7 @@ mod tests {
     fn auto_with_no_color_set_downgrades_to_plain() {
         assert_eq!(
             resolve_color_mode(
-                ColorPolicy::Auto,
+                When::Auto,
                 Env { no_color: true, stdout_is_terminal: true, ..Env::default() }
             ),
             ColorMode::Plain
@@ -146,7 +183,7 @@ mod tests {
     fn explicit_always_outranks_no_color() {
         assert_eq!(
             resolve_color_mode(
-                ColorPolicy::Always,
+                When::Always,
                 Env { no_color: true, stdout_is_terminal: true, ..Env::default() }
             ),
             ColorMode::Ansi
@@ -158,7 +195,7 @@ mod tests {
         let missing_file = unique_temp_path();
         let mut output = Vec::new();
 
-        let error = render_file(&missing_file, ColorPolicy::Never, plain_env(), &mut output)
+        let error = render_file(&missing_file, Output::PassThrough, None, &mut output)
             .err()
             .ok_or_else(|| io::Error::other("missing file unexpectedly rendered"))?;
 
@@ -170,8 +207,8 @@ mod tests {
 
     #[test]
     fn run_flushes_stdout_after_rendering() -> io::Result<()> {
-        let file = write_temp_markdown("Hello\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
+        let file = write_temp_markdown("# Hello\n")?;
+        let cli = parse(&["--color", "never"], &file)?;
         let log = RefCell::new(Vec::new());
         let mut stdout = RecordingWriter {
             log: &log,
@@ -181,7 +218,8 @@ mod tests {
         };
         let mut stderr = Vec::new();
 
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
+        let exit_code =
+            run(&cli, &mut stdout, &mut stderr, Env { stdout_is_terminal: true, ..Env::default() });
 
         assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
         assert_eq!(stdout.bytes, b"Hello\n");
@@ -198,12 +236,16 @@ mod tests {
     #[test]
     fn run_wraps_wide_tables_to_the_detected_terminal_width() -> io::Result<()> {
         let file = write_temp_markdown(WIDE_TABLE_MARKDOWN)?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
+        let cli = parse(&["--color", "never"], &file)?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
-        let exit_code =
-            run(&cli, &mut stdout, &mut stderr, Env { stdout_width: Some(40), ..Env::default() });
+        let exit_code = run(
+            &cli,
+            &mut stdout,
+            &mut stderr,
+            Env { stdout_is_terminal: true, stdout_width: Some(40), ..Env::default() },
+        );
 
         assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
         let output = utf8(stdout)?;
@@ -218,7 +260,7 @@ mod tests {
     #[test]
     fn run_flushes_stdout_before_reporting_a_mid_stream_failure() -> io::Result<()> {
         let file = write_temp_markdown("a\n\nb\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
+        let cli = parse(&["--render", "always", "--color", "never"], &file)?;
         let log = RefCell::new(Vec::new());
         let mut stdout = RecordingWriter {
             log: &log,
@@ -255,7 +297,7 @@ mod tests {
     #[test]
     fn run_treats_closed_stdout_pipe_as_success_without_diagnostic() -> io::Result<()> {
         let file = write_temp_markdown("Hello\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
+        let cli = parse(&["--render", "always", "--color", "never"], &file)?;
         let mut stdout = BrokenPipeWriter;
         let mut stderr = Vec::new();
 
@@ -265,6 +307,157 @@ mod tests {
         assert!(stderr.is_empty());
         fs::remove_file(file)?;
         Ok(())
+    }
+
+    #[test]
+    fn run_passes_the_file_through_unchanged_when_stdout_is_piped() -> io::Result<()> {
+        let markdown = "# Title\n\n| a | b |\n| --- | --- |\n| 1 | 2 |";
+        let file = write_temp_markdown(markdown)?;
+        let cli = parse(&[], &file)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run(&cli, &mut stdout, &mut stderr, Env::default());
+
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(utf8(stdout)?, markdown);
+        assert!(stderr.is_empty());
+        fs::remove_file(file)?;
+        Ok(())
+    }
+
+    #[test]
+    fn run_renders_when_stdout_is_a_terminal() -> io::Result<()> {
+        let output = run_on("# Title\n", &[], Env { stdout_is_terminal: true, ..Env::default() })?;
+
+        assert!(output.contains("Title"), "{output:?}");
+        assert!(!output.contains("# Title"), "{output:?}");
+        assert!(output.contains("\x1b["), "{output:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn run_passes_the_file_through_on_a_terminal_with_render_never() -> io::Result<()> {
+        let output = run_on(
+            "# Title\n",
+            &["--render", "never"],
+            Env { stdout_is_terminal: true, ..Env::default() },
+        )?;
+
+        assert_eq!(output, "# Title\n");
+        Ok(())
+    }
+
+    #[test]
+    fn run_renders_plain_on_a_pipe_with_render_always() -> io::Result<()> {
+        let output = run_on("# Title\n", &["--render", "always"], Env::default())?;
+
+        assert_eq!(output, "Title\n");
+        Ok(())
+    }
+
+    #[test]
+    fn run_renders_with_ansi_on_a_pipe_with_render_always_and_color_always() -> io::Result<()> {
+        let output =
+            run_on("# Title\n", &["--render", "always", "--color", "always"], Env::default())?;
+
+        assert!(output.contains("Title"), "{output:?}");
+        assert!(!output.contains("# Title"), "{output:?}");
+        assert!(output.contains("\x1b["), "{output:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn run_ignores_color_when_not_rendering() -> io::Result<()> {
+        let output =
+            run_on("# Title\n", &["--render", "never", "--color", "always"], Env::default())?;
+
+        assert_eq!(output, "# Title\n");
+        Ok(())
+    }
+
+    #[test]
+    fn run_force_render_renders_with_ansi_on_a_pipe_despite_no_color() -> io::Result<()> {
+        let output = run_on("# Title\n", &["-f"], Env { no_color: true, ..Env::default() })?;
+
+        assert!(output.contains("Title"), "{output:?}");
+        assert!(!output.contains("# Title"), "{output:?}");
+        assert!(output.contains("\x1b["), "{output:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn run_force_render_long_flag_matches_short_flag() -> io::Result<()> {
+        let env = Env { no_color: true, ..Env::default() };
+
+        let long = run_on("# Title\n", &["--force-render"], env)?;
+        let short = run_on("# Title\n", &["-f"], env)?;
+
+        assert_eq!(long, short);
+        Ok(())
+    }
+
+    #[test]
+    fn force_render_rejects_an_explicit_render_flag() -> io::Result<()> {
+        let file = write_temp_markdown("# Title\n")?;
+
+        let parsed = parse(&["-f", "--render", "never"], &file);
+
+        fs::remove_file(file)?;
+        let error =
+            parsed.err().ok_or_else(|| io::Error::other("`-f --render` unexpectedly parsed"))?;
+        assert_eq!(clap_error_kind(&error)?, ErrorKind::ArgumentConflict);
+        Ok(())
+    }
+
+    #[test]
+    fn force_render_rejects_an_explicit_color_flag() -> io::Result<()> {
+        let file = write_temp_markdown("# Title\n")?;
+
+        let parsed = parse(&["-f", "--color", "never"], &file);
+
+        fs::remove_file(file)?;
+        let error =
+            parsed.err().ok_or_else(|| io::Error::other("`-f --color` unexpectedly parsed"))?;
+        assert_eq!(clap_error_kind(&error)?, ErrorKind::ArgumentConflict);
+        Ok(())
+    }
+
+    /// Runs `mp <flags> <file>` on a temporary file holding `markdown` and returns
+    /// stdout, failing unless the run succeeds without a diagnostic.
+    fn run_on(markdown: &str, flags: &[&str], env: Env) -> io::Result<String> {
+        let file = write_temp_markdown(markdown)?;
+        let cli = parse(flags, &file)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run(&cli, &mut stdout, &mut stderr, env);
+
+        fs::remove_file(file)?;
+        if exit_code != std::process::ExitCode::SUCCESS || !stderr.is_empty() {
+            return Err(io::Error::other(format!(
+                "mp failed: {exit_code:?}, stderr: {}",
+                String::from_utf8_lossy(&stderr)
+            )));
+        }
+        utf8(stdout)
+    }
+
+    /// Recovers the kind of the `clap::Error` that `parse` wrapped into an `io::Error`.
+    fn clap_error_kind(error: &io::Error) -> io::Result<ErrorKind> {
+        error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<clap::Error>())
+            .map(clap::Error::kind)
+            .ok_or_else(|| io::Error::other(format!("not a clap error: {error}")))
+    }
+
+    /// Parses `mp <flags> <file>` through clap, as the binary does.
+    fn parse(flags: &[&str], file: &Path) -> io::Result<Cli> {
+        let args = std::iter::once(OsStr::new("mp"))
+            .chain(flags.iter().map(OsStr::new))
+            .chain(std::iter::once(file.as_os_str()));
+        Cli::try_parse_from(args).map_err(io::Error::other)
     }
 
     /// Piped stdout: not a terminal, no known width, and `NO_COLOR` unset.
