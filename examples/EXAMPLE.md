@@ -52,6 +52,23 @@ https://example.com/status?view=full
 > - Blockquote list item 1
 > - Blockquote list item 2
 
+## Alerts
+
+> [!NOTE]
+> Useful information that users should know, even when skimming content.
+
+> [!TIP]
+> Helpful advice for doing things better or more easily.
+
+> [!IMPORTANT]
+> Key information users need to know to achieve their goal.
+
+> [!WARNING]
+> Urgent info that needs immediate user attention to avoid problems.
+
+> [!CAUTION]
+> Advises about risks or negative outcomes of certain actions.
+
 ## Lists
 
 ### Unordered List
@@ -199,6 +216,12 @@ Line 3 with indentation:
     plain text stays as-is.
 ```
 
+## HTML Block
+
+<div class="note">
+  <p>An HTML block is shown verbatim and is never wrapped.</p>
+</div>
+
 ## Mermaid Diagrams
 
 ### Flowchart
@@ -226,7 +249,112 @@ flowchart LR
     Render --> Out([ANSI output])
 ```
 
-#### Nested subgraph
+#### BT and RL directions
+
+```mermaid
+flowchart BT
+    A[Start] --> B[Middle] --> C[End]
+```
+
+```mermaid
+flowchart RL
+    A[Start] --> B[Middle] --> C[End]
+```
+
+#### Node shapes written with brackets
+
+```mermaid
+flowchart TD
+    A[Rectangle] --> B(Rounded) --> C([Stadium]) --> D[[Subroutine]]
+    D --> E[(Cylinder)] --> F((Circle)) --> G>Asymmetric] --> H{Diamond}
+    I{{Hexagon}} --> J[/Parallelogram/] --> K[\Parallelogram alt\]
+    K --> L[/Trapezoid\] --> M[\Trapezoid alt/] --> N(((Double circle))) --> O(-Ellipse-)
+```
+
+#### Node shapes written with `@{ shape }`
+
+```mermaid
+flowchart TD
+    A@{ shape: notch-rect, label: "Card" } --> B@{ shape: doc, label: "Document" }
+    B --> C@{ shape: docs, label: "Documents" } --> D@{ shape: folder, label: "Folder" }
+    E@{ shape: sl-rect, label: "Manual input" } --> F@{ shape: delay, label: "Delay" }
+    F --> G@{ shape: h-cyl, label: "Direct access" } --> H@{ shape: lin-cyl, label: "Disk" }
+    I@{ shape: tri, label: "Extract" } --> J@{ shape: hourglass, label: "Collate" }
+    J --> K@{ shape: cloud, label: "Cloud" } --> L@{ shape: person, label: "User" }
+    M@{ shape: sm-circ } --> N@{ shape: text, label: "Text block" } --> O@{ shape: fr-circ }
+    P@{ shape: fork } --> Q@{ shape: brace, label: "Comment" } --> R@{ shape: cross-circ }
+```
+
+```mermaid
+flowchart LR
+    A@{
+        shape: 'bang',
+        label: "Multi-line @{ } with 'quotes' and \"escapes\""
+    } --> B@{ shape: bolt, label: "Com link" }
+```
+
+#### Link kinds
+
+```mermaid
+flowchart LR
+    A --> B
+    A --- C
+    A -.-> D
+    A ==> E
+    A --o F
+    A --x G
+    A <--> H
+    A o--o I
+    A x--x J
+    A ~~~ K
+```
+
+#### Edge labels
+
+```mermaid
+flowchart TD
+    A -- text --> B
+    B -->|text| C
+    C -. text .-> D
+    D == text ==> E
+    E --o|circle| F
+    F ---->|long link| G
+```
+
+#### Groups with `&`, self loops and edge ids
+
+```mermaid
+flowchart LR
+    A & B --> C & D
+    D -->|retry| D
+```
+
+```mermaid
+flowchart LR
+    A e1@--> B
+    e1@{ animate: true }
+```
+
+#### Subgraphs
+
+```mermaid
+flowchart TD
+    subgraph workers [Workers]
+        direction LR
+        W1[Worker 1] --> W2[Worker 2]
+    end
+```
+
+```mermaid
+flowchart TD
+    Start --> group
+    subgraph group [Group]
+        A --> B
+    end
+    group --> Finish
+    subgraph empty [Empty group]
+    end
+```
 
 ```mermaid
 flowchart TD
@@ -239,6 +367,59 @@ flowchart TD
     end
     A2 --> Out([Done])
 ```
+
+```mermaid
+flowchart TD
+    Start --> one
+    subgraph one [Collapsed group]
+        A --> B
+    end
+    one --> Finish
+    one@{ view: collapsed }
+```
+
+#### Labels
+
+```mermaid
+flowchart TD
+    A["`**Bold** and _italic_
+    on two lines`"] --> B["Line one<br>Line two"]
+    B --> C["Quotes #quot;here#quot; and #35;"] --> D["fa:fa-car Drive"]
+```
+
+#### Frontmatter, directives and accessibility statements
+
+```mermaid
+---
+title: Build pipeline
+---
+%%{init: { "theme": "dark" } }%%
+flowchart LR
+    accTitle: Build pipeline
+    accDescr: Source goes through build and test to a release.
+    Src[Source] --> Build --> Test --> Release
+```
+
+#### Styling
+
+```mermaid
+flowchart LR
+    A[Styled node] --> B[Class node]:::warn --> C[Default class]
+    style A fill:#f9f,stroke:#333,stroke-width:4px,color:#000
+    classDef warn fill:#fdd,stroke:#f66,stroke-dasharray: 5 5
+    classDef default stroke:#66f
+    linkStyle 0 stroke:#ff3,stroke-width:4px
+    linkStyle default stroke:#999
+```
+
+#### Syntax error
+
+```mermaid
+flowchart LR
+    A[Unclosed --> B
+```
+
+The diagram types below are not supported yet and render as plain code blocks.
 
 ### Sequence diagram
 

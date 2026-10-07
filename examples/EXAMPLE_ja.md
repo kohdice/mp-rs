@@ -52,6 +52,23 @@ https://example.com/status?view=full
 > - 引用内リスト 1
 > - 引用内リスト 2
 
+## アラート
+
+> [!NOTE]
+> 読み飛ばしていても知っておいてほしい補足情報です。
+
+> [!TIP]
+> よりうまく、より簡単に進めるためのヒントです。
+
+> [!IMPORTANT]
+> 目的を達成するために必ず知っておくべき情報です。
+
+> [!WARNING]
+> 問題を避けるためにすぐ注意を向けてほしい情報です。
+
+> [!CAUTION]
+> ある操作のリスクや望ましくない結果についての注意です。
+
 ## リスト
 
 ### 順不同リスト
@@ -199,6 +216,12 @@ fi
     plain text stays as-is.
 ```
 
+## HTML ブロック
+
+<div class="note">
+  <p>HTML ブロックはそのまま表示され、折り返されません。</p>
+</div>
+
 ## Mermaid 図
 
 ### フローチャート (flowchart)
@@ -207,12 +230,12 @@ fi
 
 ```mermaid
 flowchart TD
-    A(Input) --> B[Lexer]
-    B --> C[Parser]
-    C --> D{Valid?}
-    D -->|yes| E[Render]
-    D -->|no| F[Report error]
-    E --> G([Done])
+    A(入力) --> B[字句解析]
+    B --> C[構文解析]
+    C --> D{正しい?}
+    D -->|はい| E[描画]
+    D -->|いいえ| F[エラー報告]
+    E --> G([完了])
     F --> G
 ```
 
@@ -220,25 +243,183 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    Src(Markdown) --> Lex[Lexer]
-    Lex --> AST[AST Builder]
-    AST --> Render[Renderer]
-    Render --> Out([ANSI output])
+    Src(Markdown) --> Lex[字句解析器]
+    Lex --> AST[AST 構築]
+    AST --> Render[描画器]
+    Render --> Out([ANSI 出力])
 ```
 
-#### ネストした subgraph
+#### BT 方向と RL 方向
+
+```mermaid
+flowchart BT
+    A[開始] --> B[中間] --> C[終了]
+```
+
+```mermaid
+flowchart RL
+    A[開始] --> B[中間] --> C[終了]
+```
+
+#### 括弧で書くノード形状
 
 ```mermaid
 flowchart TD
-    subgraph services [ServicesLayer]
-        Svc1[Receive request] --> Svc2[Validate payload]
-        subgraph adapters [AdaptersLayer]
-            A1[DB adapter] --> A2[Cache adapter]
+    A[四角形] --> B(角丸) --> C([スタジアム]) --> D[[サブルーチン]]
+    D --> E[(円柱)] --> F((円)) --> G>非対称] --> H{ひし形}
+    I{{六角形}} --> J[/平行四辺形/] --> K[\逆平行四辺形\]
+    K --> L[/台形\] --> M[\逆台形/] --> N(((二重円))) --> O(-楕円-)
+```
+
+#### `@{ shape }` で書くノード形状
+
+```mermaid
+flowchart TD
+    A@{ shape: notch-rect, label: "カード" } --> B@{ shape: doc, label: "文書" }
+    B --> C@{ shape: docs, label: "複数の文書" } --> D@{ shape: folder, label: "フォルダ" }
+    E@{ shape: sl-rect, label: "手入力" } --> F@{ shape: delay, label: "遅延" }
+    F --> G@{ shape: h-cyl, label: "直接アクセス" } --> H@{ shape: lin-cyl, label: "ディスク" }
+    I@{ shape: tri, label: "抽出" } --> J@{ shape: hourglass, label: "照合" }
+    J --> K@{ shape: cloud, label: "クラウド" } --> L@{ shape: person, label: "利用者" }
+    M@{ shape: sm-circ } --> N@{ shape: text, label: "テキスト" } --> O@{ shape: fr-circ }
+    P@{ shape: fork } --> Q@{ shape: brace, label: "コメント" } --> R@{ shape: cross-circ }
+```
+
+```mermaid
+flowchart LR
+    A@{
+        shape: 'bang',
+        label: "複数行の @{ } と 'クォート' と \"エスケープ\""
+    } --> B@{ shape: bolt, label: "通信リンク" }
+```
+
+#### リンクの種類
+
+```mermaid
+flowchart LR
+    A --> B
+    A --- C
+    A -.-> D
+    A ==> E
+    A --o F
+    A --x G
+    A <--> H
+    A o--o I
+    A x--x J
+    A ~~~ K
+```
+
+#### エッジラベル
+
+```mermaid
+flowchart TD
+    A -- テキスト --> B
+    B -->|テキスト| C
+    C -. テキスト .-> D
+    D == テキスト ==> E
+    E --o|丸| F
+    F ---->|長いリンク| G
+```
+
+#### `&` によるグループ、自己ループ、エッジ id
+
+```mermaid
+flowchart LR
+    A & B --> C & D
+    D -->|再試行| D
+```
+
+```mermaid
+flowchart LR
+    A e1@--> B
+    e1@{ animate: true }
+```
+
+#### subgraph
+
+```mermaid
+flowchart TD
+    subgraph workers [ワーカー]
+        direction LR
+        W1[ワーカー 1] --> W2[ワーカー 2]
+    end
+```
+
+```mermaid
+flowchart TD
+    Start[開始] --> group
+    subgraph group [グループ]
+        A --> B
+    end
+    group --> Finish[終了]
+    subgraph empty [空のグループ]
+    end
+```
+
+```mermaid
+flowchart TD
+    subgraph services [サービス層]
+        Svc1[リクエスト受信] --> Svc2[ペイロード検証]
+        subgraph adapters [アダプタ層]
+            A1[DB アダプタ] --> A2[キャッシュアダプタ]
         end
         Svc2 --> A1
     end
-    A2 --> Out([Done])
+    A2 --> Out([完了])
 ```
+
+```mermaid
+flowchart TD
+    Start[開始] --> one
+    subgraph one [折りたたまれたグループ]
+        A --> B
+    end
+    one --> Finish[終了]
+    one@{ view: collapsed }
+```
+
+#### ラベル
+
+```mermaid
+flowchart TD
+    A["`**太字** と *斜体* を
+    2 行で`"] --> B["1 行目<br>2 行目"]
+    B --> C["引用符 #quot;ここ#quot; と #35;"] --> D["fa:fa-car 運転"]
+```
+
+#### frontmatter・directive・アクセシビリティ文
+
+```mermaid
+---
+title: ビルドパイプライン
+---
+%%{init: { "theme": "dark" } }%%
+flowchart LR
+    accTitle: ビルドパイプライン
+    accDescr: ソースはビルドとテストを経てリリースされる。
+    Src[ソース] --> Build[ビルド] --> Test[テスト] --> Release[リリース]
+```
+
+#### スタイル
+
+```mermaid
+flowchart LR
+    A[スタイル付き] --> B[クラス付き]:::warn --> C[既定クラス]
+    style A fill:#f9f,stroke:#333,stroke-width:4px,color:#000
+    classDef warn fill:#fdd,stroke:#f66,stroke-dasharray: 5 5
+    classDef default stroke:#66f
+    linkStyle 0 stroke:#ff3,stroke-width:4px
+    linkStyle default stroke:#999
+```
+
+#### 構文エラー
+
+```mermaid
+flowchart LR
+    A[閉じていない --> B
+```
+
+以下の図の種類はまだ対応しておらず、通常のコードブロックとして表示されます。
 
 ### シーケンス図 (sequenceDiagram)
 
@@ -246,40 +427,40 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant B as Browser
+    participant U as 利用者
+    participant B as ブラウザ
     participant API
     participant DB
 
-    U->>B: Open /login
+    U->>B: /login を開く
     B->>API: POST /login
     API->>DB: SELECT user
-    DB-->>API: user row
-    API-->>B: 200 OK + token
-    B-->>U: render dashboard
+    DB-->>API: ユーザー行
+    API-->>B: 200 OK + トークン
+    B-->>U: ダッシュボードを表示
 ```
 
 #### `alt` / `else` / `par` と note
 
 ```mermaid
 sequenceDiagram
-    participant Client
+    participant Client as クライアント
     participant API
     participant DB
     Client->>API: GET /resource
-    alt cached
-        API-->>Client: 200 OK (cached)
-    else miss
+    alt キャッシュあり
+        API-->>Client: 200 OK (キャッシュ)
+    else キャッシュなし
         API->>DB: SELECT resource
-        DB-->>API: row
+        DB-->>API: 行
         API-->>Client: 200 OK
     end
-    par warm cache
+    par キャッシュ更新
         API->>DB: touch resource
-    and record metrics
+    and メトリクス記録
         API->>DB: insert metric
     end
-    Note over Client,API: request completed
+    Note over Client,API: リクエスト完了
 ```
 
 ### クラス図 (classDiagram)
@@ -330,7 +511,7 @@ classDiagram
             +describe() String
         }
     }
-    Account o-- Transaction : records
+    Account o-- Transaction : 記録する
 ```
 
 ### 状態遷移図 (stateDiagram)
@@ -339,14 +520,15 @@ classDiagram
 
 ```mermaid
 stateDiagram-v2
-    state "Waiting for payment" as Pending
-    state "Payment confirmed" as Confirmed
-    state "Being shipped" as Shipped
+    state "支払い待ち" as Pending
+    state "支払い確認済み" as Confirmed
+    state "配送中" as Shipped
+    state "配達済み" as Delivered
 
     [*] --> Pending
-    Pending --> Confirmed : payment_received
-    Confirmed --> Shipped : dispatched
-    Shipped --> Delivered : arrived
+    Pending --> Confirmed : 入金
+    Confirmed --> Shipped : 発送
+    Shipped --> Delivered : 到着
     Delivered --> [*]
 ```
 
@@ -354,14 +536,17 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Idle
-    state Active {
+    state "待機" as Idle
+    state "稼働中" as Active {
+        state "待ち" as Waiting
+        state "処理中" as Working
         [*] --> Waiting
-        Waiting --> Working : request
-        Working --> Waiting : finished
+        Waiting --> Working : 要求
+        Working --> Waiting : 完了
     }
-    Idle --> Active : start
-    Active --> Idle : stop
+    [*] --> Idle
+    Idle --> Active : 開始
+    Active --> Idle : 停止
     Idle --> [*]
 ```
 
@@ -369,9 +554,9 @@ stateDiagram-v2
 
 ```mermaid
 erDiagram
-    authors ||--o{ books : writes
-    categories ||--o{ book_categories : tags
-    books ||--o{ book_categories : classified_as
+    authors ||--o{ books : "執筆する"
+    categories ||--o{ book_categories : "分類する"
+    books ||--o{ book_categories : "分類される"
 
     authors {
         INT id PK
@@ -401,7 +586,7 @@ erDiagram
 
 ```mermaid
 gitGraph
-    commit id: "init"
+    commit id: "初期化"
     commit tag: "v0.9"
     branch develop
     commit
@@ -420,8 +605,8 @@ gitGraph
 
 ```mermaid
 xychart
-title "Quarterly Performance"
-x-axis ["Q1", "Q2", "Q3", "Q4"]
+title "四半期の業績"
+x-axis ["第1四半期", "第2四半期", "第3四半期", "第4四半期"]
 y-axis 0 --> 100
 bar [30, 50, 40, 60]
 line [35, 45, 55, 65]
@@ -431,9 +616,9 @@ line [35, 45, 55, 65]
 
 ```mermaid
 xychart horizontal
-title "Monthly Revenue"
-x-axis "Month" [Jan, Feb, Mar]
-y-axis "Revenue" 0 --> 300
+title "月間売上"
+x-axis "月" ["1月", "2月", "3月"]
+y-axis "売上" 0 --> 300
 bar [120, 200, 260]
 ```
 
