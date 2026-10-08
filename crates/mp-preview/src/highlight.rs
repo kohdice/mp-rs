@@ -110,20 +110,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_code_blocks_over_the_line_guardrail() {
-        let code = "x\n".repeat(10_001);
+    fn highlight_pieces_concatenate_to_the_code_with_line_endings_inside() {
+        let code = "fn a() {}\n\nlet x = 1;\n";
+        let pieces = highlight("rust", code)
+            .unwrap_or_else(|| panic!("rust code within the guardrails should be highlighted"));
+        let texts: Vec<&str> = pieces.iter().map(|&(_, text)| text).collect();
 
-        assert_eq!(highlight("rust", &code), None);
+        assert_eq!(texts.concat(), code);
+        assert!(texts.iter().all(|text| !text.is_empty()), "empty piece in {texts:?}");
     }
 
     #[test]
-    fn rejects_code_blocks_over_the_byte_guardrail() {
-        let too_large = "x".repeat(512 * 1024 + 1);
-        let largest = "x".repeat(512 * 1024);
+    fn line_guardrail_rejects_only_above_ten_thousand_lines() {
         let most_lines = "x\n".repeat(10_000);
+        let one_line_too_many = "x\n".repeat(10_001);
 
-        assert_eq!(highlight("rust", &too_large), None);
-        assert!(highlight("rust", &largest).is_some());
         assert!(highlight("rust", &most_lines).is_some());
+        assert_eq!(highlight("rust", &one_line_too_many), None);
+    }
+
+    #[test]
+    fn byte_guardrail_rejects_only_above_512_kib() {
+        // 8,192 lines of 64 bytes stay under the line guardrail, and plain text keeps
+        // highlighting the accepted block fast in debug builds.
+        let largest = format!("{}\n", "x".repeat(63)).repeat(8_192);
+        let one_byte_too_many = format!("{largest}x");
+        assert_eq!(largest.len(), 512 * 1024);
+
+        assert!(highlight("txt", &largest).is_some());
+        assert_eq!(highlight("txt", &one_byte_too_many), None);
     }
 }

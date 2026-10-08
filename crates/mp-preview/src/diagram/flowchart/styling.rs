@@ -344,3 +344,99 @@ const NAMED_COLORS: [(&str, u32); 148] = [
     ("yellow", 0xffff00),
     ("yellowgreen", 0x9acd32),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RED: Rgb = Rgb { r: 255, g: 0, b: 0 };
+    const GREEN: Rgb = Rgb { r: 0, g: 255, b: 0 };
+    const PINK: Rgb = Rgb { r: 255, g: 153, b: 255 };
+
+    #[test]
+    fn styling_parse_reads_hex_and_named_colors_and_skips_other_values() {
+        let stroke = |value: &str| Styling::parse(&format!("stroke:{value}")).stroke;
+
+        assert_eq!(stroke("#f0f"), ColorSetting::Color(Rgb { r: 255, g: 0, b: 255 }));
+        assert_eq!(stroke("#ff0000"), ColorSetting::Color(RED));
+        assert_eq!(stroke("#ff000080"), ColorSetting::Color(RED));
+        assert_eq!(stroke("red"), ColorSetting::Color(RED));
+        assert_eq!(stroke("SteelBlue"), ColorSetting::Color(Rgb { r: 70, g: 130, b: 180 }));
+        assert_eq!(stroke("notacolor"), ColorSetting::Unset);
+    }
+
+    #[test]
+    fn styling_parse_none_and_transparent_reset_stroke_and_fill() {
+        for value in ["none", "transparent"] {
+            let reset = Styling::parse(&format!("stroke:{value},fill:{value}"));
+            assert_eq!((reset.stroke, reset.fill), (ColorSetting::Reset, ColorSetting::Reset));
+
+            let earlier = Styling::parse("stroke:#f00,fill:#f9f");
+            let combined = earlier.then(reset);
+            assert_eq!((combined.stroke.rgb(), combined.fill.rgb()), (None, None), "{value}");
+        }
+    }
+
+    #[test]
+    fn styling_parse_color_transparent_resets_and_color_none_is_ignored() {
+        let earlier = Styling::parse("color:#00ff00");
+
+        assert_eq!(Styling::parse("color:transparent").color, ColorSetting::Reset);
+        assert_eq!(earlier.then(Styling::parse("color:transparent")).color.rgb(), None);
+        assert_eq!(Styling::parse("color:none").color, ColorSetting::Unset);
+        assert_eq!(earlier.then(Styling::parse("color:none")).color.rgb(), Some(GREEN));
+    }
+
+    #[test]
+    fn styling_parse_reads_properties_and_keywords_in_any_case() {
+        assert_eq!(Styling::parse("Fill:Red").fill, ColorSetting::Color(RED));
+        assert_eq!(Styling::parse("FONT-WEIGHT:Bold").bold, Some(true));
+        assert_eq!(Styling::parse("Font-Style:ITALIC").italic, Some(true));
+        assert_eq!(Styling::parse("stroke-dasharray:None").dotted, Some(false));
+    }
+
+    #[test]
+    fn styling_parse_ignores_unknown_properties() {
+        assert_eq!(
+            Styling::parse("font-size:12pt,stroke:#ff0000"),
+            Styling { stroke: ColorSetting::Color(RED), ..Styling::default() }
+        );
+    }
+
+    #[test]
+    fn styling_parse_drops_an_important_flag() {
+        assert_eq!(Styling::parse("fill:#f9f !important").fill, ColorSetting::Color(PINK));
+    }
+
+    #[test]
+    fn styling_parse_stroke_width_of_three_pixels_or_more_is_heavy() {
+        let heavy = |value: &str| Styling::parse(&format!("stroke-width:{value}")).heavy;
+
+        assert_eq!(heavy("4px"), Some(true));
+        assert_eq!(heavy("3"), Some(true));
+        assert_eq!(heavy("2px"), Some(false));
+    }
+
+    #[test]
+    fn styling_parse_non_zero_stroke_dasharray_is_dotted() {
+        let dotted = |value: &str| Styling::parse(&format!("stroke-dasharray:{value}")).dotted;
+
+        assert_eq!(dotted("5 5"), Some(true));
+        assert_eq!(dotted("5"), Some(true));
+        assert_eq!(dotted("none"), Some(false));
+        assert_eq!(dotted("0 0"), Some(false));
+        assert_eq!(
+            Styling::parse("stroke-dasharray:5")
+                .then(Styling::parse("stroke-dasharray:none"))
+                .dotted,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn styling_parse_font_weight_bold_and_font_style_italic() {
+        let styling = Styling::parse("font-weight:bold,font-style:italic");
+
+        assert_eq!((styling.bold, styling.italic), (Some(true), Some(true)));
+    }
+}

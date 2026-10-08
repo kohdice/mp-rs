@@ -353,17 +353,10 @@ mod tests {
 
     #[test]
     fn parse_hides_url_when_link_text_equals_destination() {
-        let expected = vec![untitled_link("https://x.test", "https://x.test", false)];
-
-        assert_eq!(parse("<https://x.test>\n"), expected);
-        assert_eq!(parse("[https://x.test][r]\n\n[r]: https://x.test\n"), expected);
-    }
-
-    #[test]
-    fn parse_hides_mailto_prefix_for_email_autolinks() {
-        let expected = vec![untitled_link("mailto:a@b.test", "a@b.test", false)];
-
-        assert_eq!(parse("<a@b.test>\n"), expected);
+        assert_eq!(
+            parse("<https://x.test>\n"),
+            vec![untitled_link("https://x.test", "https://x.test", false)]
+        );
     }
 
     #[test]

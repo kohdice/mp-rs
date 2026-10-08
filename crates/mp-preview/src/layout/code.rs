@@ -100,3 +100,23 @@ fn push_expanded(line: &mut Line, column: &mut usize, text: &str, style: Style) 
         *column += part.width();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::body_lines;
+    use crate::style::Style;
+
+    #[test]
+    fn body_lines_expands_a_tab_that_spans_two_pieces() {
+        let style_a = Style { bold: true, ..Style::default() };
+        let style_b = Style { italic: true, ..Style::default() };
+
+        let lines = body_lines([(style_a, "let"), (style_b, " x\t= 1;\n")]);
+
+        let [line] = lines.as_slice() else {
+            panic!("expected one line, got {lines:?}");
+        };
+        let text: String = line.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(text, "let x   = 1;");
+    }
+}

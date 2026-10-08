@@ -589,3 +589,75 @@ pub(super) fn leading_string(label: &str) -> Option<(&str, &str)> {
 pub(super) fn unquoted(text: &str) -> &str {
     text.strip_circumfix('"', '"').filter(|inner| !inner.contains('"')).unwrap_or(text)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(text: &str) -> Run {
+        Run { text: text.to_owned(), bold: false, italic: false }
+    }
+
+    fn bold(text: &str) -> Run {
+        Run { text: text.to_owned(), bold: true, italic: false }
+    }
+
+    fn italic(text: &str) -> Run {
+        Run { text: text.to_owned(), bold: false, italic: true }
+    }
+
+    #[test]
+    fn label_markdown_string_bold_uses_double_asterisk_or_underscore() {
+        for marked in ["**cat**", "__cat__"] {
+            assert_eq!(
+                Label::parse(&format!("\"`The {marked} sat`\"")).rows(),
+                [vec![plain("The "), bold("cat"), plain(" sat")]],
+                "{marked}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_markdown_string_italic_uses_asterisk_or_underscore() {
+        assert_eq!(
+            Label::parse("\"`This *is* _Markdown_`\"").rows(),
+            [vec![plain("This "), italic("is"), plain(" "), italic("Markdown")]]
+        );
+    }
+
+    #[test]
+    fn label_asterisks_outside_a_markdown_string_are_text() {
+        for source in ["\"**not bold**\"", "**not bold**"] {
+            assert_eq!(Label::parse(source).rows(), [vec![plain("**not bold**")]], "{source}");
+        }
+    }
+
+    #[test]
+    fn label_markdown_string_emphasis_nests() {
+        let bold_italic = Run { text: "b".to_owned(), bold: true, italic: true };
+
+        assert_eq!(
+            Label::parse("\"`*a **b** c*`\"").rows(),
+            [vec![italic("a "), bold_italic, italic(" c")]]
+        );
+    }
+
+    #[test]
+    fn label_markdown_string_unpaired_markers_and_inner_underscores_stay_text() {
+        for written in ["*x", "snake_case_name"] {
+            assert_eq!(
+                Label::parse(&format!("\"`{written}`\"")).rows(),
+                [vec![plain(written)]],
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn label_markdown_string_followed_by_plain_text_stays_a_markdown_string() {
+        assert_eq!(
+            Label::parse_after_string("\"`**x**`\" y").rows(),
+            [vec![bold("x"), plain(" y")]]
+        );
+    }
+}
