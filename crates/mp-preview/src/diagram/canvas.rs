@@ -164,7 +164,9 @@ impl<'a> Canvas<'a> {
     pub(super) fn into_lines(self) -> Vec<Line> {
         self.rows
             .into_iter()
-            .map(|cells| {
+            .map(|mut cells| {
+                let content = cells.iter().rposition(|cell| !matches!(cell, Cell::Blank));
+                cells.truncate(content.map_or(0, |last| last + 1));
                 let mut line = Line::new();
                 for cell in cells {
                     match cell {
@@ -247,17 +249,15 @@ fn push(line: &mut Line, text: &str, style: Style) {
 
 #[cfg(test)]
 mod tests {
-    use unicode_width::UnicodeWidthStr;
-
     use super::Canvas;
     use crate::style::Style;
 
-    /// The display width of each line `canvas` turns into.
-    fn canvas_line_widths(canvas: Canvas<'_>) -> Vec<usize> {
+    /// The text of each line `canvas` turns into.
+    fn canvas_line_texts(canvas: Canvas<'_>) -> Vec<String> {
         canvas
             .into_lines()
             .iter()
-            .map(|line| line.iter().map(|span| span.text.width()).sum())
+            .map(|line| line.iter().map(|span| span.text.as_str()).collect())
             .collect()
     }
 
@@ -267,15 +267,25 @@ mod tests {
         canvas.put(0, 0, "あ", Style::default());
         canvas.put(0, 1, "x", Style::default());
 
-        assert_eq!(canvas_line_widths(canvas), [2]);
+        assert_eq!(canvas_line_texts(canvas), [" x"]);
     }
 
     #[test]
-    fn canvas_text_over_the_first_column_of_wide_text_keeps_the_row_as_wide_as_its_columns() {
+    fn canvas_text_over_the_first_column_of_wide_text_drops_the_blank_it_leaves() {
         let mut canvas = Canvas::default();
         canvas.put(0, 0, "あ", Style::default());
         canvas.put(0, 0, "x", Style::default());
 
-        assert_eq!(canvas_line_widths(canvas), [2]);
+        assert_eq!(canvas_line_texts(canvas), ["x"]);
+    }
+
+    #[test]
+    fn canvas_text_over_the_first_column_of_wide_text_keeps_the_column_it_uncovers() {
+        let mut canvas = Canvas::default();
+        canvas.put(0, 0, "あ", Style::default());
+        canvas.put(0, 0, "x", Style::default());
+        canvas.put(0, 2, "y", Style::default());
+
+        assert_eq!(canvas_line_texts(canvas), ["x y"]);
     }
 }
