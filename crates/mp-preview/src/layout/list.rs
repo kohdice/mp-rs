@@ -41,7 +41,7 @@ pub(super) fn lay_out_list(
         }
         for (line_index, mut line) in item_lines.into_iter().enumerate() {
             if line_index == 0 {
-                line.splice(0..0, head.iter().cloned());
+                line.splice(..0, std::mem::take(&mut head));
             } else if !line.is_empty() {
                 line.insert(0, Span { text: indent.clone(), style: Style::default() });
             }

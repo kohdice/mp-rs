@@ -16,7 +16,7 @@ const IMAGE_CLOSE: &str = "]";
 /// Lays out inlines in `width` columns, or unwrapped when `width` is `None`; without a
 /// width a soft break starts a new line, with one it becomes a space. No inlines lay
 /// out to no lines, so an empty heading or paragraph contributes nothing.
-pub(crate) fn lay_out_inlines(inlines: &[Inline], style: Style, width: Option<usize>) -> Vec<Line> {
+pub(super) fn lay_out_inlines(inlines: &[Inline], style: Style, width: Option<usize>) -> Vec<Line> {
     if inlines.is_empty() {
         return Vec::new();
     }
@@ -154,14 +154,14 @@ impl Wrapper {
 
     fn push_text(&mut self, text: &str, style: Style) {
         let mut rest = text;
-        while let Some(index) = rest.find(' ') {
-            self.push_word_part(&rest[..index], style);
+        while let Some((word, after)) = rest.split_once(' ') {
+            self.push_word_part(word, style);
             self.place_word();
             if self.gap == 0 {
                 self.gap_style = style;
             }
             self.gap += 1;
-            rest = &rest[index + 1..];
+            rest = after;
         }
         self.push_word_part(rest, style);
     }
