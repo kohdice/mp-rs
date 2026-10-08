@@ -6846,22 +6846,53 @@ fn mermaid_filled_shape_open_on_the_right_leaves_no_trailing_blanks() {
 }
 
 #[test]
+fn mermaid_filled_shape_open_on_the_right_paints_only_the_label_characters() {
+    const YELLOW: Rgb = Rgb { r: 255, g: 255, b: 0 };
+    const LABEL: &str = "hello";
+    for shape in ["brace", "text", "datastore"] {
+        let body = format!(
+            "flowchart LR\n    A@{{ shape: {shape}, label: \"{LABEL}\" }}\n    style A fill:#ff0\n"
+        );
+        let lines = super::render_mermaid(&body, None).unwrap_or_else(|error| panic!("{error:?}"));
+        let rows = cells(&lines);
+        let Some((row, start)) = rows.iter().find_map(|row| {
+            let text: String = row.iter().map(|&(c, _)| c).collect();
+            text.find(LABEL).map(|at| (row, text[..at].chars().count()))
+        }) else {
+            panic!("{shape}: missing label in {lines:?}");
+        };
+        let end = start + LABEL.chars().count();
+
+        assert!(start > 0, "{shape}: no cell left of the label in {lines:?}");
+        assert!(
+            row[start..end].iter().all(|(_, style)| style.bg == Some(YELLOW)),
+            "{shape}: {lines:?}"
+        );
+        assert!(row[..start].iter().all(|(_, style)| style.bg.is_none()), "{shape}: {lines:?}");
+        assert!(row[end..].iter().all(|(_, style)| style.bg.is_none()), "{shape}: {lines:?}");
+    }
+}
+
+#[test]
 fn mermaid_filled_shape_open_on_the_right_leaves_an_empty_label_row_unpainted() {
     let lines = mermaid_lines(
         "flowchart LR\n    B@{ shape: brace, label: \"a<br><br>b\" }\n    classDef f fill:#333\n    class B f\n",
     );
-    let row_of =
-        |text: &str| lines.iter().position(|line| line.iter().any(|span| span.text == text));
-    let (Some(a), Some(b)) = (row_of("a"), row_of("b")) else {
+    let rows = cells(&lines);
+    let row_of = |label: char| rows.iter().position(|row| row.iter().any(|&(c, _)| c == label));
+    let (Some(a), Some(b)) = (row_of('a'), row_of('b')) else {
         panic!("missing label row in {lines:?}");
+    };
+    // The cells of `row` that are painted, as the characters they hold.
+    let painted = |row: usize| -> String {
+        let row = rows.get(row).map_or(&[][..], Vec::as_slice);
+        row.iter().filter(|(_, style)| style.bg.is_some()).map(|&(c, _)| c).collect()
     };
 
     assert_eq!(b, a + 2, "{lines:?}");
-    let empty = lines.get(a + 1).into_iter().flatten();
-    assert!(empty.clone().all(|span| span.style.bg.is_none()), "{lines:?}");
-    // The rows holding the label are painted up to its end.
-    let painted = lines.get(a).into_iter().flatten();
-    assert!(painted.clone().any(|span| span.style.bg.is_some()), "{lines:?}");
+    assert_eq!(painted(a), "a", "{lines:?}");
+    assert_eq!(painted(a + 1), "", "{lines:?}");
+    assert_eq!(painted(b), "b", "{lines:?}");
 }
 
 #[test]

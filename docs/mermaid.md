@@ -81,7 +81,7 @@ These are drawn differently:
   text to the default color instead of hiding it; `fill:none` and `fill:transparent`
   remove the fill.
 - On a shape open on the right, such as `brace`, `text` or `datastore`, `fill` colors
-  only the rows holding the label, up to the label's end.
+  only the label's characters.
 - FontAwesome tokens such as `fa:fa-car` are dropped from labels; a label made only of
   icons shows their names.
 - A subgraph title with line breaks is drawn on one row.

@@ -362,17 +362,8 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
     let label_rows = first_label_row..first_label_row + rows;
     let below_top = label_rows.end + extra_rows;
     for (row, outline_row) in (top..).zip(outline.above).chain((below_top..).zip(outline.below)) {
-        draw_row(canvas, row, left, width, *outline_row, Pen { interior: None, ..pen }, None);
+        draw_row(canvas, row, left, width, *outline_row, Pen { interior: None, ..pen });
     }
-    let label_left = left + outline.label_offset() + extra_cols;
-    // Where the label's text starts on `row`, centred as `draw_label` centres it; `None`
-    // on an empty label row, which has no text for a fill to lead up to.
-    let text_start = |row: usize| {
-        let runs = label.rows().get(row.checked_sub(first_label_row)?)?;
-        let row_width = row_width(runs);
-        (outline.shows_label() && row_width > 0)
-            .then(|| label_left + (label.width() - row_width) / 2)
-    };
     // The middle rows: the label rows and the rows the box grew by around them. Those
     // that do not carry the label row's own side glyphs continue its sides.
     let middle = first_label_row - extra_rows..below_top;
@@ -388,9 +379,10 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
             EndsOn::PortRow => row == top + outline.middle_label_row(label) + extra_rows,
         };
         let outline_row = if own { outline.label } else { continued };
-        draw_row(canvas, row, left, width, outline_row, pen, text_start(row));
+        draw_row(canvas, row, left, width, outline_row, pen);
     }
     if outline.shows_label() {
+        let label_left = left + outline.label_offset() + extra_cols;
         draw_label(canvas, (first_label_row, label_left), label, RowAlign::Centred, text);
     }
 }
@@ -408,9 +400,9 @@ fn plain_side(end: &'static str) -> &'static str {
 /// Draws `outline_row` on a box `width` cells wide from `left`: its end glyphs, its fill
 /// between them, and its mark over the fill. Blanks are drawn only where `pen` paints
 /// the interior, so an unpainted row leaves no trailing blanks behind. A row open on the
-/// right, with no glyph to end it, paints its fill only left of `text_start`, where the
-/// label's text on the row starts, or nowhere without one: painted blanks after the
-/// text would end the line in blanks.
+/// right, with no glyph to end it, leaves the blanks of its fill unpainted: painted
+/// blanks after the label would end the line in blanks, and painting only those before
+/// it would be lopsided.
 fn draw_row(
     canvas: &mut Canvas<'_>,
     row: usize,
@@ -418,7 +410,6 @@ fn draw_row(
     width: usize,
     outline_row: Row,
     pen: Pen,
-    text_start: Option<usize>,
 ) {
     let [inset_left, inset_right] = outline_row.inset;
     let [end_left, end_right] = outline_row.ends;
@@ -434,10 +425,9 @@ fn draw_row(
     canvas.reach_row(row);
     put_glyphs(canvas, row, start, end_left, pen);
     put_glyphs(canvas, row, right_start, end_right, pen);
-    let painted_end = if end_right.is_empty() { text_start.unwrap_or(0) } else { usize::MAX };
+    let fill_pen = if end_right.is_empty() { Pen { interior: None, ..pen } } else { pen };
     for col in start + end_left.width()..right_start {
-        let pen = if col < painted_end { pen } else { Pen { interior: None, ..pen } };
-        put_glyphs(canvas, row, col, outline_row.fill, pen);
+        put_glyphs(canvas, row, col, outline_row.fill, fill_pen);
     }
     if let Some((at, mark)) = outline_row.mark {
         let col = match at {
