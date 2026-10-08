@@ -40,7 +40,7 @@ pub struct Options {
 ///
 /// Returns the first error reported by `out`, leaving the blocks written before it in
 /// place. Parsing never fails.
-pub fn preview<W: Write>(markdown: &str, options: &Options, out: &mut W) -> io::Result<()> {
+pub fn preview<W: Write>(markdown: &str, options: &Options, mut out: W) -> io::Result<()> {
     let mut wrote_block = false;
     for block in &markdown::parse(markdown) {
         let lines = lay_out_block(block, options.width, options.color, 0);
