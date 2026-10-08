@@ -109,15 +109,14 @@ fn render_chart(
     } else {
         layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?
     };
-    let (mut scene, routed) =
+    let (scene, routed) =
         route::route(&chart, &layered, axis, spacing.layer_gap).ok_or(Failure::Unsupported)?;
     // Labels only add cells, so a scene already too large is not worth placing them on.
     if !fits(&scene, axis, width, title_width) {
         return Ok(None);
     }
     let (labels, cross_shift) = route::place_labels(&routed);
-    route::shift_scene(&mut scene, 0, cross_shift);
-    scene.labels = labels;
+    let scene = route::Scene { labels, ..route::shift_scene(scene, 0, cross_shift) };
     if !fits(&scene, axis, width, title_width) {
         return Ok(None);
     }

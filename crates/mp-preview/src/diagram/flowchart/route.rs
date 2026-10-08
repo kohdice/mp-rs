@@ -1,18 +1,22 @@
 //! Positions along the flow, the paths of links between the placed boxes, and where
 //! link labels go. Positions are `(main, cross)`: cells along and across the flow.
 
+mod frames;
+
 use std::ops::RangeInclusive;
 
 use super::label::Label;
 use super::layout::{
-    Axis, LabelSpot, Layered, Reach, SELF_LOOP_CELLS, SELF_LOOP_SPAN, TITLE_CORNER_OFFSET,
-    entry_reach, exit_cells, frame_width, label_cross_reach, label_spot, port_cells,
-    scatter_by_order, self_loop_cells, self_loop_label_at, title_offset,
+    Axis, LabelSpot, Layered, Reach, SELF_LOOP_CELLS, SELF_LOOP_SPAN, entry_reach, exit_cells,
+    label_cross_reach, label_spot, port_cells, scatter_by_order, self_loop_cells,
+    self_loop_label_at,
 };
 use super::outline::outline;
-use super::parse::{Body, Direction, Edge, End, Flowchart, Node, Subgraph};
+use super::parse::{Body, Direction, Edge, End, Flowchart, Node};
 use super::signed;
 use super::styling::Styling;
+
+use self::frames::{FrameBounds, frame_bounds, frames_overlap};
 
 /// A drawing before it is oriented on screen.
 #[derive(Debug)]
@@ -20,6 +24,8 @@ pub(super) struct Scene<'a> {
     pub boxes: Vec<PlacedBox<'a>>,
     /// The drawn links, in the order of their edges; an invisible link has none.
     pub links: Vec<Route<'a>>,
+    /// Empty as [`route`] returns the scene; the caller fills it from the routed labels
+    /// (see [`place_labels`]).
     pub labels: Vec<PlacedLabel<'a>>,
     pub frames: Vec<PlacedFrame<'a>>,
 }
@@ -30,7 +36,8 @@ pub(super) struct RoutedLabel<'a> {
     /// The index of the label's link in [`Scene::links`].
     pub link: usize,
     pub label: &'a Label,
-    /// Its first cell along and across the flow, which may lie before the first column.
+    /// Its first cell along and across the flow, which may lie before the first cell
+    /// across the flow (see [`place_labels`]).
     pub at: (isize, isize),
 }
 
@@ -130,120 +137,18 @@ impl Scene<'_> {
 /// by [`frame_bounds`].
 pub(super) fn route<'a>(
     chart: &'a Flowchart,
-    layered: &Layered,
+    layered: &'a Layered,
     axis: Axis,
     layer_gap: usize,
 ) -> Option<(Scene<'a>, Vec<RoutedLabel<'a>>)> {
+    let router = Router::new(chart, layered, axis, layer_gap)?;
     let slots = &layered.slots;
     let paths = &layered.paths;
-    let mut layer_size = vec![0; layered.layer_count];
-    for slot in slots {
-        let size = layer_size.get_mut(slot.layer)?;
-        *size = (*size).max(slot.main);
-    }
-    let entries = entry_ports(chart, layered, axis)?;
-    let exits = exit_ports(chart, layered, axis)?;
-
-    let mut runs = Vec::new();
-    // For each gap, the cells the routed labels on its lines need after the tracks: in a
-    // horizontal layout a label's widest row and the markers at the gap's ends, in a
-    // vertical one a label's rows.
-    let mut routed_label_cells: Vec<Option<usize>> = vec![None; layered.layer_count];
-    for (index, ((((edge, path), entries), &reversed), &exit)) in
-        chart.edges.iter().zip(paths).zip(&entries).zip(&layered.reversed).zip(&exits).enumerate()
-    {
-        for (segment, (&from, &entry)) in path.iter().zip(entries).enumerate() {
-            let leave = if segment == 0 { exit } else { slots.get(from)?.port };
-            if leave != entry && edge.stroke.is_visible() {
-                runs.push(Run {
-                    source: from,
-                    edge: index,
-                    segment,
-                    leave,
-                    cells: leave.min(entry)..=leave.max(entry),
-                    rightward: entry > leave,
-                });
-            }
-        }
-        // A label on a passing slot lies in its layer, which `Slot::main` sized for it; a
-        // self loop's label is counted in `loop_cells` below, not here.
-        if let Some(label) = &edge.label
-            && let Some(LabelSpot::Gap(segment)) = label_spot(path)
-        {
-            let cells = routed_label_cells.get_mut(slots.get(*path.get(segment)?)?.layer)?;
-            let needed = match axis {
-                Axis::Horizontal => {
-                    let (before, after) = gap_end_markers(edge, reversed, path, segment);
-                    before + label.width() + after
-                }
-                Axis::Vertical => label.height(),
-            };
-            *cells = Some(cells.unwrap_or(0).max(needed));
-        }
-    }
-    let (track_of, track_counts) = assign_tracks(layered, &entries, &runs)?;
-    // A self loop and its label take the cells after its box along the flow, so the
-    // tracks after its layer, and the next layer, start beyond them.
-    let mut loop_cells = vec![0; layered.layer_count];
-    for edge in chart.edges.iter().filter(|edge| edge.stroke.is_visible()) {
-        if let Some((node, to)) = edge.nodes()
-            && node == to
-        {
-            let cells = loop_cells.get_mut(slots.get(node)?.layer)?;
-            *cells = (*cells).max(self_loop_cells(axis, edge.label.as_ref()));
-        }
-    }
-
-    // The cells of each gap before the cell after its last track: the cell the line
-    // leaves the box through, the cells of self loops and the tracks. A vertical label
-    // row comes after those even without tracks. A horizontal gap without tracks has a
-    // lead of 0: a straight line's first cell, where the line leaves the box, is the
-    // line cell before its label, or holds the link's marker there with that line cell
-    // after it (a back edge's head, a `<-->` tail; see `gap_end_markers`).
-    let leads: Vec<usize> = track_counts
-        .iter()
-        .zip(&loop_cells)
-        .zip(&routed_label_cells)
-        .map(|((&tracks, &loop_cells), routed_cells)| {
-            let row_lead = axis == Axis::Vertical && routed_cells.is_some();
-            if tracks == 0 && !row_lead { 0 } else { 1 + loop_cells + tracks }
-        })
-        .collect();
-    let gaps: Vec<usize> = leads
-        .iter()
-        .zip(&routed_label_cells)
-        .zip(&loop_cells)
-        .map(|((&lead, &routed_cells), &loop_cells)| {
-            // After the last track, a horizontal gap holds a line cell and the arrowhead,
-            // or a label on the line with its markers and a line cell on either side of
-            // the text; a vertical one the label rows, if any, and the cell of the
-            // arrowhead.
-            let needed = match axis {
-                Axis::Horizontal => lead + routed_cells.unwrap_or(0) + 2,
-                Axis::Vertical => lead + routed_cells.unwrap_or(0) + 1,
-            };
-            // A blank cell separates the next layer from the loops and their labels.
-            let loops = if loop_cells > 0 { loop_cells + 1 } else { 0 };
-            layer_gap.max(needed).max(loops)
-        })
-        .collect();
-    // Each layer is preceded by the cells the frames opening at it take before its
-    // boxes, and its gap begins with the cells the frames closing at it take after
-    // them, so that tracks, labels and the previous layer stay clear of the frames.
-    let layer_starts = |enter: &[usize], exit: &[usize]| -> Option<Vec<usize>> {
-        let mut layer_start = Vec::with_capacity(layered.layer_count);
-        let mut next = 0;
-        for (layer, (size, gap)) in layer_size.iter().zip(&gaps).enumerate() {
-            next += enter.get(layer)?;
-            layer_start.push(next);
-            next += size + exit.get(layer)? + gap;
-        }
-        Some(layer_start)
-    };
     let place = |layer_start: &[usize],
                  exit: &[usize]|
      -> Option<(Scene<'a>, Vec<RoutedLabel<'a>>)> {
-        let gap_start = |layer: usize| Some(layer_start.get(layer)? + layer_size.get(layer)?);
+        let gap_start =
+            |layer: usize| Some(layer_start.get(layer)? + router.layer_size.get(layer)?);
         let mut scene =
             Scene { boxes: Vec::new(), links: Vec::new(), labels: Vec::new(), frames: Vec::new() };
         let mut routed = Vec::new();
@@ -258,9 +163,9 @@ pub(super) fn route<'a>(
             .edges
             .iter()
             .zip(paths)
-            .zip(&entries)
+            .zip(&router.entries)
             .zip(&layered.reversed)
-            .zip(&exits)
+            .zip(&router.exits)
             .enumerate()
         {
             if !edge.stroke.is_visible() {
@@ -295,8 +200,8 @@ pub(super) fn route<'a>(
                     let track = gap_start(from.layer)?
                         + exit.get(from.layer)?
                         + 1
-                        + loop_cells.get(from.layer)?
-                        + track_of.get(index)?.get(segment)?;
+                        + router.loop_cells.get(from.layer)?
+                        + router.track_of.get(index)?.get(segment)?;
                     points.extend([(track, leave), (track, entry)]);
                 }
             }
@@ -304,7 +209,6 @@ pub(super) fn route<'a>(
                 && let Some(spot) = label_spot(path)
             {
                 let width = text.width();
-                // The cells across the flow from the label's first cell to the line.
                 let (before_line, _) = label_cross_reach(axis, text);
                 let at = match spot {
                     // After the tracks the line is already at the cell it enters the next
@@ -322,13 +226,14 @@ pub(super) fn route<'a>(
                     LabelSpot::Gap(segment) => {
                         let layer = slots.get(*path.get(segment)?)?.layer;
                         let after_tracks =
-                            gap_start(layer)? + exit.get(layer)? + leads.get(layer)?;
+                            gap_start(layer)? + exit.get(layer)? + router.leads.get(layer)?;
                         let entry = signed(*entries.get(segment)?)? - signed(before_line)?;
                         match axis {
                             Axis::Vertical => (signed(after_tracks)?, entry),
                             Axis::Horizontal => {
-                                let gap_end =
-                                    gap_start(layer)? + exit.get(layer)? + gaps.get(layer)?;
+                                let gap_end = gap_start(layer)?
+                                    + exit.get(layer)?
+                                    + router.gaps.get(layer)?;
                                 let (before, after) =
                                     gap_end_markers(edge, reversed, path, segment);
                                 let low = after_tracks + 1 + before;
@@ -344,7 +249,7 @@ pub(super) fn route<'a>(
                     LabelSpot::Slot(index) => {
                         let slot = slots.get(*path.get(index)?)?;
                         let start = *layer_start.get(slot.layer)?;
-                        let size = *layer_size.get(slot.layer)?;
+                        let size = *router.layer_size.get(slot.layer)?;
                         let cross = signed(slot.port)? - signed(before_line)?;
                         match axis {
                             Axis::Vertical => {
@@ -372,106 +277,28 @@ pub(super) fn route<'a>(
         Some((scene, routed))
     };
 
-    let memberships = chart.memberships()?;
-    // Inner frames first, so that each outer one is drawn around them.
-    let innermost_first = chart.innermost_first();
-    // Whether a drawn link's marker lies just before each subgraph's frame along the flow,
-    // and just after it, where the links ending at the frame put them (see below).
-    let mut marked = vec![(false, false); chart.subgraphs.len()];
-    for (edge, &reversed) in chart.edges.iter().zip(&layered.reversed) {
-        if !edge.stroke.is_visible() {
-            continue;
-        }
-        let ends =
-            [(edge.from, !reversed, edge.tail.is_some()), (edge.to, reversed, edge.head.is_some())];
-        for (end, leaves, marker) in ends {
-            if let End::Subgraph(subgraph) = end
-                && marker
-                && let Some((before, after)) = marked.get_mut(subgraph)
-            {
-                if leaves { *after = true } else { *before = true }
-            }
-        }
-    }
-    let frames = |scene: &Scene<'_>, routed: &[RoutedLabel<'_>], clear_links: bool| {
-        let mut bounds: Vec<Option<FrameBounds<'a>>> =
-            chart.subgraphs.iter().map(|_| None).collect();
-        for &index in &innermost_first {
-            let (Some(subgraph), Some(is_member)) =
-                (chart.subgraphs.get(index), memberships.get(index))
-            else {
-                continue;
-            };
-            let inner: Vec<_> = chart
-                .subgraphs
-                .iter()
-                .zip(&bounds)
-                .zip(&marked)
-                .filter(|((inner, _), _)| inner.parent == Some(index))
-                .filter_map(|((_, inner), &marked)| {
-                    inner.as_ref().map(|inner| ((inner.main, inner.cross), marked))
-                })
-                .collect();
-            if let Some(slot) = bounds.get_mut(index) {
-                *slot = frame_bounds(
-                    (subgraph, &chart.enclosing(index).collect::<Vec<_>>()),
-                    is_member,
-                    &inner,
-                    scene,
-                    routed,
-                    chart.direction,
-                    clear_links,
-                );
-            }
-        }
-        bounds
-            .into_iter()
-            .zip(&memberships)
-            .enumerate()
-            .filter_map(|(index, (frame, is_member))| Some((index, is_member.as_slice(), frame?)))
-            .collect::<Vec<_>>()
-    };
-    // The cells each layer's frames take before and after its boxes in `scene`, laid
-    // out from `layer_start`.
-    let margins = |layer_start: &[usize],
-                   (scene, routed): &(Scene<'_>, Vec<RoutedLabel<'_>>)|
-     -> Option<(Vec<usize>, Vec<usize>)> {
-        let mut enter = vec![0; layered.layer_count];
-        let mut exit = vec![0; layered.layer_count];
-        for (index, _, frame) in frames(scene, routed, true) {
-            let Some((first, last)) = member_layers(chart.subgraphs.get(index)?, layered) else {
-                continue;
-            };
-            let before = signed(*layer_start.get(first)?)? - frame.main.0;
-            let after = frame.main.1 + 1 - signed(layer_start.get(last)? + layer_size.get(last)?)?;
-            let enter = enter.get_mut(first)?;
-            *enter = (*enter).max(unsigned(before.max(0))?);
-            let exit = exit.get_mut(last)?;
-            *exit = (*exit).max(unsigned(after.max(0))?);
-        }
-        Some((enter, exit))
-    };
-    // A frame reaches as far past its boxes wherever the layers are, or less when its
-    // title is what widens it, so a drawing without room for frames measures how much
-    // room to make.
+    // The margins a frame needs past its boxes do not depend on where the layers start,
+    // and a title widens it less once the layers are spaced out, so a first placement
+    // without room for frames measures an upper bound on the room to make.
     let unframed = vec![0; layered.layer_count];
-    let unframed_start = layer_starts(&unframed, &unframed)?;
-    let (mut enter, mut exit) = margins(&unframed_start, &place(&unframed_start, &unframed)?)?;
-    let mut layer_start = layer_starts(&enter, &exit)?;
+    let unframed_start = router.layer_starts(&unframed, &unframed)?;
+    let (mut enter, mut exit) =
+        router.margins(&unframed_start, &place(&unframed_start, &unframed)?)?;
+    let mut layer_start = router.layer_starts(&enter, &exit)?;
     let mut placed = place(&layer_start, &exit)?;
     // In a horizontal layout the title runs along the flow, and the room made moves the
     // tracks its links cross the top border on, so the title may need more room than
     // was made. The layers are spaced out again only once: the overlap check below
     // accepts or rejects the result, so no further round is needed.
     if axis == Axis::Horizontal {
-        let (needed_enter, needed_exit) = margins(&layer_start, &placed)?;
+        let (needed_enter, needed_exit) = router.margins(&layer_start, &placed)?;
         let short = |needed: &[usize], made: &[usize]| needed.iter().zip(made).any(|(n, m)| n > m);
         if short(&needed_enter, &enter) || short(&needed_exit, &exit) {
             let wider = |needed: &[usize], made: &[usize]| {
                 needed.iter().zip(made).map(|(&n, &m)| n.max(m)).collect::<Vec<_>>()
             };
             (enter, exit) = (wider(&needed_enter, &enter), wider(&needed_exit, &exit));
-            layer_start = layer_starts(&enter, &exit)?;
+            layer_start = router.layer_starts(&enter, &exit)?;
             placed = place(&layer_start, &exit)?;
         }
     }
@@ -479,10 +306,10 @@ pub(super) fn route<'a>(
     // was worked out before the final placement; when that room falls short and a frame
     // covers another box or frame, every title stays at its corner, over the links,
     // rather than the drawing being given up.
-    let (mut scene, mut routed) = placed;
-    let mut framed = frames(&scene, &routed, true);
+    let (scene, routed) = placed;
+    let mut framed = router.frames(&scene, &routed, true);
     if frames_overlap(chart, &framed, &scene, axis) {
-        framed = frames(&scene, &routed, false);
+        framed = router.frames(&scene, &routed, false);
         if frames_overlap(chart, &framed, &scene, axis) {
             return None;
         }
@@ -493,8 +320,8 @@ pub(super) fn route<'a>(
         (main.max(-frame.main.0), cross.max(-frame.cross.0))
     });
     let (main_by, cross_by) = (unsigned(main_shift)?, unsigned(cross_shift)?);
-    shift_labels(&mut routed, main_by, cross_by)?;
-    shift_scene(&mut scene, main_by, cross_by);
+    let routed = shift_labels(routed, main_by, cross_by)?;
+    let mut scene = shift_scene(scene, main_by, cross_by);
     let moved =
         |(low, high): (isize, isize), by: isize| Some(unsigned(low + by)?..=unsigned(high + by)?);
     let mut frame_of = vec![None; chart.subgraphs.len()];
@@ -539,243 +366,275 @@ pub(super) fn route<'a>(
     Some((scene, routed))
 }
 
-/// The first and last layers holding members of `subgraph`.
-fn member_layers(subgraph: &Subgraph, layered: &Layered) -> Option<(usize, usize)> {
-    let layers = subgraph.members.iter().filter_map(|&member| layered.slots.get(member));
-    let first = layers.clone().map(|slot| slot.layer).min()?;
-    let last = layers.map(|slot| slot.layer).max()?;
-    Some((first, last))
+/// The spacing of the layers and the frames around the subgraphs, shared by the rounds
+/// of [`route`] that space the layers out again for the frames.
+struct Router<'a> {
+    chart: &'a Flowchart,
+    layered: &'a Layered,
+    entries: Vec<Vec<usize>>,
+    exits: Vec<usize>,
+    track_of: Vec<Vec<usize>>,
+    layer_size: Vec<usize>,
+    loop_cells: Vec<usize>,
+    leads: Vec<usize>,
+    gaps: Vec<usize>,
+    memberships: Vec<Vec<bool>>,
+    /// Inner frames first, so that each outer one is drawn around them.
+    innermost_first: Vec<usize>,
+    /// Whether a drawn link's marker lies just before each subgraph's frame along the
+    /// flow, and just after it: [`route`] ends a link to or from a subgraph in the cell
+    /// just outside the frame's border, where its marker goes.
+    marked: Vec<(bool, bool)>,
 }
 
-/// The first and last cells of a rectangle along the flow, then across it, which may lie
-/// before the scene's first cells.
-type Rectangle = ((isize, isize), (isize, isize));
-
-/// The first and last cells of a frame's borders along and across the flow, which may
-/// lie before the scene's first cells.
-struct FrameBounds<'a> {
-    title: &'a Label,
-    /// Cells on screen from the top-left corner to the blank before the title.
-    title_offset: usize,
-    main: (isize, isize),
-    cross: (isize, isize),
-}
-
-/// The first and last of `size` cells from `start`; `None` past `isize::MAX`.
-fn cell_span(start: usize, size: usize) -> Option<(isize, isize)> {
-    Some((signed(start)?, signed(start + size)? - 1))
-}
-
-/// The frame around `subgraph`'s boxes, the lines of the links between its members (its
-/// members' self loops among them), the `routed` labels of those links and the frames
-/// `inner` of the subgraphs nested in it, given by their first and last cells along and
-/// across the flow with whether a link's marker lies just before and just after each
-/// along the flow: the frame margins away from them, further where a link marker next
-/// to a member box or just outside a nested frame would otherwise fall on the border,
-/// further across the flow by the cells the subgraph grew by, and long enough to the right on
-/// screen to fit `┌─ title ─┐`, with the title clear of the links crossing the top
-/// border when `clear_links` holds.
-fn frame_bounds<'a>(
-    (subgraph, outer): (&'a Subgraph, &[usize]),
-    is_member: &[bool],
-    inner: &[(Rectangle, (bool, bool))],
-    scene: &Scene<'_>,
-    routed: &[RoutedLabel<'_>],
-    direction: Direction,
-    clear_links: bool,
-) -> Option<FrameBounds<'a>> {
-    let axis = direction.axis();
-    let is_member = |end: End| end.node().is_some_and(|node| is_member.get(node) == Some(&true));
-    let boxes =
-        subgraph.members.iter().filter_map(|&member| scene.boxes.get(member)).map(|placed| {
-            Some((
-                cell_span(placed.main, axis.box_main_size(placed.node))?,
-                cell_span(placed.cross, axis.box_cross_size(placed.node))?,
-            ))
-        });
-    // A link between members runs inside the frame, as Mermaid puts its dummy nodes in
-    // the cluster.
-    let lines = scene
-        .links
-        .iter()
-        .filter(|link| is_member(link.edge.from) && is_member(link.edge.to))
-        .flat_map(|link| &link.points)
-        .map(|&(main, cross)| Some((cell_span(main, 1)?, cell_span(cross, 1)?)));
-    // The labels on links between members lie inside the frame like their boxes.
-    let labels = routed.iter().filter_map(|&RoutedLabel { link, label, at: (main, cross) }| {
-        let edge = scene.links.get(link)?.edge;
-        (is_member(edge.from) && is_member(edge.to)).then_some(())?;
-        let (main_size, cross_size) = axis.label_size(label);
-        let (main_size, cross_size) = (signed(main_size)?, signed(cross_size)?);
-        Some(Some(((main, main + main_size - 1), (cross, cross + cross_size - 1))))
-    });
-    let ((main_low, main_high), (cross_low, cross_high)) = boxes
-        .chain(lines)
-        .chain(labels)
-        .chain(inner.iter().map(|&(rectangle, _)| Some(rectangle)))
-        .collect::<Option<Vec<_>>>()?
-        .into_iter()
-        .reduce(
-            |((main_a, main_b), (cross_a, cross_b)), ((main_c, main_d), (cross_c, cross_d))| {
-                (
-                    (main_a.min(main_c), main_b.max(main_d)),
-                    (cross_a.min(cross_c), cross_b.max(cross_d)),
-                )
-            },
-        )?;
-    let markers = scene.links.iter().flat_map(|link| {
-        let head = link.edge.head.filter(|_| is_member(link.edge.to)).and(link.points.last());
-        let tail = link.edge.tail.filter(|_| is_member(link.edge.from)).and(link.points.first());
-        head.into_iter().chain(tail)
-    });
-    // The markers of the links ending at a nested frame lie in the cell just outside its
-    // border along the flow.
-    let inner_markers = inner.iter().flat_map(|&(((low, high), (cross, _)), (before, after))| {
-        before.then_some((low - 1, cross)).into_iter().chain(after.then_some((high + 1, cross)))
-    });
-    let (main_margin, cross_margin) = axis.frame_margins();
-    let (main_margin, cross_margin) = (signed(main_margin)?, signed(cross_margin)?);
-    // A marker next to a member box, or just outside a nested frame, stays inside the
-    // frame rather than on its border, where the two glyphs would overwrite each other.
-    let (main_before, main_after, cross_before, cross_after) = markers
-        .map(|&(main, cross)| Some((signed(main)?, signed(cross)?)))
-        .collect::<Option<Vec<_>>>()?
-        .into_iter()
-        .chain(inner_markers)
-        .fold(
-            (main_margin, main_margin, cross_margin, cross_margin),
-            |(main_before, main_after, cross_before, cross_after), (main, cross)| {
-                (
-                    main_before.max(main_low + 1 - main),
-                    main_after.max(main + 1 - main_high),
-                    cross_before.max(cross_low + 1 - cross),
-                    cross_after.max(cross + 1 - cross_high),
-                )
-            },
-        );
-    // The frame grew across the flow on both sides so that the links meeting its borders
-    // have cells of their own (see `grow_frames`).
-    let spread = signed(subgraph.spread)?;
-    let mut main = (main_low - main_before, main_high + main_after);
-    let mut cross = (cross_low - cross_before - spread, cross_high + cross_after + spread);
-    // The top border on screen, and the frame's cells along it from the top-left corner.
-    let (top, along, from_high) = match axis {
-        Axis::Horizontal => (cross.0, &mut main, direction.points_backward()),
-        Axis::Vertical => {
-            let top = if direction.points_backward() { main.1 } else { main.0 };
-            (top, &mut cross, false)
+impl<'a> Router<'a> {
+    /// Assigns the ports and tracks of `layered` and sizes its layers and gaps, each gap
+    /// at least `layer_gap` cells.
+    fn new(
+        chart: &'a Flowchart,
+        layered: &'a Layered,
+        axis: Axis,
+        layer_gap: usize,
+    ) -> Option<Self> {
+        let slots = &layered.slots;
+        let paths = &layered.paths;
+        let mut layer_size = vec![0; layered.layer_count];
+        for slot in slots {
+            let size = layer_size.get_mut(slot.layer)?;
+            *size = (*size).max(slot.main);
         }
-    };
-    let title_width = subgraph.title.width();
-    let offset = if clear_links {
-        title_offset(top_border_crossings(scene, outer, axis, top, *along, from_high), title_width)
-    } else {
-        TITLE_CORNER_OFFSET
-    };
-    // The cells from the first border to the last.
-    let span = signed(frame_width(title_width, offset) - 1)?;
-    if from_high {
-        along.0 = along.0.min(along.1 - span);
-    } else {
-        along.1 = along.1.max(along.0 + span);
-    }
-    Some(FrameBounds { title: &subgraph.title, title_offset: offset, main, cross })
-}
+        let entries = entry_ports(chart, layered, axis)?;
+        let exits = exit_ports(chart, layered, axis)?;
 
-/// The cells, counted on screen from the frame's top-left corner, where links meet the
-/// frame's top border at `top`, given the frame's first and last cells along it and the
-/// subgraphs `outer` it is nested in. Links past the right end count too, since the frame
-/// may widen to fit its title. The end segment of a link to or from one of `outer` does
-/// not count: it was routed to a cell among that subgraph's members and is cut back to
-/// the cell just outside that subgraph's frame afterwards, so it never reaches a frame
-/// nested inside.
-fn top_border_crossings(
-    scene: &Scene<'_>,
-    outer: &[usize],
-    axis: Axis,
-    top: isize,
-    (low, high): (isize, isize),
-    from_high: bool,
-) -> Vec<usize> {
-    let other_frame =
-        |end: End| matches!(end, End::Subgraph(subgraph) if outer.contains(&subgraph));
-    let mut crossings = Vec::new();
-    let segments = scene.links.iter().flat_map(|link| {
-        let last = link.points.len().saturating_sub(2);
-        link.points.windows(2).enumerate().filter_map(move |(segment, pair)| {
-            let cut = (segment == 0 && other_frame(link.edge.from))
-                || (segment == last && other_frame(link.edge.to));
-            (!cut).then_some(pair)
+        let mut runs = Vec::new();
+        // For each gap, the cells the routed labels on its lines need after the tracks: in a
+        // horizontal layout a label's widest row and the markers at the gap's ends, in a
+        // vertical one a label's rows.
+        let mut routed_label_cells: Vec<Option<usize>> = vec![None; layered.layer_count];
+        for (index, ((((edge, path), entries), &reversed), &exit)) in chart
+            .edges
+            .iter()
+            .zip(paths)
+            .zip(&entries)
+            .zip(&layered.reversed)
+            .zip(&exits)
+            .enumerate()
+        {
+            for (segment, (&from, &entry)) in path.iter().zip(entries).enumerate() {
+                let leave = if segment == 0 { exit } else { slots.get(from)?.port };
+                if leave != entry && edge.stroke.is_visible() {
+                    runs.push(Run {
+                        source: from,
+                        edge: index,
+                        segment,
+                        leave,
+                        cells: leave.min(entry)..=leave.max(entry),
+                        rightward: entry > leave,
+                    });
+                }
+            }
+            // A label on a passing slot lies in its layer, which `Slot::main` sized for it; a
+            // self loop's label is counted in `loop_cells` below, not here.
+            if let Some(label) = &edge.label
+                && let Some(LabelSpot::Gap(segment)) = label_spot(path)
+            {
+                let cells = routed_label_cells.get_mut(slots.get(*path.get(segment)?)?.layer)?;
+                let needed = match axis {
+                    Axis::Horizontal => {
+                        let (before, after) = gap_end_markers(edge, reversed, path, segment);
+                        before + label.width() + after
+                    }
+                    Axis::Vertical => label.height(),
+                };
+                *cells = Some(cells.unwrap_or(0).max(needed));
+            }
+        }
+        let (track_of, track_counts) = assign_tracks(layered, &entries, &runs)?;
+        // A self loop and its label take the cells after its box along the flow, so the
+        // tracks after its layer, and the next layer, start beyond them.
+        let mut loop_cells = vec![0; layered.layer_count];
+        for edge in chart.edges.iter().filter(|edge| edge.stroke.is_visible()) {
+            if let Some((node, to)) = edge.nodes()
+                && node == to
+            {
+                let cells = loop_cells.get_mut(slots.get(node)?.layer)?;
+                *cells = (*cells).max(self_loop_cells(axis, edge.label.as_ref()));
+            }
+        }
+
+        // The cells of each gap before the cell after its last track: the cell the line
+        // leaves the box through, the cells of self loops and the tracks. A vertical label
+        // row comes after those even without tracks. A horizontal gap without tracks has a
+        // lead of 0: a straight line's first cell, where the line leaves the box, is the
+        // line cell before its label, or holds the link's marker there with that line cell
+        // after it (a back edge's head, a `<-->` tail; see `gap_end_markers`).
+        let leads: Vec<usize> = track_counts
+            .iter()
+            .zip(&loop_cells)
+            .zip(&routed_label_cells)
+            .map(|((&tracks, &loop_cells), routed_cells)| {
+                let row_lead = axis == Axis::Vertical && routed_cells.is_some();
+                if tracks == 0 && !row_lead { 0 } else { 1 + loop_cells + tracks }
+            })
+            .collect();
+        let gaps: Vec<usize> = leads
+            .iter()
+            .zip(&routed_label_cells)
+            .zip(&loop_cells)
+            .map(|((&lead, &routed_cells), &loop_cells)| {
+                // After the last track, a horizontal gap holds a line cell and the arrowhead,
+                // or a label on the line with its markers and a line cell on either side of
+                // the text; a vertical one the label rows, if any, and the cell of the
+                // arrowhead.
+                let needed = match axis {
+                    Axis::Horizontal => lead + routed_cells.unwrap_or(0) + 2,
+                    Axis::Vertical => lead + routed_cells.unwrap_or(0) + 1,
+                };
+                // A blank cell separates the next layer from the loops and their labels.
+                let loops = if loop_cells > 0 { loop_cells + 1 } else { 0 };
+                layer_gap.max(needed).max(loops)
+            })
+            .collect();
+        let memberships = chart.memberships()?;
+        let innermost_first = chart.innermost_first();
+        let mut marked = vec![(false, false); chart.subgraphs.len()];
+        for (edge, &reversed) in chart.edges.iter().zip(&layered.reversed) {
+            if !edge.stroke.is_visible() {
+                continue;
+            }
+            let ends = [
+                (edge.from, !reversed, edge.tail.is_some()),
+                (edge.to, reversed, edge.head.is_some()),
+            ];
+            for (end, leaves, marker) in ends {
+                if let End::Subgraph(subgraph) = end
+                    && marker
+                    && let Some((before, after)) = marked.get_mut(subgraph)
+                {
+                    if leaves { *after = true } else { *before = true }
+                }
+            }
+        }
+        Some(Self {
+            chart,
+            layered,
+            entries,
+            exits,
+            track_of,
+            layer_size,
+            loop_cells,
+            leads,
+            gaps,
+            memberships,
+            innermost_first,
+            marked,
         })
-    });
-    for pair in segments {
-        let &[(main_a, cross_a), (main_b, cross_b)] = pair else { continue };
-        // The segment's cells across the border and along it, by the border's axis.
-        let ((across_a, across_b), (along_a, along_b)) = match axis {
-            Axis::Horizontal => ((cross_a, cross_b), (main_a, main_b)),
-            Axis::Vertical => ((main_a, main_b), (cross_a, cross_b)),
-        };
-        let (Some(across_a), Some(across_b)) = (signed(across_a), signed(across_b)) else {
-            continue;
-        };
-        if !(across_a.min(across_b)..=across_a.max(across_b)).contains(&top) {
-            continue;
-        }
-        for cell in along_a.min(along_b)..=along_a.max(along_b) {
-            let Some(cell) = signed(cell) else { continue };
-            let offset = if from_high { high - cell } else { cell - low };
-            crossings.extend(unsigned(offset));
-        }
     }
-    crossings
-}
 
-/// Whether a frame shares a cell with a box that is not one of its members or with
-/// another frame other than one nested in it or enclosing it, which would show that
-/// box, or the other frame's boxes, as belonging to its subgraph.
-fn frames_overlap(
-    chart: &Flowchart,
-    framed: &[(usize, &[bool], FrameBounds<'_>)],
-    scene: &Scene<'_>,
-    axis: Axis,
-) -> bool {
-    let nested = |a: usize, b: usize| chart.encloses(a, b) || chart.encloses(b, a);
-    let meet = |(low_a, high_a): (isize, isize), (low_b, high_b): (isize, isize)| {
-        low_a <= high_b && low_b <= high_a
-    };
-    let covers = |frame: &FrameBounds<'_>, main: (isize, isize), cross: (isize, isize)| {
-        meet(frame.main, main) && meet(frame.cross, cross)
-    };
-    framed.iter().enumerate().any(|(index, (subgraph, is_member, frame))| {
-        let covers_a_stranger = scene.boxes.iter().enumerate().any(|(node, placed)| {
-            is_member.get(node) != Some(&true)
-                && cell_span(placed.main, axis.box_main_size(placed.node))
-                    .zip(cell_span(placed.cross, axis.box_cross_size(placed.node)))
-                    .is_none_or(|(main, cross)| covers(frame, main, cross))
-        });
-        covers_a_stranger
-            || framed
+    /// Where each layer starts along the flow. Each layer is preceded by the `enter`
+    /// cells the frames opening at it take before its boxes, and its gap begins with the
+    /// `exit` cells the frames closing at it take after them, so that tracks, labels and
+    /// the previous layer stay clear of the frames.
+    fn layer_starts(&self, enter: &[usize], exit: &[usize]) -> Option<Vec<usize>> {
+        let mut layer_start = Vec::with_capacity(self.layered.layer_count);
+        let mut next = 0;
+        for (layer, (size, gap)) in self.layer_size.iter().zip(&self.gaps).enumerate() {
+            next += enter.get(layer)?;
+            layer_start.push(next);
+            next += size + exit.get(layer)? + gap;
+        }
+        Some(layer_start)
+    }
+
+    /// The frames of the subgraphs that get one in `scene`, by subgraph, with their
+    /// membership tables; see [`frame_bounds`] for `clear_links`.
+    fn frames(
+        &self,
+        scene: &Scene<'_>,
+        routed: &[RoutedLabel<'_>],
+        clear_links: bool,
+    ) -> Vec<(usize, &[bool], FrameBounds<'a>)> {
+        let chart = self.chart;
+        let mut bounds: Vec<Option<FrameBounds<'a>>> =
+            chart.subgraphs.iter().map(|_| None).collect();
+        for &index in &self.innermost_first {
+            let (Some(subgraph), Some(is_member)) =
+                (chart.subgraphs.get(index), self.memberships.get(index))
+            else {
+                continue;
+            };
+            let inner: Vec<_> = chart
+                .subgraphs
                 .iter()
-                .skip(index + 1)
-                .filter(|(other, ..)| !nested(*subgraph, *other))
-                .any(|(.., other)| covers(frame, other.main, other.cross))
-    })
+                .zip(&bounds)
+                .zip(&self.marked)
+                .filter(|((inner, _), _)| inner.parent == Some(index))
+                .filter_map(|((_, inner), &marked)| {
+                    inner.as_ref().map(|inner| ((inner.main, inner.cross), marked))
+                })
+                .collect();
+            if let Some(slot) = bounds.get_mut(index) {
+                *slot = frame_bounds(
+                    (subgraph, &chart.enclosing(index).collect::<Vec<_>>()),
+                    is_member,
+                    &inner,
+                    scene,
+                    routed,
+                    chart.direction,
+                    clear_links,
+                );
+            }
+        }
+        bounds
+            .into_iter()
+            .zip(&self.memberships)
+            .enumerate()
+            .filter_map(|(index, (frame, is_member))| Some((index, is_member.as_slice(), frame?)))
+            .collect::<Vec<_>>()
+    }
+
+    /// The cells each layer's frames take before and after its boxes in `scene`, laid
+    /// out from `layer_start`.
+    fn margins(
+        &self,
+        layer_start: &[usize],
+        (scene, routed): &(Scene<'_>, Vec<RoutedLabel<'_>>),
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
+        let layered = self.layered;
+        let mut enter = vec![0; layered.layer_count];
+        let mut exit = vec![0; layered.layer_count];
+        for (index, _, frame) in self.frames(scene, routed, true) {
+            let &(first, last) = layered.member_layers.get(index)?;
+            let before = signed(*layer_start.get(first)?)? - frame.main.0;
+            let after =
+                frame.main.1 + 1 - signed(layer_start.get(last)? + self.layer_size.get(last)?)?;
+            let enter = enter.get_mut(first)?;
+            *enter = (*enter).max(unsigned(before.max(0))?);
+            let exit = exit.get_mut(last)?;
+            *exit = (*exit).max(unsigned(after.max(0))?);
+        }
+        Some((enter, exit))
+    }
 }
 
-/// Moves every `routed` label `main` cells on along the flow and `cross` cells across it.
-/// `None` when a distance does not fit an `isize`.
-fn shift_labels(routed: &mut [RoutedLabel<'_>], main: usize, cross: usize) -> Option<()> {
+/// The `routed` labels, each `main` cells further on along the flow and `cross` cells
+/// further across it. `None` when a distance does not fit an `isize`.
+fn shift_labels<'a>(
+    mut routed: Vec<RoutedLabel<'a>>,
+    main: usize,
+    cross: usize,
+) -> Option<Vec<RoutedLabel<'a>>> {
     let (main_by, cross_by) = (signed(main)?, signed(cross)?);
-    for label in routed {
+    for label in &mut routed {
         label.at.0 += main_by;
         label.at.1 += cross_by;
     }
-    Some(())
+    Some(routed)
 }
 
-/// Moves every box, link and frame of `scene` `main` cells on along the flow and `cross`
-/// cells across it.
-pub(super) fn shift_scene(scene: &mut Scene<'_>, main: usize, cross: usize) {
+/// `scene` with every box, link and frame `main` cells further on along the flow and
+/// `cross` cells further across it.
+pub(super) fn shift_scene(mut scene: Scene<'_>, main: usize, cross: usize) -> Scene<'_> {
     for placed in &mut scene.boxes {
         placed.main += main;
         placed.cross += cross;
@@ -788,6 +647,7 @@ pub(super) fn shift_scene(scene: &mut Scene<'_>, main: usize, cross: usize) {
         frame.main = frame.main.start() + main..=frame.main.end() + main;
         frame.cross = frame.cross.start() + cross..=frame.cross.end() + cross;
     }
+    scene
 }
 
 fn unsigned(value: isize) -> Option<usize> {
@@ -795,10 +655,9 @@ fn unsigned(value: isize) -> Option<usize> {
 }
 
 /// The `routed` labels, each at the place the routing fixed for it, and the cells
-/// everything else must move right by so that no label starts left of the first column.
+/// everything else must move across the flow by (right in a vertical layout, down in a
+/// horizontal one) so that no label starts before the first cell across the flow.
 pub(super) fn place_labels<'a>(routed: &[RoutedLabel<'a>]) -> (Vec<PlacedLabel<'a>>, usize) {
-    // A label left of a line near the drawing's first column moves everything else on
-    // across the flow, as a frame reaching past it does.
     let cross_shift = routed.iter().map(|label| -label.at.1).max().unwrap_or(0).max(0);
     let labels = routed
         .iter()
@@ -949,8 +808,8 @@ fn entry_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<V
 /// for a self loop, the cell of its first leg (see [`exit_cells`]).
 fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<usize>> {
     let slots = &layered.slots;
-    // For each node, the links to other slots, with the order of the slot each goes to
-    // (see [`Slot::order`](super::layout::Slot::order)), and the self loops.
+    // For each node, the links to other slots, with the rank of the slot each goes to
+    // (see `Slot::order`), and the self loops.
     let mut leaving = vec![Vec::new(); chart.nodes.len()];
     let mut loops = vec![Vec::new(); chart.nodes.len()];
     let mut exits = vec![0; layered.paths.len()];
@@ -1009,12 +868,12 @@ fn self_loop(
 /// links leave it by when `leaving` and on the one they enter it by otherwise: a link
 /// along a horizontal flow runs on through them, so that it meets the side as upstream's
 /// meets the shape's outline. 0 along a vertical flow, whose ports lie between the
-/// border's ends (see [`Axis::port_range`]).
+/// border's ends (see [`Axis::port_range`]), and for a body that is not a box.
 fn side_inset(direction: Direction, node: &Node, leaving: bool) -> usize {
     match (&node.body, direction.axis()) {
-        // The side links leave by is the right one on screen, unless the flow points left.
         (Body::Box { shape, .. }, Axis::Horizontal) => {
-            outline(*shape).side_inset(leaving != direction.points_backward())
+            let right_side = leaving != direction.points_backward();
+            outline(*shape).side_inset(right_side)
         }
         _ => 0,
     }
