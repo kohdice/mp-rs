@@ -26,12 +26,12 @@ pub struct Env {
 ///
 /// Errors are reported on `stderr` with an `mp:` prefix; a broken pipe on `stdout` is
 /// treated as success so piping into `head` and friends stays quiet.
-pub fn run<W, E>(cli: &Cli, stdout: &mut W, stderr: &mut E, env: Env) -> ExitCode
+pub fn run<W, E>(cli: &Cli, mut stdout: W, mut stderr: E, env: Env) -> ExitCode
 where
     W: Write,
     E: Write,
 {
-    let render = render_file(&cli.file, resolve_output(cli, env), env.stdout_width, stdout);
+    let render = render_file(&cli.file, resolve_output(cli, env), env.stdout_width, &mut stdout);
     // Flush before reporting so a partial render reaches the terminal ahead of any
     // diagnostic. `and_then` would skip the flush after a render error; `and` runs it
     // and still reports the render error as the root cause when both fail.
@@ -42,7 +42,7 @@ where
             ExitCode::SUCCESS
         }
         Err(error) => {
-            let _ = writeln!(stderr, "mp: {error}");
+            let _ = writeln!(stderr, "mp: {}", ErrorChain(&error));
             ExitCode::FAILURE
         }
     }
@@ -85,29 +85,30 @@ enum Output {
     Render(ColorMode),
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum CliError {
-    Read { path: PathBuf, source: io::Error },
-    WriteStdout(io::Error),
+    #[error("unable to read '{}'", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("unable to write stdout")]
+    WriteStdout(#[source] io::Error),
 }
 
-impl fmt::Display for CliError {
+/// Displays `error` followed by each of its sources, separated by `: `.
+struct ErrorChain<'a>(&'a dyn std::error::Error);
+
+impl fmt::Display for ErrorChain<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(formatter, "unable to read '{}': {source}", path.display())
-            }
-            Self::WriteStdout(source) => write!(formatter, "unable to write stdout: {source}"),
+        write!(formatter, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(error) = source {
+            write!(formatter, ": {error}")?;
+            source = error.source();
         }
-    }
-}
-
-impl std::error::Error for CliError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Read { source, .. } => Some(source),
-            Self::WriteStdout(source) => Some(source),
-        }
+        Ok(())
     }
 }
 
@@ -169,9 +170,8 @@ mod tests {
     use clap::Parser as _;
     use clap::error::ErrorKind;
     use mp_preview::ColorMode;
-    use unicode_width::UnicodeWidthStr;
 
-    use super::{Cli, Env, Output, When, render_file, resolve_color_mode, run};
+    use super::{Cli, Env, When, resolve_color_mode, run};
 
     static TEMP_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -198,17 +198,20 @@ mod tests {
     }
 
     #[test]
-    fn prints_a_clear_diagnostic_when_the_file_cannot_be_read() -> io::Result<()> {
+    fn run_reports_an_unreadable_file_on_stderr_and_fails() -> io::Result<()> {
         let missing_file = unique_temp_path();
-        let mut output = Vec::new();
+        let cli = parse(&[], &missing_file)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
 
-        let error = render_file(&missing_file, Output::PassThrough, None, &mut output)
-            .err()
-            .ok_or_else(|| io::Error::other("missing file unexpectedly rendered"))?;
+        let exit_code = run(&cli, &mut stdout, &mut stderr, Env::default());
 
-        let diagnostic = error.to_string();
-        assert!(diagnostic.contains("unable to read '"));
-        assert!(diagnostic.contains(&missing_file.display().to_string()));
+        assert_eq!(exit_code, std::process::ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        let diagnostic = utf8(stderr)?;
+        assert!(diagnostic.starts_with("mp: unable to read '"), "{diagnostic:?}");
+        // The underlying I/O error follows the path, so users see why it failed.
+        assert!(diagnostic.contains(&format!("'{}': ", missing_file.display())), "{diagnostic:?}");
         Ok(())
     }
 
@@ -236,31 +239,27 @@ mod tests {
         Ok(())
     }
 
-    const WIDE_TABLE_MARKDOWN: &str = "| Crate | Responsibility |\n\
-         | --- | --- |\n\
-         | mp-preview | Block-to-terminal rendering with a trailing-newline guarantee |\n";
+    #[test]
+    fn run_wraps_to_the_detected_terminal_width() -> io::Result<()> {
+        let output = run_on(
+            "hello world\n",
+            &["--color", "never"],
+            Env { stdout_is_terminal: true, stdout_width: Some(5), ..Env::default() },
+        )?;
+
+        assert_eq!(output, "hello\nworld\n");
+        Ok(())
+    }
 
     #[test]
-    fn run_wraps_wide_tables_to_the_detected_terminal_width() -> io::Result<()> {
-        let file = write_temp_markdown(WIDE_TABLE_MARKDOWN)?;
-        let cli = parse(&["--color", "never"], &file)?;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+    fn run_does_not_wrap_without_a_detected_terminal_width() -> io::Result<()> {
+        let output = run_on(
+            "hello world\n",
+            &["--color", "never"],
+            Env { stdout_is_terminal: true, stdout_width: None, ..Env::default() },
+        )?;
 
-        let exit_code = run(
-            &cli,
-            &mut stdout,
-            &mut stderr,
-            Env { stdout_is_terminal: true, stdout_width: Some(40), ..Env::default() },
-        );
-
-        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        let output = utf8(stdout)?;
-        assert!(
-            output.lines().all(|line| line.width() <= 40),
-            "every line must fit in 40 columns: {output}"
-        );
-        fs::remove_file(file)?;
+        assert_eq!(output, "hello world\n");
         Ok(())
     }
 

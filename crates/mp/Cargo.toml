@@ -11,9 +11,7 @@ repository.workspace = true
 clap.workspace = true
 mp-preview.workspace = true
 terminal_size.workspace = true
-
-[dev-dependencies]
-unicode-width.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

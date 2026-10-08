@@ -3,8 +3,6 @@
 mod canvas;
 mod flowchart;
 
-use std::fmt;
-
 use crate::style::Line;
 
 /// Why a Mermaid block is shown as its source instead of a drawing.
@@ -17,20 +15,22 @@ pub(crate) enum Failure {
     Syntax(SyntaxError),
 }
 
-/// Displays as `line N: message`, or as the message alone when no line is to blame.
-#[derive(Debug)]
+/// Input that is not valid Mermaid. Displays as `line N: message`, or as the message
+/// alone when no line is to blame.
+#[derive(Debug, thiserror::Error)]
+#[error("{}", located(*.line, .message))]
 pub(crate) struct SyntaxError {
     /// 1-based line within the diagram source.
     pub line: Option<usize>,
+    /// What is wrong, shown after the line number.
     pub message: String,
 }
 
-impl fmt::Display for SyntaxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.line {
-            Some(line) => write!(f, "line {line}: {}", self.message),
-            None => f.write_str(&self.message),
-        }
+/// `message` prefixed with `line N: ` when `line` is known.
+fn located(line: Option<usize>, message: &str) -> String {
+    match line {
+        Some(line) => format!("line {line}: {message}"),
+        None => message.to_owned(),
     }
 }
 
