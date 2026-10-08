@@ -389,9 +389,14 @@ mod tests {
 
     #[test]
     fn styling_parse_reads_properties_and_keywords_in_any_case() {
+        for (bold, italic) in
+            [("font-weight:bold", "font-style:italic"), ("FONT-WEIGHT:Bold", "Font-Style:ITALIC")]
+        {
+            let styling = Styling::parse(&format!("{bold},{italic}"));
+
+            assert_eq!((styling.bold, styling.italic), (Some(true), Some(true)), "{bold},{italic}");
+        }
         assert_eq!(Styling::parse("Fill:Red").fill, ColorSetting::Color(RED));
-        assert_eq!(Styling::parse("FONT-WEIGHT:Bold").bold, Some(true));
-        assert_eq!(Styling::parse("Font-Style:ITALIC").italic, Some(true));
         assert_eq!(Styling::parse("stroke-dasharray:None").dotted, Some(false));
     }
 
@@ -409,15 +414,6 @@ mod tests {
     }
 
     #[test]
-    fn styling_parse_stroke_width_of_three_pixels_or_more_is_heavy() {
-        let heavy = |value: &str| Styling::parse(&format!("stroke-width:{value}")).heavy;
-
-        assert_eq!(heavy("4px"), Some(true));
-        assert_eq!(heavy("3"), Some(true));
-        assert_eq!(heavy("2px"), Some(false));
-    }
-
-    #[test]
     fn styling_parse_non_zero_stroke_dasharray_is_dotted() {
         let dotted = |value: &str| Styling::parse(&format!("stroke-dasharray:{value}")).dotted;
 
@@ -431,12 +427,5 @@ mod tests {
                 .dotted,
             Some(false)
         );
-    }
-
-    #[test]
-    fn styling_parse_font_weight_bold_and_font_style_italic() {
-        let styling = Styling::parse("font-weight:bold,font-style:italic");
-
-        assert_eq!((styling.bold, styling.italic), (Some(true), Some(true)));
     }
 }

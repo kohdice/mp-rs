@@ -625,13 +625,6 @@ mod tests {
     }
 
     #[test]
-    fn label_asterisks_outside_a_markdown_string_are_text() {
-        for source in ["\"**not bold**\"", "**not bold**"] {
-            assert_eq!(Label::parse(source).rows(), [vec![plain("**not bold**")]], "{source}");
-        }
-    }
-
-    #[test]
     fn label_markdown_string_emphasis_nests() {
         let bold_italic = Run { text: "b".to_owned(), bold: true, italic: true };
 
@@ -639,17 +632,6 @@ mod tests {
             Label::parse("\"`*a **b** c*`\"").rows(),
             [vec![italic("a "), bold_italic, italic(" c")]]
         );
-    }
-
-    #[test]
-    fn label_markdown_string_unpaired_markers_and_inner_underscores_stay_text() {
-        for written in ["*x", "snake_case_name"] {
-            assert_eq!(
-                Label::parse(&format!("\"`{written}`\"")).rows(),
-                [vec![plain(written)]],
-                "{written}"
-            );
-        }
     }
 
     #[test]

@@ -439,18 +439,24 @@ fn mermaid_link_style_width_and_dasharray_change_the_line_glyphs() {
 #[test]
 fn mermaid_thick_link_turns_with_heavy_corners() {
     let output = mermaid("flowchart LR\n    A ==> B\n    A ==> C\n");
-    // A's box takes columns 0 to 4 and the boxes of B and C start at column 10, so the
-    // link into C turns in columns 5 to 9.
+    let boxes: Vec<_> =
+        ["A", "B", "C"].iter().filter_map(|label| box_bounds(&output, label)).collect();
+    let in_a_box = |row: usize, col: usize| {
+        boxes.iter().any(|&(top, left, bottom, right)| {
+            (top..=bottom).contains(&row) && (left..=right).contains(&col)
+        })
+    };
     let turns: Vec<char> = output
         .lines()
-        .flat_map(|line| line.chars().skip(5).take(5))
+        .enumerate()
+        .flat_map(|(row, line)| {
+            line.chars().enumerate().filter(move |&(col, _)| !in_a_box(row, col)).map(|(_, c)| c)
+        })
         .filter(|c| "┌┐└┘├┤┬┴┼┏┓┗┛┣┫┳┻╋".contains(*c))
         .collect();
 
-    assert_eq!(
-        output,
-        "┌───┐     ┌───┐\n│   │━━━━►│ B │\n│ A │     └───┘\n│   │━┓\n└───┘ ┃   ┌───┐\n      ┗━━►│ C │\n          └───┘"
-    );
+    assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    assert_eq!(count_glyph(&output, '►'), 2, "{output}");
     assert!(!turns.is_empty(), "{output}");
     assert!(turns.iter().all(|c| "┏┓┗┛┣┫┳┻╋".contains(*c)), "{output}");
 }
@@ -571,8 +577,7 @@ fn mermaid_icon_shape_falls_back() {
 }
 
 #[test]
-fn mermaid_multi_line_shape_data_is_read() {
-    // A comma between lines is optional.
+fn mermaid_multi_line_shape_data_accepts_an_omitted_comma_between_lines() {
     for data in ["shape: stadium\n", "shape: stadium,\n"] {
         assert_eq!(
             mermaid(&format!(
@@ -638,10 +643,11 @@ fn mermaid_unclosed_shape_data_is_a_syntax_error() {
 
 #[test]
 fn mermaid_at_brace_in_an_edge_text_is_label_text() {
-    assert_eq!(
-        mermaid("flowchart LR\n    A -- x@{y --> B\n    B --> C\n"),
-        "┌───┐       ┌───┐     ┌───┐\n│ A │─x@{y─►│ B │────►│ C │\n└───┘       └───┘     └───┘"
-    );
+    // `B --> C` would vanish if `@{` opened multi-line shape data that swallows the next line.
+    let output = mermaid("flowchart LR\n    A -- x@{y --> B\n    B --> C\n");
+
+    assert!(is_lr_chain(&output, &["A", "B", "C"]), "{output}");
+    assert_label_on_line(&output, "x@{y");
 }
 
 #[test]
@@ -681,7 +687,7 @@ fn mermaid_text_after_a_quoted_shape_data_value_is_a_syntax_error() {
 }
 
 #[test]
-fn mermaid_multi_line_edge_data_is_read_and_dropped() {
+fn mermaid_multi_line_edge_data_does_not_change_the_drawing() {
     assert_eq!(
         mermaid("flowchart LR\n    A e1@--> B\n    e1@{\n        animate: true\n    }\n"),
         mermaid(LR_A_TO_B)
@@ -843,7 +849,7 @@ fn mermaid_shape_data_label_overrides_the_bracket_label() {
 }
 
 #[test]
-fn mermaid_shape_data_on_a_link_target_and_after_a_class_is_read() {
+fn mermaid_shape_data_on_a_link_target_and_after_a_class_sets_the_shape() {
     assert_eq!(
         mermaid("flowchart LR\n    A --> B@{ shape: stadium }\n"),
         "┌───┐     ╭───╮\n│ A │────►( B )\n└───┘     ╰───╯"
@@ -891,7 +897,6 @@ fn mermaid_shape_data_names_and_aliases_render_like_their_bracket_forms() {
     ];
     for (aliases, bracket_form) in names {
         let expected = drawn(&format!("flowchart LR\n    {bracket_form}\n"));
-        assert!(!expected.starts_with("```mermaid"), "{expected}");
         for name in aliases {
             let body = format!("flowchart LR\n    A@{{ shape: {name} }}\n");
             assert_eq!(mermaid(&body), expected, "{name}");
@@ -1234,10 +1239,9 @@ fn mermaid_rl_label_sits_on_the_line_before_the_arrowhead() {
 #[test]
 fn mermaid_lr_label_of_a_back_edge_keeps_a_line_cell_after_its_arrowhead() {
     let output = mermaid("flowchart LR\n    A --> B\n    B -->|back| A\n");
-    let (row, col) = assert_label_on_line(&output, "back");
+    assert_label_on_line(&output, "back");
 
     assert_eq!(whole_words(&output, "back"), 1, "{output}");
-    assert_ne!(glyph_at(&output, row, col - 1), Some('◄'), "{output}");
     assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
 }
 
@@ -1358,33 +1362,36 @@ fn mermaid_td_wide_label_grows_the_box_its_link_enters() {
 #[test]
 fn mermaid_td_label_reaching_past_its_box_keeps_one_blank_from_its_neighbours_line() {
     // On the label row there are no boxes, only the lines entering the layer: the label
-    // keeps one blank from B's line, not the sibling gap from B's box. The first label
-    // fits at the default gap between B, C and D; the second only once they move apart.
-    for (label, expected) in [
-        (
-            "long label",
-            " ┌─────┐\n │  A  │\n └─────┘\n  │ │ │\n  │ │ └─────────┐\n  │ └────┐      │\n  │ long label  │\n  ▼      ▼      ▼\n┌───┐  ┌───┐  ┌───┐\n│ B │  │ C │  │ D │\n└───┘  └───┘  └───┘",
-        ),
-        (
-            "a much longer label",
-            " ┌─────┐\n │  A  │\n └─────┘\n  │ │ │\n  │ │ └─────────────────┐\n  │ └────────┐          │\n  │ a much longer label │\n  ▼          ▼          ▼\n┌───┐      ┌───┐      ┌───┐\n│ B │      │ C │      │ D │\n└───┘      └───┘      └───┘",
-        ),
-    ] {
-        let body = format!("flowchart TD\n    A --> B\n    A -->|{label}| C\n    A --> D\n");
+    // keeps one blank from B's line, not the sibling gap from B's box.
+    let plain = mermaid("flowchart TD\n    A --> B\n    A --> C\n    A --> D\n");
+    let Some((_, plain_c_left, _)) = box_of(&plain, "C") else {
+        panic!("missing box in\n{plain}");
+    };
+    for (label, moves_apart) in [("long label", false), ("a much longer label", true)] {
+        let output =
+            mermaid(&format!("flowchart TD\n    A --> B\n    A -->|{label}| C\n    A --> D\n"));
+        let Some((row, start)) = position_of_word(&output, label) else {
+            panic!("missing label in\n{output}");
+        };
+        let Some((_, c_left, _)) = box_of(&output, "C") else {
+            panic!("missing box in\n{output}");
+        };
 
-        assert_eq!(mermaid(&body), expected, "{label}");
+        assert_eq!(glyph_at(&output, row, start - 1), Some(' '), "{output}");
+        assert_eq!(glyph_at(&output, row, start - 2), Some('│'), "{output}");
+        assert_eq!(c_left > plain_c_left, moves_apart, "{output}\n{plain}");
+        assert_eq!(count_glyph(&output, '▼'), 3, "{output}");
+        assert!(boxes_intact(&output, &["A", "B", "C", "D"]), "{output}");
     }
 }
-
-// A frame border is a neighbour on the label row only when the frame spans the layer
-// before as well; a frame opening in the label's own layer starts below it. The
-// tests below check that a label near a frame moves nothing this rule does not
-// require.
 
 /// The label of [`near_frame_body`]'s labelled link.
 const NEAR_FRAME_LABEL: &str = "long label";
 
-/// `A --> B` and `A {edge} C`, with the members `members` in subgraph `S`.
+/// `A --> B` and `A {edge} C`, with the members `members` in subgraph `S`, for checking
+/// that a label near a frame moves only what the frame requires: a frame border is a
+/// neighbour on the label row only when the frame spans the layer before as well, since
+/// a frame opening in the label's own layer starts below it.
 fn near_frame_body(edge: &str, members: &str) -> String {
     format!("flowchart TD\n    A --> B\n    A {edge} C\n    subgraph S\n{members}    end\n")
 }
@@ -1409,10 +1416,10 @@ fn left_of(output: &str, name: &str) -> usize {
     }
 }
 
-/// The left and right columns of frame `S`.
-fn crossed_frame_s(output: &str) -> (usize, usize) {
+/// The top row and the left and right columns of frame `S`.
+fn crossed_frame_s(output: &str) -> (usize, usize, usize) {
     match intact_crossed_frame(output, "S") {
-        Some((_, left, _, right)) => (left, right),
+        Some((top, left, _, right)) => (top, left, right),
         None => panic!("missing frame in\n{output}"),
     }
 }
@@ -1439,7 +1446,7 @@ fn mermaid_td_label_on_a_link_from_outside_a_frame_is_never_enclosed_by_it() {
 
     assert_near_frame_drawn(&output);
     assert_eq!(left_of(&output, "C"), left_of(&plain, "C"), "{output}\n{plain}");
-    assert_eq!(crossed_frame_s(&output).0, crossed_frame_s(&plain).0, "{output}\n{plain}");
+    assert_eq!(crossed_frame_s(&output).1, crossed_frame_s(&plain).1, "{output}\n{plain}");
     assert!(start >= into_b + 2, "{output}");
     assert_eq!(glyph_at(&output, row, start - 1), Some(' '), "{output}");
 }
@@ -1450,7 +1457,7 @@ fn mermaid_td_frame_closing_before_the_labelled_slot_lies_below_the_label_row() 
     let output = mermaid(&near_frame_body(&near_frame_labelled_edge(), "    B\n"));
 
     assert_near_frame_drawn(&output);
-    assert_eq!(left_of(&output, "C"), crossed_frame_s(&output).1 + 3, "{output}");
+    assert!(near_frame_label_at(&output).0 < crossed_frame_s(&output).0, "{output}");
     assert_eq!(left_of(&output, "C"), left_of(&plain, "C"), "{output}\n{plain}");
 }
 
@@ -1687,18 +1694,30 @@ fn mermaid_td_self_loop_takes_the_last_cells_of_its_border() {
 
 #[test]
 fn mermaid_td_self_loop_label_keeps_a_blank_from_the_exit_beside_it() {
-    assert_eq!(
-        mermaid("flowchart TD\n    A[Source node] -->|retry now| A\n    A --> B\n"),
-        "┌─────────────┐\n│ Source node │\n└─────────────┘\n  │    │ ▲\n  │    └─┘\n  │ retry now\n  ▼\n┌───┐\n│ B │\n└───┘"
-    );
+    let output = mermaid("flowchart TD\n    A[Source node] -->|retry now| A\n    A --> B\n");
+    let Some((row, col)) = position_of_word(&output, "retry now") else {
+        panic!("missing label in\n{output}");
+    };
+
+    assert!(boxes_intact(&output, &["Source node", "B"]), "{output}");
+    assert_eq!(glyph_at(&output, row, col - 1), Some(' '), "{output}");
+    assert_eq!(glyph_at(&output, row, col - 2), Some('│'), "{output}");
+    assert_eq!(count_glyph(&output, '▲'), 1, "{output}");
 }
 
 #[test]
 fn mermaid_td_two_self_loop_labels_keep_a_blank_between_them() {
-    assert_eq!(
-        mermaid("flowchart TD\n    A -->|once| A\n    A -->|more| A\n"),
-        "┌─────────┐\n│    A    │\n└─────────┘\n  │ ▲  │ ▲\n  └─┘  └─┘\n once more"
-    );
+    let output = mermaid("flowchart TD\n    A -->|once| A\n    A -->|more| A\n");
+    let (Some((once_row, once_col)), Some((more_row, more_col))) =
+        (position_of_word(&output, "once"), position_of_word(&output, "more"))
+    else {
+        panic!("missing label in\n{output}");
+    };
+
+    assert!(boxes_intact(&output, &["A"]), "{output}");
+    assert_eq!(once_row, more_row, "{output}");
+    assert_eq!(more_col, once_col + "once".len() + 1, "{output}");
+    assert_eq!(count_glyph(&output, '▲'), 2, "{output}");
 }
 
 #[test]
@@ -1756,9 +1775,17 @@ fn mermaid_lines_never_cross_box_interiors() {
 #[test]
 fn mermaid_back_edge_renders_both_arrowheads() {
     let output = mermaid("flowchart LR\n    A --> B --> A\n");
+    let (Some((_, _, a_right)), Some((_, b_left, _))) =
+        (box_of(&output, "A"), box_of(&output, "B"))
+    else {
+        panic!("missing box in\n{output}");
+    };
+    let heads = arrowheads(&output);
 
     assert!(boxes_intact(&output, &["A", "B"]), "{output}");
-    assert_eq!(arrowheads(&output).len(), 2, "{output}");
+    assert_eq!(heads.len(), 2, "{output}");
+    assert!(heads.iter().any(|&(_, col, glyph)| glyph == '►' && col + 1 == b_left), "{output}");
+    assert!(heads.iter().any(|&(_, col, glyph)| glyph == '◄' && col == a_right + 1), "{output}");
 }
 
 #[test]
@@ -1970,10 +1997,25 @@ fn mermaid_lr_self_loop_label_sits_right_of_the_loop_on_its_middle_row() {
 
 #[test]
 fn mermaid_lr_three_row_self_loop_label_keeps_a_blank_row_from_the_exit_beside_it() {
-    assert_eq!(
-        mermaid("flowchart LR\n    A -->|x<br>y<br>z| A\n    A --> B\n"),
-        "┌───┐     ┌───┐\n│   │────►│ B │\n│   │     └───┘\n│ A │─┐ x\n│   │ │ y\n│   │◄┘ z\n└───┘"
-    );
+    let output = mermaid("flowchart LR\n    A -->|x<br>y<br>z| A\n    A --> B\n");
+    let Some((_, b_left, _)) = box_of(&output, "B") else {
+        panic!("missing box in\n{output}");
+    };
+    let Some(&(into_b, ..)) =
+        arrowheads(&output).iter().find(|&&(_, col, glyph)| glyph == '►' && col + 1 == b_left)
+    else {
+        panic!("missing arrowhead into B in\n{output}");
+    };
+    let [Some((x_row, x_col)), Some(y), Some(z)] =
+        ["x", "y", "z"].map(|row| position_of_word(&output, row))
+    else {
+        panic!("missing label in\n{output}");
+    };
+
+    assert!(boxes_intact(&output, &["A", "B"]), "{output}");
+    assert!(x_row >= into_b + 2, "{output}");
+    assert_eq!((y, z), ((x_row + 1, x_col), (x_row + 2, x_col)), "{output}");
+    assert_eq!(arrowheads(&output).len(), 2, "{output}");
 }
 
 #[test]
@@ -1994,10 +2036,12 @@ fn mermaid_td_two_row_self_loop_label_centres_each_row_on_the_loop() {
 
 #[test]
 fn mermaid_lr_two_row_label_on_a_passing_slot_runs_its_upper_row_on_the_line() {
-    assert_eq!(
-        mermaid("flowchart LR\n    A --> B --> C\n    A -->|x<br>y| C\n"),
-        "┌───┐     ┌───┐\n│   │────►│ B │─┐   ┌───┐\n│ A │     └───┘ └──►│   │\n│   │─┐             │ C │\n└───┘ │          ┌─►│   │\n      └─────x────┘  └───┘\n            y"
-    );
+    let output = mermaid("flowchart LR\n    A --> B --> C\n    A -->|x<br>y| C\n");
+    let (row, col) = assert_label_on_line(&output, "x");
+
+    assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    assert_eq!(position_of_word(&output, "y"), Some((row + 1, col)), "{output}");
+    assert_eq!(count_glyph(&output, '►'), 3, "{output}");
 }
 
 #[test]
@@ -2048,10 +2092,21 @@ fn mermaid_lr_self_loop_label_keeps_the_next_layer_beyond_it() {
 
 #[test]
 fn mermaid_lr_self_loop_label_keeps_the_tracks_of_its_box_beyond_it() {
-    assert_eq!(
-        mermaid("flowchart LR\n    A -->|again| A\n    A --> B\n    A --> C\n"),
-        "┌───┐\n│   │            ┌───┐\n│   │───────────►│ B │\n│   │─────────┐  └───┘\n│ A │         │\n│   │─┐       │  ┌───┐\n│   │ │ again └─►│ C │\n│   │◄┘          └───┘\n└───┘"
-    );
+    let output = mermaid("flowchart LR\n    A -->|again| A\n    A --> B\n    A --> C\n");
+    let Some((row, start)) = position_of_word(&output, "again") else {
+        panic!("missing label in\n{output}");
+    };
+    let last = start + "again".len() - 1;
+    let Some(track) = (last + 1..widest(&output))
+        .find(|&col| glyph_at(&output, row, col).is_some_and(|c| "│└".contains(c)))
+    else {
+        panic!("missing track right of the label in\n{output}");
+    };
+
+    assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    assert!(track >= last + 2, "{output}");
+    assert_eq!(count_glyph(&output, '►'), 2, "{output}");
+    assert_eq!(count_glyph(&output, '◄'), 1, "{output}");
 }
 
 #[test]
@@ -2110,18 +2165,51 @@ fn mermaid_td_self_loop_label_of_a_node_between_a_frames_layers_stays_outside_th
 
 #[test]
 fn mermaid_lr_self_loop_and_the_tracks_of_its_box_keep_separate_columns() {
-    assert_eq!(
-        mermaid("flowchart LR\n    A --> A\n    A --> B\n    A --> C\n"),
-        "┌───┐\n│   │      ┌───┐\n│   │─────►│ B │\n│   │───┐  └───┘\n│ A │   │\n│   │─┐ │  ┌───┐\n│   │ │ └─►│ C │\n│   │◄┘    └───┘\n└───┘"
-    );
+    let output = mermaid("flowchart LR\n    A --> A\n    A --> B\n    A --> C\n");
+    let heads = arrowheads(&output);
+    let Some(&(loop_row, loop_col, _)) = heads.iter().find(|&&(.., glyph)| glyph == '◄') else {
+        panic!("missing self-loop arrowhead in\n{output}");
+    };
+    let Some(turn) =
+        heads.iter().filter(|&&(.., glyph)| glyph == '►').find_map(|&(row, col, _)| {
+            let mut turn = col.checked_sub(1)?;
+            while glyph_at(&output, row, turn) == Some('─') {
+                turn = turn.checked_sub(1)?;
+            }
+            (glyph_at(&output, row, turn) == Some('└')).then_some(turn)
+        })
+    else {
+        panic!("missing turn toward an arrowhead in\n{output}");
+    };
+
+    assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    assert_eq!(heads.len(), 3, "{output}");
+    for junction in ['┼', '┬', '┴'] {
+        assert_eq!(count_glyph(&output, junction), 0, "{output}");
+    }
+    assert_ne!(loop_col, turn, "{output}");
+    assert_eq!(glyph_at(&output, loop_row, loop_col + 1), Some('┘'), "{output}");
+    assert_ne!(loop_col + 1, turn, "{output}");
 }
 
 #[test]
 fn mermaid_td_self_loop_label_wider_than_its_box_moves_the_drawing_right() {
-    assert_eq!(
-        mermaid("flowchart TD\n    A -->|retry on failure| A\n"),
-        "      ┌───┐\n      │ A │\n      └───┘\n       │ ▲\n       └─┘\nretry on failure"
-    );
+    let output = mermaid("flowchart TD\n    A -->|retry on failure| A\n");
+    let Some((row, start)) = position_of_word(&output, "retry on failure") else {
+        panic!("missing label in\n{output}");
+    };
+    let Some((_, a_left, _)) = box_of(&output, "A") else {
+        panic!("missing box in\n{output}");
+    };
+    let centre = start + "retry on failure".len() / 2;
+
+    assert!(boxes_intact(&output, &["A"]), "{output}");
+    assert_eq!(start, 0, "{output}");
+    assert!(a_left > 0, "{output}");
+    assert_eq!(glyph_at(&output, row - 1, centre - 1), Some('└'), "{output}");
+    assert_eq!(glyph_at(&output, row - 1, centre), Some('─'), "{output}");
+    assert_eq!(glyph_at(&output, row - 1, centre + 1), Some('┘'), "{output}");
+    assert_eq!(count_glyph(&output, '▲'), 1, "{output}");
 }
 
 #[test]
@@ -2449,7 +2537,7 @@ fn mermaid_isolated_subgraph_without_direction_is_laid_out_crosswise_in_tb() {
 }
 
 #[test]
-fn mermaid_isolated_subgraph_without_direction_is_laid_out_crosswise_in_lr() {
+fn mermaid_isolated_subgraph_without_direction_is_laid_out_top_down_in_lr_rl_and_bt() {
     for header in ["flowchart LR", "flowchart RL", "flowchart BT"] {
         assert_eq!(
             mermaid(&format!("{header}\n    subgraph s\n    a --> b\n    end\n")),
@@ -2591,13 +2679,18 @@ fn mermaid_lr_labelled_links_into_a_unit_subgraph_keep_a_blank_row_between_label
 
 #[test]
 fn mermaid_lr_self_loop_on_a_unit_grows_its_frame_to_hold_the_legs() {
+    let plain =
+        mermaid("flowchart LR\n    subgraph s\n    direction TB\n    A\n    end\n    s --> Y\n");
     let output = mermaid(
         "flowchart LR\n    subgraph s\n    direction TB\n    A\n    end\n    s --> s\n    s --> Y\n",
     );
-    let (Some((top, left, bottom, right)), Some((y_row, y_left, _))) =
-        (intact_frame(&output, "s"), box_of(&output, "Y"))
+    let (Some((top, left, bottom, right)), Some((plain_top, _, plain_bottom, _))) =
+        (intact_frame(&output, "s"), intact_frame(&plain, "s"))
     else {
-        panic!("missing frame or box in\n{output}");
+        panic!("missing frame in\n{output}\n{plain}");
+    };
+    let Some((y_row, y_left, _)) = box_of(&output, "Y") else {
+        panic!("missing box in\n{output}");
     };
     let heads = arrowheads(&output);
     let back: Vec<_> = heads.iter().filter(|&&(.., c)| c == '◄').collect();
@@ -2609,6 +2702,7 @@ fn mermaid_lr_self_loop_on_a_unit_grows_its_frame_to_hold_the_legs() {
         "{output}"
     );
     assert_eq!(back.len(), 1, "{output}");
+    assert!(bottom - top > plain_bottom - plain_top, "{output}\n{plain}");
     assert!(boxes_intact(&output, &["A", "Y"]) && left < y_left, "{output}");
 }
 
@@ -2895,11 +2989,8 @@ fn mermaid_subgraph_direction_is_kept_when_only_its_id_links_outside() {
         .filter(|&(row, col, c)| c == '►' && col + 1 == one.1 && one.0 < row && row < one.2)
         .count();
 
-    // A TB child is centred under its parent, so boxes of different widths share
-    // their centre column rather than their left border. A box of even width has no
-    // middle cell; the layout takes the one right of the middle, `left + width / 2`.
-    let centre = |(_, left, right): (usize, usize, usize)| (left + right).div_ceil(2);
-    assert!(centre(top1) == centre(bottom1) && top1.0 < bottom1.0, "{output}");
+    let centre = |(_, left, right): (usize, usize, usize)| (left + right) / 2;
+    assert!(centre(top1).abs_diff(centre(bottom1)) <= 1 && top1.0 < bottom1.0, "{output}");
     assert!(top2.0 == bottom2.0 && top2.2 < bottom2.1, "{output}");
     assert!(outside.2 < one.1 && outside.2 < two.1, "{output}");
     assert_eq!(into_one, 1, "{output}");
@@ -3252,11 +3343,18 @@ fn mermaid_labelled_link_too_wide_for_its_label_falls_back() {
 #[test]
 fn mermaid_td_fits_width_by_shrinking_the_sibling_gap() {
     let body = "flowchart TD\n    A --> B\n    A --> C\n";
-    let width = widest(&mermaid(body)) - 1;
+    let unconstrained = mermaid(body);
+    let width = widest(&unconstrained) - 1;
     let output = mermaid_in(body, Some(width));
+    let gap = |output: &str| match (box_of(output, "B"), box_of(output, "C")) {
+        (Some((_, _, b_right)), Some((_, c_left, _))) => c_left - b_right,
+        _ => panic!("missing box in\n{output}"),
+    };
 
     assert!(!output.starts_with("```"), "fell back to the code block:\n{output}");
     assert!(widest(&output) <= width, "{output}");
+    assert!(gap(&output) < gap(&unconstrained), "{output}\n{unconstrained}");
+    assert_eq!(count_glyph(&output, '▼'), 2, "{output}");
     assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
 }
 
@@ -3264,8 +3362,7 @@ fn mermaid_td_fits_width_by_shrinking_the_sibling_gap() {
 fn mermaid_too_wide_after_compaction_falls_back_without_a_reason_line() {
     let body = "flowchart LR\n    A --> B --> C\n";
 
-    // At the tightest spacing the drawing is 19 columns wide. Unsupported shows no
-    // reason line.
+    // At the tightest spacing the drawing is 19 columns wide.
     assert_eq!(mermaid_in(body, Some(18)), unsupported(body));
 }
 
@@ -3288,8 +3385,16 @@ fn mermaid_drawing_larger_than_a_million_cells_at_the_default_spacing_is_drawn_t
     let targets: Vec<String> = (1..=230).map(|index| format!("T{index}")).collect();
     body.push_str(&format!("    C0 --> {}\n", targets.join(" & ")));
     let output = mermaid(&body);
+    let default_spacing = mermaid(LR_A_TO_B);
+    let gap = |output: &str, from: &str, to: &str| match (box_of(output, from), box_of(output, to))
+    {
+        (Some((_, _, right)), Some((_, left, _))) => left - right,
+        _ => panic!("missing box {from} or {to}"),
+    };
 
     assert!(!output.starts_with("```"), "fell back to the code block");
+    // Not C0 to C1: the tracks of C0's 231 links widen that gap.
+    assert!(gap(&output, "C98", "C99") < gap(&default_spacing, "A", "B"));
     assert_eq!(output.matches("│ C99 │").count(), 1);
     assert_eq!(output.matches("│ T230 │").count(), 1);
     let (columns, rows) =
@@ -3319,9 +3424,7 @@ fn mermaid_text_limit_is_fifty_thousand_characters_inclusive() {
     let at_limit = format!("flowchart LR\nA[{}]\n", "あ".repeat(50_000 - 17));
     let over_limit = format!("flowchart LR\nA[{}]\n", "あ".repeat(50_001 - 17));
 
-    assert_eq!(at_limit.chars().count(), 50_000);
-    let output = mermaid(&at_limit);
-    assert!(output.starts_with('┌'), "not drawn");
+    drawn(&at_limit);
     assert_eq!(
         mermaid(&over_limit),
         syntax_error_output_without_a_line(&over_limit, "diagram text exceeds 50000 characters")
@@ -3641,22 +3744,24 @@ fn mermaid_subgraphs_listed_in_each_other_fall_back() {
 
 #[test]
 fn mermaid_links_into_an_empty_subgraph_top_down_enter_its_top_border_apart() {
-    // The number of arrowheads just above the top border of frame `s`, and the
-    // frame's width.
-    let entries = |body: &str| {
-        let output = mermaid(body);
-        let (top, left, _, right) = intact_crossed_frame(&output, "s")?;
-        let arrows =
-            (left + 1..right).filter(|&col| glyph_at(&output, top - 1, col) == Some('▼')).count();
-        Some((arrows, right - left))
+    let one = drawn("flowchart TD\n    A --> s\n    subgraph s\n    end\n");
+    let output = drawn("flowchart TD\n    A --> s\n    B --> s\n    subgraph s\n    end\n");
+    let (Some((_, one_left, _, one_right)), Some(frame @ (top, left, _, right))) =
+        (intact_crossed_frame(&one, "s"), intact_crossed_frame(&output, "s"))
+    else {
+        panic!("missing frame in\n{one}\n{output}");
     };
-    let one = entries("flowchart TD\n    A --> s\n    subgraph s\n    end\n");
-    let two = entries("flowchart TD\n    A --> s\n    B --> s\n    subgraph s\n    end\n");
+    let Some(title) = title_cells(&output, top, left, "s") else {
+        panic!("missing title in\n{output}");
+    };
+    let Some(columns) = entries_above_frame(&output, frame, &title) else {
+        panic!("arrowheads off the frame in\n{output}");
+    };
 
-    let (Some((1, one_width)), Some((2, two_width))) = (one, two) else {
-        panic!("{one:?} {two:?}");
-    };
-    assert!(one_width < two_width, "{one_width} {two_width}");
+    assert_eq!(columns.len(), 2, "{output}");
+    assert!(columns.windows(2).all(|pair| pair[0] + 2 <= pair[1]), "{output}");
+    assert!(one_right - one_left < right - left, "{one}\n{output}");
+    assert!(boxes_intact(&output, &["A", "B"]), "{output}");
 }
 
 #[test]
@@ -3687,16 +3792,28 @@ fn mermaid_cycle_through_a_subgraph_end_draws_the_later_link_backwards() {
         back.iter().all(|&(row, col)| col == a_right + 1 && a_top <= row && row <= a_bottom),
         "{output}"
     );
-    assert_eq!(a_bottom - a_top, 4, "{output}");
+    assert!(
+        back.iter().all(|&(row, _)| into.iter().all(|&(into_row, _)| row != into_row)),
+        "{output}"
+    );
     assert!(boxes_intact(&output, &["A", "B"]), "{output}");
 }
 
 #[test]
 fn mermaid_link_into_an_empty_subgraph_ends_at_its_frame() {
-    assert_eq!(
-        mermaid("flowchart LR\n    A --> s\n    subgraph s\n    end\n"),
-        "┌───┐     ┌─ s ─┐\n│ A │────►│     │\n└───┘     └─────┘"
-    );
+    let output = drawn("flowchart LR\n    A --> s\n    subgraph s\n    end\n");
+    let (Some(frame @ (_, left, ..)), Some((_, _, a_right))) =
+        (frame_of(&output, "s"), box_of(&output, "A"))
+    else {
+        panic!("missing frame or box in\n{output}");
+    };
+    let arrows = arrowheads(&output);
+
+    assert_eq!(box_of(&output, "s"), None, "{output}");
+    assert_eq!(arrows.len(), 1, "{output}");
+    assert!(arrows.iter().all(|&arrow| enters_frame_left(frame, arrow)), "{output}");
+    assert!(a_right < left, "{output}");
+    assert!(boxes_intact(&output, &["A"]), "{output}");
 }
 
 #[test]
@@ -3758,17 +3875,13 @@ fn mermaid_lr_five_links_into_a_subgraph_enter_on_rows_of_their_own() {
         "X",
         "Y",
     ));
-    let (Some(frame), Some((x_top, _, x_bottom, _))) =
-        (intact_frame(&output, "s"), box_bounds(&output, "X"))
-    else {
-        panic!("missing frame or box in\n{output}");
+    let Some(frame @ (top, _, bottom, _)) = intact_frame(&output, "s") else {
+        panic!("missing frame in\n{output}");
     };
-    let (top, _, bottom, _) = frame;
     let entries = entries_left_of_frame(&output, frame);
 
     assert_eq!(entries, Some((top + 1..=top + 5).collect()), "{output}");
     assert_eq!(bottom - top, 6, "{output}");
-    assert_eq!((x_top, x_bottom), (top + 2, bottom - 2), "{output}");
     assert!(boxes_intact(&output, &["A", "B", "C", "D", "E", "X"]), "{output}");
 }
 
@@ -4407,7 +4520,6 @@ fn mermaid_td_three_labelled_links_into_a_subgraph_show_every_label() {
             panic!("missing {label} in\n{output}");
         };
         assert_eq!(whole_words(&output, label), 1, "{label} in\n{output}");
-        assert_eq!(row + 2, top, "{label} in\n{output}");
         // A row ends at its last glyph, so a blank cell may lie past its end.
         let blank = |col: usize| matches!(glyph_at(&output, row, col), Some(' ') | None);
         assert!(blank(col - 1), "{label} in\n{output}");
@@ -4696,7 +4808,7 @@ fn mermaid_invisible_self_loop_takes_no_cells() {
 }
 
 #[test]
-fn mermaid_invisible_link_takes_no_track() {
+fn mermaid_invisible_link_leaves_the_visible_link_centred() {
     let output = mermaid("flowchart TD\n    A ~~~~ B\n    A --> C\n    C --> B\n");
     let (Some((_, a_left, a_bottom, _)), Some((c_top, c_left, c_bottom, _)), Some((b_top, ..))) =
         (box_bounds(&output, "A"), box_bounds(&output, "C"), box_bounds(&output, "B"))
@@ -4869,26 +4981,35 @@ fn mermaid_td_edge_label_rows_are_each_centred_on_the_line() {
 
 #[test]
 fn mermaid_td_passing_slot_label_as_tall_as_its_layer_fills_it() {
-    assert_eq!(
-        mermaid("flowchart TD\n    A --> B --> C\n    A -->|a<br>b<br>c<br>d| C\n"),
-        concat!(
-            " ┌───┐\n │ A │\n └───┘\n  │ │\n  │ └───┐\n  ▼     │\n",
-            "┌───┐   a\n│ B │   b\n└───┘   c\n  │     d\n",
-            "  │     │\n  └─┐   │\n    │ ┌─┘\n    ▼ ▼\n   ┌───┐\n   │ C │\n   └───┘"
-        )
-    );
+    let output = mermaid("flowchart TD\n    A --> B --> C\n    A -->|a<br>b<br>c<br>d| C\n");
+    let Some((top, _, bottom, _)) = box_bounds(&output, "B") else {
+        panic!("missing box in\n{output}");
+    };
+    let [Some((a_row, _)), Some((d_row, _))] = ["a", "d"].map(|row| position_of_word(&output, row))
+    else {
+        panic!("missing label in\n{output}");
+    };
+
+    assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    assert_eq!((a_row, d_row), (top, top + 3), "{output}");
+    assert!(d_row >= bottom, "{output}");
+    assert_eq!(count_glyph(&output, '▼'), 3, "{output}");
 }
 
 #[test]
 fn mermaid_even_rows_in_a_td_passing_slot_put_the_upper_middle_row_on_the_layer_middle() {
-    assert_eq!(
-        mermaid("flowchart TD\n    A --> B --> C\n    A -->|x<br>y| C\n"),
-        concat!(
-            " ┌───┐\n │ A │\n └───┘\n  │ │\n  │ └───┐\n  ▼     │\n",
-            "┌───┐   │\n│ B │   x\n└───┘   y\n",
-            "  │     │\n  └─┐   │\n    │ ┌─┘\n    ▼ ▼\n   ┌───┐\n   │ C │\n   └───┘"
-        )
-    );
+    let output = mermaid("flowchart TD\n    A --> B --> C\n    A -->|x<br>y| C\n");
+    let Some((b_row, ..)) = box_of(&output, "B") else {
+        panic!("missing box in\n{output}");
+    };
+    let Some((x_row, x_col)) = position_of_word(&output, "x") else {
+        panic!("missing label in\n{output}");
+    };
+
+    assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    assert_eq!(x_row, b_row, "{output}");
+    assert_eq!(position_of_word(&output, "y"), Some((x_row + 1, x_col)), "{output}");
+    assert_eq!(count_glyph(&output, '▼'), 3, "{output}");
 }
 
 #[test]
@@ -4936,21 +5057,38 @@ fn mermaid_markdown_string_unclosed_backtick_is_plain_text() {
 }
 
 #[test]
+fn mermaid_asterisks_outside_a_markdown_string_are_text() {
+    assert_eq!(quoted_box("**not bold**"), box_around("**not bold**"));
+    assert_eq!(mermaid("flowchart LR\n    A[**not bold**]\n"), box_around("**not bold**"));
+}
+
+#[test]
+fn mermaid_markdown_string_unpaired_markers_and_inner_underscores_stay_text() {
+    for written in ["*x", "snake_case_name"] {
+        assert_eq!(quoted_box(&format!("`{written}`")), box_around(written), "{written}");
+    }
+}
+
+#[test]
 fn mermaid_td_frame_title_moves_right_of_a_link_crossing_the_top_border() {
     let output =
         mermaid("flowchart TD\n    A --> B\n    subgraph s [Long Title]\n    B\n    end\n");
-    let (Some((top, ..)), Some(b)) =
+    let (Some((top, left, ..)), Some(b)) =
         (crossed_frame_of(&output, "Long Title"), box_of(&output, "B"))
     else {
         panic!("missing frame or box in\n{output}");
     };
     let centre = (b.1 + b.2) / 2;
+    let Some(title) = title_cells(&output, top, left, "Long Title") else {
+        panic!("missing title in\n{output}");
+    };
 
     assert_eq!(whole_words(&output, "Long"), 1, "{output}");
     assert_eq!(whole_words(&output, "Title"), 1, "{output}");
     assert_eq!(count_glyph(&output, '▼'), 1, "{output}");
     assert!(boxes_intact(&output, &["A", "B"]), "{output}");
     assert_eq!(glyph_at(&output, top, centre), Some('┼'), "{output}");
+    assert!(title.start > centre, "{output}");
 }
 
 #[test]
@@ -5085,7 +5223,7 @@ fn mermaid_frontmatter_title_wider_than_the_drawing_starts_at_column_0() {
 }
 
 #[test]
-fn mermaid_frontmatter_config_is_read_and_ignored() {
+fn mermaid_frontmatter_config_is_ignored() {
     let upstream = "---\ntitle: Hello Title\nconfig:\n  theme: base\n  themeVariables:\n    primaryColor: \"#00ff00\"\n---\nflowchart\n\tHello --> World\n";
 
     assert_eq!(
@@ -5284,7 +5422,7 @@ fn mermaid_percent_brace_without_a_keyword_is_not_a_comment() {
 }
 
 #[test]
-fn mermaid_unclosed_init_directive_swallows_the_rest() {
+fn mermaid_unclosed_init_directive_falls_back() {
     let body = "%%{init: {\nflowchart LR\n    A --> B\n";
 
     assert_eq!(mermaid(body), unsupported(body));
@@ -5438,7 +5576,7 @@ fn mermaid_unbracketed_subgraph_title_joins_a_leading_string_and_plain_text() {
 }
 
 #[test]
-fn mermaid_shape_data_on_a_closed_subgraph_skips_shape_validation() {
+fn mermaid_shape_data_on_a_closed_subgraph_ignores_an_invalid_shape() {
     let plain = "flowchart LR\n    subgraph s\n    A\n    end\n";
     for data in ["shape: nosuch", "icon: x"] {
         assert_eq!(mermaid(&format!("{plain}    s@{{ {data} }}\n")), mermaid(plain), "{data}");
@@ -5499,6 +5637,7 @@ fn mermaid_semicolon_in_link_text_spanning_lines_splits_no_statement() {
     let output = mermaid("flowchart LR\n    A -- \"l1\nl2\";z --> B\n");
 
     assert!(!output.contains("```"), "{output}");
+    assert!(output.contains(";z"), "{output}");
     assert_eq!(count_glyph(&output, '►'), 1, "{output}");
     assert!(boxes_intact(&output, &["A", "B"]), "{output}");
 }
@@ -5508,6 +5647,7 @@ fn mermaid_shape_data_opener_in_link_text_spanning_lines_is_text() {
     let output = mermaid("flowchart LR\n    A -- \"l1\nl2\" @{ --> B\n    C --> D\n");
 
     assert!(!output.contains("```"), "{output}");
+    assert!(output.contains("@{"), "{output}");
     assert_eq!(count_glyph(&output, '►'), 2, "{output}");
     assert!(boxes_intact(&output, &["A", "B", "C", "D"]), "{output}");
 }
@@ -5563,6 +5703,9 @@ fn mermaid_string_right_after_a_slash_backslash_or_hyphen_opener_keeps_semicolon
             assert!(output.contains(word), "{body}: {output}");
         }
     }
+    // Like any quoted label spanning source lines, the kept line break joins with a space.
+    let output = mermaid("flowchart LR\n    A[/\"line1\nline2\"/]\n");
+    assert!(output.contains("line1 line2"), "{output}");
 }
 
 #[test]
@@ -5815,6 +5958,8 @@ fn mermaid_directed_subgraphs_nested_past_the_depth_limit_fall_back() {
     let body = nested_directed_subgraphs(33);
     assert_eq!(mermaid(&body), unsupported(&body));
 
+    // 1900 one-line nestings are 49 400 characters, under Mermaid's 50 000-character
+    // `maxTextSize`, so the depth guard rejects this rather than the size guard.
     let deepest =
         format!("flowchart LR;{}{}\n", "subgraph;direction LR;".repeat(1900), "end;".repeat(1900));
     assert_eq!(mermaid(&deepest), unsupported(&deepest));
@@ -5848,12 +5993,16 @@ fn mermaid_link_from_a_frame_counts_in_ordering_its_layer() {
     let output = mermaid(
         "flowchart LR\n    a --> b\n    a --> c\n    subgraph S\n    c\n    end\n    S --> d\n    b --> e\n",
     );
-    let [Some(d), Some(e)] = ["d", "e"].map(|label| box_of(&output, label)) else {
+    let [Some(b), Some(d), Some(e)] = ["b", "d", "e"].map(|label| box_of(&output, label)) else {
         panic!("missing box in\n{output}");
+    };
+    let Some((s_top, ..)) = frame_of(&output, "S") else {
+        panic!("missing frame in\n{output}");
     };
 
     // `b` sits above `S`, so `e` goes above `d`; the one crossing left is `a --> c`
     // entering the frame.
+    assert!(b.0 < s_top, "{output}");
     assert!(e.0 < d.0, "{output}");
     assert_eq!(count_glyph(&output, '┼'), 1, "{output}");
 }

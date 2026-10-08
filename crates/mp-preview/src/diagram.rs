@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_link_style_interpolate_is_read_and_ignored() {
+    fn mermaid_link_style_interpolate_is_ignored() {
         let curve_only = format!("{LR_A_TO_B}    linkStyle 0 interpolate basis\n");
         assert_eq!(mermaid(&curve_only), A_TO_B);
         assert!(all_fg(&arrowheads_into(&curve_only, "B"), DARK_PALETTE.muted));

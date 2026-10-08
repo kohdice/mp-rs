@@ -271,7 +271,17 @@ mod tests {
     }
 
     #[test]
-    fn canvas_text_over_the_first_column_of_wide_text_drops_the_blank_it_leaves() {
+    fn canvas_text_starting_on_the_last_column_of_longer_text_blanks_all_of_it() {
+        let mut canvas = Canvas::default();
+        canvas.put(0, 0, "abc", Style::default());
+        canvas.put(0, 2, "x", Style::default());
+
+        assert_eq!(canvas_line_texts(canvas), ["  x"]);
+    }
+
+    #[test]
+    fn canvas_text_over_the_first_column_of_wide_text_leaves_a_blank_that_trailing_trimming_drops()
+    {
         let mut canvas = Canvas::default();
         canvas.put(0, 0, "あ", Style::default());
         canvas.put(0, 0, "x", Style::default());
