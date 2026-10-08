@@ -47,3 +47,4 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+mod_module_files = "deny"
