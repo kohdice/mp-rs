@@ -46,9 +46,9 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   links to and from a subgraph's frame; `direction` inside a subgraph, ignored when a
   link joins something inside the subgraph to something outside it, as in Mermaid; a
   subgraph without
-  `direction` and without links to the outside is laid out crosswise to the enclosing
-  direction (`TB` inside `LR`, `LR` inside `TB`), as Mermaid does by default
-  (`flowchart.inheritDir: false`); links entering a subgraph drawn in its own direction
+  `direction` and without links to the outside is laid out `LR` inside a `TB` chart and
+  `TB` inside any other, as Mermaid does by default (`rankdir === 'TB' ? 'LR' : 'TB'`,
+  `flowchart.inheritDir: false`); links entering a subgraph drawn in its own direction
   keep clear of its title, and its frame widens to make room for them;
   `id@{ view: collapsed }` after the subgraph's `end`
   draws it as one box.
