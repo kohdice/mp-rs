@@ -8,10 +8,10 @@ use std::collections::{HashMap, HashSet};
 use crate::diagram::{Failure, SyntaxError};
 use crate::style::Line;
 
-use super::label::{Label, is_entity_name_char, shown_text, unquoted};
+use super::label::{Label, is_entity_name_char, leading_string, shown_text, unquoted};
 use super::styling::Styling;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct Flowchart {
     pub direction: Direction,
     pub nodes: Vec<Node>,
@@ -32,8 +32,9 @@ pub(super) enum Direction {
 pub(super) struct Node {
     pub body: Body,
     /// Cells the box is grown by across the flow on each side of its label, so that
-    /// every link end on one of its borders has a cell of its own; set by
-    /// [`grow_boxes`](super::layout::grow_boxes).
+    /// every link end on one of its borders has a cell of its own; measured by
+    /// [`grow_boxes`](super::layout::grow_boxes) and
+    /// [`grow_for_labels`](super::layout::grow_for_labels).
     pub spread: usize,
     /// What the `default` and `node` classes, then the classes attached to the node's
     /// id in the order they were attached, and then the `style` statements naming it
@@ -50,8 +51,10 @@ pub(super) enum Body {
     Hidden,
     /// A subgraph laid out in a direction of its own and drawn on its own, frame
     /// included, which the node stands for in the enclosing layout; made by
-    /// [`embed_units`](super::unit::embed_units).
-    Drawing(Vec<Line>),
+    /// [`embed_units`](super::unit::embed_units). `title_width` is the display width of
+    /// the title of the drawing's outermost frame, which links keep clear of where they
+    /// meet the box in a vertical layout.
+    Drawing { lines: Vec<Line>, title_width: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,7 +179,8 @@ pub(super) struct Edge {
     /// The marker drawn where the link meets the target, if any.
     pub head: Option<Marker>,
     pub label: Option<Label>,
-    /// The fewest layers the link spans: one, plus one for each extra `-`, `=` or `.`.
+    /// The fewest layers the link spans: one, plus one for each extra `-`, `=` or `.`, up
+    /// to [`MAX_LINK_LENGTH`].
     pub length: usize,
     /// What the classes attached to the link's id, in the order they were attached,
     /// then the last `linkStyle default` statement and then the last `linkStyle`
@@ -224,11 +228,12 @@ pub(super) struct Subgraph {
     /// the last wins.
     pub direction: Option<Direction>,
     /// Cells the frame is grown by across the flow on each side of its members, so that
-    /// every link end on one of its borders has a cell of its own; set by
+    /// every link end on one of its borders has a cell of its own; measured by
     /// [`grow_frames`](super::layout::grow_frames).
     pub spread: usize,
-    /// Whether the last `view` an `id@{ view: … }` statement gives the subgraph's id is
-    /// `collapsed`, which draws it as one box (see [`collapse`](super::collapse::collapse)).
+    /// Whether the last `view` an `id@{ view: … }` statement after the subgraph's `end`
+    /// gives its id is `collapsed`, which draws it as one box (see
+    /// [`collapse`](super::collapse::collapse)).
     pub collapsed: bool,
     /// What the classes attached to the subgraph's id, in the order they were attached,
     /// and then the `style` statements naming it set, each over the ones before; unlike
@@ -296,6 +301,10 @@ const BRACKETS: [(&str, &[(&str, Shape)]); 13] = [
 /// Mermaid's default `flowchart.maxEdges`.
 const MAX_EDGES: usize = 500;
 
+/// The most layers a link spans, however many line characters it has: upstream's
+/// `addSingleLink` lowers a longer link's `length` to 10.
+const MAX_LINK_LENGTH: usize = 10;
+
 /// Statements that only affect interaction, which a text drawing cannot show.
 const IGNORED_KEYWORDS: [&str; 1] = ["click"];
 
@@ -316,40 +325,34 @@ pub(super) struct FrontMatter<'a> {
 
 /// Splits off the frontmatter `source` starts with, as upstream's `extractFrontMatter`
 /// (`packages/mermaid/src/diagram-api/frontmatter.ts`) does, and reads its top-level
-/// `title`. The block opens with a first non-blank line `---`, which may be indented, and
-/// closes with the next line that is the same indent followed by `---`, as
-/// `frontMatterRegex` in `diagram-api/regexes.ts` (`([^\S\n\r]*)-{3}` … `\1-{3}`) reads
-/// it; that indent is removed from each line between before its keys are read, and a
-/// line without it is skipped. Every key but `title` is skipped: upstream applies
-/// `config` (theme, curve, HTML labels, …) to the SVG it draws, and none of it has a
-/// counterpart in box-drawing text.
+/// `title`. The block opens with `---` on the source's first line, which may be indented
+/// but not preceded by blank lines, and closes with the next line that is the same indent
+/// followed by `---`, as `frontMatterRegex` in `diagram-api/regexes.ts`, anchored at the
+/// start of the text (`^([^\S\n\r]*)-{3}` … `\1-{3}`), reads it; that indent is removed
+/// from each line between before its keys are read, and a line without it is read as
+/// written.
+/// Every key but `title` is skipped: upstream applies `config` (theme, curve, HTML
+/// labels, …) to the SVG it draws, and none of it has a counterpart in box-drawing text.
 pub(super) fn front_matter(source: &str) -> Result<FrontMatter<'_>, Failure> {
     let none = FrontMatter { title: None, body: source, first_line: 1 };
     let mut lines = source.split_inclusive('\n').zip(1..);
-    let mut offset = 0;
-    let (opening, indent) = loop {
-        let Some((line, number)) = lines.next() else { return Ok(none) };
-        offset += line.len();
-        if !line.trim().is_empty() {
-            let fence =
-                line.trim_start_matches(|c: char| c.is_whitespace() && c != '\n' && c != '\r');
-            if !is_fence(fence) {
-                return Ok(none);
-            }
-            break (number, line.get(..line.len() - fence.len()).unwrap_or_default());
-        }
-    };
+    let Some((first, opening)) = lines.next() else { return Ok(none) };
+    let fence = first.trim_start_matches(|c: char| c.is_whitespace() && c != '\n' && c != '\r');
+    if !is_fence(fence) {
+        return Ok(none);
+    }
+    let indent = first.get(..first.len() - fence.len()).unwrap_or_default();
+    let mut offset = first.len();
     let mut title = None;
     for (line, number) in lines {
         offset += line.len();
-        // A line without the indent is neither the closing fence, which `\1-{3}` needs
-        // to repeat it, nor a top-level key.
-        let Some(line) = line.strip_prefix(indent) else { continue };
-        if is_fence(line) {
+        let stripped = line.strip_prefix(indent);
+        // `\1-{3}` needs the closing fence to repeat the indent.
+        if stripped.is_some_and(is_fence) {
             let body = source.get(offset..).unwrap_or_default();
             return Ok(FrontMatter { title, body, first_line: number + 1 });
         }
-        if let Some(value) = title_value(line) {
+        if let Some(value) = title_value(stripped.unwrap_or(line)) {
             title = value;
         }
     }
@@ -406,9 +409,12 @@ fn is_falsy_plain_scalar(value: &str) -> bool {
 /// Parses the flowchart `source`, whose first line is line `first_line` of the
 /// diagram's source.
 pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failure> {
-    let mut statements = split_statements(source, first_line)
+    let (cleaned, source_lines) = without_comment_lines(source);
+    let mut statements = split_statements(&cleaned)
         .into_iter()
-        .map(|(line, text)| (line, text.trim()))
+        .map(|(line, text)| {
+            (first_line + source_lines.get(line).copied().unwrap_or(line), text.trim())
+        })
         .filter(|(_, text)| !text.is_empty());
     let (header_line, header) = statements.next().ok_or(Failure::Unsupported)?;
     let direction = direction(header_line, header)?;
@@ -444,7 +450,9 @@ pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failur
         if chart.subgraphs.get(subgraph).is_some_and(|subgraph| subgraph.members.is_empty()) {
             let hidden = chart.nodes.len();
             chart.nodes.push(Node { body: Body::Hidden, spread: 0, styling: Styling::default() });
-            for holder in std::iter::once(subgraph).chain(chart.enclosing(subgraph)) {
+            let holders: Vec<usize> =
+                std::iter::once(subgraph).chain(chart.enclosing(subgraph)).collect();
+            for holder in holders {
                 if let Some(holder) = chart.subgraphs.get_mut(holder) {
                     holder.members.push(hidden);
                 }
@@ -455,43 +463,92 @@ pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failur
 }
 
 impl Flowchart {
+    /// The subgraph `subgraph` is declared in, if any.
+    fn parent_of(&self, subgraph: usize) -> Option<usize> {
+        self.subgraphs.get(subgraph)?.parent
+    }
+
     /// The subgraphs `subgraph` is nested in, from its parent outwards.
-    pub(super) fn enclosing(&self, subgraph: usize) -> Vec<usize> {
-        let mut enclosing = Vec::new();
-        let mut current = subgraph;
+    pub(super) fn enclosing(&self, subgraph: usize) -> impl Iterator<Item = usize> {
         // Parsing leaves no cycle of parents; the bound keeps a walk finite regardless.
-        while let Some(parent) = self.subgraphs.get(current).and_then(|current| current.parent)
-            && enclosing.len() < self.subgraphs.len()
-        {
-            enclosing.push(parent);
-            current = parent;
-        }
-        enclosing
+        std::iter::successors(self.parent_of(subgraph), move |&parent| self.parent_of(parent))
+            .take(self.subgraphs.len())
+    }
+
+    /// How many subgraphs `subgraph` is nested in.
+    pub(super) fn depth(&self, subgraph: usize) -> usize {
+        self.enclosing(subgraph).count()
+    }
+
+    /// Whether subgraph `inner` is nested, at any depth, in subgraph `outer`.
+    pub(super) fn encloses(&self, outer: usize, inner: usize) -> bool {
+        self.enclosing(inner).any(|enclosing| enclosing == outer)
+    }
+
+    /// For each subgraph, whether each node is a member (see [`Subgraph::membership`]);
+    /// `None` when a member is not a node.
+    pub(super) fn memberships(&self) -> Option<Vec<Vec<bool>>> {
+        self.subgraphs.iter().map(|subgraph| subgraph.membership(self.nodes.len())).collect()
     }
 
     /// Every subgraph's index, those nested deeper first.
     pub(super) fn innermost_first(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.subgraphs.len()).collect();
-        order.sort_by_key(|&subgraph| std::cmp::Reverse(self.enclosing(subgraph).len()));
+        order.sort_by_key(|&subgraph| std::cmp::Reverse(self.depth(subgraph)));
         order
     }
 }
 
-/// Reads the direction of a `flowchart` or `graph` header; `TB`, `v` and an omitted
-/// direction mean top-down, and `>`, `<` and `^` mean `LR`, `RL` and `BT`, as Mermaid
-/// does. Other diagram kinds are unsupported. Like Mermaid, the direction must end the
-/// statement: anything after it on the same line needs a `;` first.
+/// The index each of `len` elements takes once those `keep` rejects are dropped; `None`
+/// for a dropped one.
+pub(super) fn compact_index(len: usize, keep: impl Fn(usize) -> bool) -> Vec<Option<usize>> {
+    let mut kept = 0;
+    (0..len)
+        .map(|index| {
+            keep(index).then(|| {
+                kept += 1;
+                kept - 1
+            })
+        })
+        .collect()
+}
+
+/// `members` mapped through `map`, each new index kept at its first occurrence only;
+/// `None` when `map` maps a member to `None`.
+pub(super) fn remap_members(
+    members: &[usize],
+    map: impl Fn(usize) -> Option<usize>,
+) -> Option<Vec<usize>> {
+    let mut seen = HashSet::new();
+    let mut remapped = Vec::with_capacity(members.len());
+    for &member in members {
+        let member = map(member)?;
+        if seen.insert(member) {
+            remapped.push(member);
+        }
+    }
+    Some(remapped)
+}
+
+/// Reads the direction of a `flowchart`, `graph` or `flowchart-elk` header; `TB`, `v` and
+/// an omitted direction mean top-down, and `>`, `<` and `^` mean `LR`, `RL` and `BT`, as
+/// Mermaid does. `flowchart-elk` only chooses upstream's layout engine, which has no
+/// counterpart in a text drawing. Other diagram kinds are unsupported. Like Mermaid, the
+/// direction must end the statement: anything after it on the same line needs a `;` first.
 fn direction(line: usize, header: &str) -> Result<Direction, Failure> {
     let mut words = header.split_ascii_whitespace();
-    if !matches!(words.next(), Some("flowchart" | "graph")) {
+    if !matches!(words.next(), Some("flowchart" | "graph" | "flowchart-elk")) {
         return Err(Failure::Unsupported);
     }
     let direction = match words.next() {
         Some("LR" | ">") => Direction::LeftToRight,
         None | Some("TD" | "TB" | "v") => Direction::TopDown,
+        // Upstream's lexer reads `BR` as a direction and keeps it, and its layout draws a
+        // direction it does not know top-down.
+        Some("BR") => Direction::TopDown,
         Some("BT" | "^") => Direction::BottomUp,
         Some("RL" | "<") => Direction::RightToLeft,
-        Some(other) => return Err(syntax_error(line, &format!("unknown direction \"{other}\""))),
+        Some(other) => return Err(syntax_error(line, format!("unknown direction \"{other}\""))),
     };
     if words.next().is_some() {
         return Err(syntax_error(line, "expected a new line or \";\" after the direction"));
@@ -510,24 +567,80 @@ fn direction_word(word: &str) -> Option<Direction> {
     }
 }
 
-/// Splits `source`, whose first line is line `first_line`, into statements, each with the
-/// 1-based line it starts on, for error reports: at each line break and `;`, and drops
-/// each `%%` comment up to the end of its line and the text [`passed_over`] names,
-/// ignoring all of them inside double quotes, so that a quoted string may span lines as
+/// `source` without its comment lines, with the 0-based line of `source` that each line
+/// of the result was, plus one entry past the last for the point after a final line
+/// break, so that errors name lines as written.
+///
+/// A comment line is one whose first non-blank characters are `%%` followed by a
+/// character other than `{` on the same line, together with any blank lines right
+/// before it: upstream's `cleanupComments`
+/// (`packages/mermaid/src/diagram-api/comments.ts`) replaces
+/// `/^\s*%%(?!{)[^\n]+\n?/gm` in the whole text before parsing, where `\s*` also spans
+/// line breaks, so it removes such a line even inside a quoted string that spans lines.
+fn without_comment_lines(source: &str) -> (String, Vec<usize>) {
+    let mut cleaned = String::with_capacity(source.len());
+    let mut source_lines = Vec::new();
+    // Blank lines read since the last other line, held back until the next line tells
+    // whether a comment removes them with it.
+    let mut blanks: Vec<(usize, &str)> = Vec::new();
+    let mut count = 0;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        count = index + 1;
+        let content = line.trim_start();
+        if starts_comment(content) {
+            blanks.clear();
+        } else if content.is_empty() {
+            blanks.push((index, line));
+        } else {
+            for (kept, text) in blanks.drain(..).chain(std::iter::once((index, line))) {
+                cleaned.push_str(text);
+                source_lines.push(kept);
+            }
+        }
+    }
+    for (kept, text) in blanks {
+        cleaned.push_str(text);
+        source_lines.push(kept);
+    }
+    source_lines.push(count);
+    (cleaned, source_lines)
+}
+
+/// Splits `source` into statements, each with the 0-based line it starts on, for error
+/// reports: at each line break and `;`, and drops each comment the text after a directive
+/// starts (see below) and the text [`passed_over`] names, ignoring all of them inside a
+/// double-quoted string (see [`starts_string`]), so that it may span lines as
 /// `flow.jison`'s `string` lexer state lets it, inside `@{ … }` shape data up to its
 /// closing brace (see [`shape_data_end`]), which upstream's `shapeData` lexer state reads
-/// across lines, and inside the text of a `-- text -->` link on its line. The `;` closing
+/// across lines, and inside the text of a `-- text -->` link, from its `--`, `==` or `-.`
+/// to its closing link or the end of its statement, which upstream reads in its exclusive
+/// `edgeText` lexer states, where a `"` starts a string anywhere. The `;` closing
 /// an entity code such as `#quot;` splits nothing: upstream's `encodeEntities` in
 /// `packages/mermaid/src/utils.ts` replaces every `#\w+;` in the source before parsing
 /// it.
-fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
+///
+/// `source` comes without its comment lines (see [`without_comment_lines`]), but a line
+/// whose text after a directive is blank and then a comment still holds that comment:
+/// upstream removes directives before comments, so the comment then starts its line and
+/// is removed too. A `%%` anywhere else is text: `flow.jison` has no comment rule, and
+/// its `NODE_STRING` holds `%`.
+fn split_statements(source: &str) -> Vec<(usize, &str)> {
     let mut statements: Vec<(usize, &str)> = Vec::new();
     let mut in_quotes = false;
-    let mut line = first_line;
+    // Whether the scanner is inside the text of a link that does not close on its line:
+    // upstream reads it in the exclusive `edgeText` lexer state, where a `"` starts a
+    // string anywhere and `;` and `@{` are text. A link that closes on its line is passed
+    // over whole below.
+    let mut in_link_text = false;
+    let mut line = 0;
     // The line and byte index the current statement starts at.
-    let (mut start_line, mut start) = (first_line, 0);
+    let (mut start_line, mut start) = (0, 0);
     // Where a `%%` comment cut the current statement short.
     let mut comment: Option<usize> = None;
+    // Whether the line being read holds nothing but blanks so far, which a comment needs.
+    // A directive passed over counts as blank, as upstream removes directives before
+    // comments.
+    let mut line_blank = true;
     // How many name characters follow the last `#`, while they may still make an entity
     // code; `None` outside one.
     let mut entity_name: Option<usize> = None;
@@ -551,9 +664,13 @@ fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
         match c {
             '\n' => ends_statement = !in_quotes,
             _ if comment.is_some() => {}
-            '"' => in_quotes = !in_quotes,
-            ';' => ends_statement = !in_quotes && !entity_name.is_some_and(|length| length > 0),
-            '%' | 'a' if !in_quotes => {
+            '"' if in_quotes => in_quotes = false,
+            '"' => in_quotes = in_link_text || starts_string(source, index),
+            ';' => {
+                ends_statement =
+                    !in_quotes && !in_link_text && !entity_name.is_some_and(|length| length > 0);
+            }
+            '%' | 'a' if !in_quotes && !in_link_text => {
                 let rest = source.get(index..).unwrap_or_default();
                 match passed_over(rest, after_header, blank) {
                     Some(length) => {
@@ -570,15 +687,17 @@ fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
                         start_line = line;
                         restarts = true;
                     }
-                    None if c == '%' && rest.starts_with("%%") => comment = Some(index),
+                    None if c == '%' && line_blank && starts_comment(rest) => {
+                        comment = Some(index);
+                    }
                     None => {}
                 }
             }
             '-' | '=' if !in_quotes => {
                 // Upstream reads the text of a `-- text -->` link in exclusive lexer
                 // states (`edgeText` and its thick and dotted kin), where `@{`, `;` and
-                // `%%` are text, so the link is passed over whole, up to its end on the
-                // line.
+                // `%%` are text, so a link closing on its line is passed over whole, and
+                // one that does not puts the scanner in its text until the link closes.
                 if line_end <= index {
                     line_end = source
                         .get(index..)
@@ -592,11 +711,20 @@ fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
                         while chars.next_if(|&(at, _)| at < end).is_some() {}
                     }
                     // The rest of a run of line characters starts no link with text:
-                    // upstream's lexer takes the run as one `LINK` token.
-                    _ => while chars.next_if(|&(_, next)| next == c).is_some() {},
+                    // upstream's lexer takes the run as one `LINK` token. A lone `-` is
+                    // link text and leaves the state as it is.
+                    _ => {
+                        while chars.next_if(|&(_, next)| next == c).is_some() {}
+                        if let Some((_, stroke, after_base)) = link_start(line_rest) {
+                            in_link_text = opens_text(stroke, after_base);
+                        }
+                    }
                 }
             }
-            '@' if !in_quotes && chars.peek().is_some_and(|&(_, next)| next == '{') => {
+            '@' if !in_quotes
+                && !in_link_text
+                && chars.peek().is_some_and(|&(_, next)| next == '{') =>
+            {
                 // Unclosed shape data runs to the end of the source, for the statement to
                 // report it.
                 let data = index + 2;
@@ -614,6 +742,7 @@ fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
             _ => {}
         }
         if ends_statement {
+            in_link_text = false;
             let end = comment.take().unwrap_or(index);
             let text = source.get(start..end).unwrap_or_default();
             after_header |= !text.trim().is_empty();
@@ -622,6 +751,11 @@ fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
             start_line = line + usize::from(c == '\n');
         }
         blank = ends_statement || restarts || (blank && c.is_whitespace());
+        line_blank = match c {
+            '\n' => true,
+            '%' if restarts => line_blank,
+            _ => line_blank && c.is_whitespace(),
+        };
         line += usize::from(c == '\n');
         entity_name = match c {
             '#' => Some(0),
@@ -634,6 +768,14 @@ fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
     statements
 }
 
+/// Whether `rest`, which starts a line after blanks, starts a comment: `%%` and a
+/// character other than `{` on the same line.
+fn starts_comment(rest: &str) -> bool {
+    rest.strip_prefix("%%")
+        .and_then(|after| after.chars().next())
+        .is_some_and(|next| !matches!(next, '{' | '\n' | '\r'))
+}
+
 /// The byte length of the text at the start of `rest` that [`split_statements`] passes
 /// over whole, ending the statement before it, where `after_header` tells whether the
 /// header has been read and `blank` whether `rest` starts a statement:
@@ -642,7 +784,8 @@ fn split_statements(source: &str, first_line: usize) -> Vec<(usize, &str)> {
 ///   including its `}%%`: upstream applies its configuration to the SVG, which a text
 ///   drawing has no counterpart for. Upstream's `directiveRegex` (`%{2}{\s*(?:(\w+)\s*:|
 ///   (\w+))`, `packages/mermaid/src/diagram-api/regexes.ts`) needs the keyword, so `%%{`
-///   without one is a comment. An unclosed directive runs to the end of the source.
+///   without one is neither a directive nor, as `cleanupComments` keeps a line starting
+///   with `%%{`, a comment. An unclosed directive runs to the end of the source.
 /// - An accessibility statement (see [`accessibility_end`]) after the header, which
 ///   draws nothing upstream. Before the header it is not passed over: upstream's
 ///   detector needs the text, without frontmatter, directives and comments, to start
@@ -689,7 +832,8 @@ struct Builder<'a> {
     subgraph_ids: Vec<&'a str>,
     /// The ids given to links (`A e1@--> B`), which an `e1@{ … }` statement refers to.
     edge_ids: HashSet<&'a str>,
-    /// The ids whose last `view` in `@{ … }` data is `collapsed`.
+    /// The ids of closed subgraphs whose last `view` in `@{ … }` data, given after their
+    /// `end`, is `collapsed`.
     collapsed: HashSet<&'a str>,
     /// The ids of the subgraphs whose `end` has been read, which upstream's
     /// `addSubGraph` registers only then.
@@ -764,7 +908,7 @@ impl<'a> Builder<'a> {
             // `getData` merges the two.
             self.declare(id);
             let styles = self.styles.entry(id).or_default();
-            *styles = styles.then(Styling::parse(list));
+            *styles = styles.then(Styling::parse(without_color_semicolon(list)));
             return Ok(());
         }
         if let Some((names, list)) = keyword_statement(statement, "classDef") {
@@ -774,7 +918,7 @@ impl<'a> Builder<'a> {
             if list.is_empty() {
                 return Err(syntax_error(line, "classDef has no property list"));
             }
-            let styling = Styling::parse(list);
+            let styling = Styling::parse(without_color_semicolon(list));
             for name in names.split(',') {
                 let class = self.class_defs.entry(name).or_default();
                 *class = class.then(styling);
@@ -825,7 +969,7 @@ impl<'a> Builder<'a> {
         }
         // Upstream's `setClass` splits the ids at commas but not the class name.
         if let Some((ids, class)) = keyword_statement(statement, "class") {
-            if ids.is_empty() || class.is_empty() || class.contains(|c: char| c.is_whitespace()) {
+            if ids.is_empty() || class.is_empty() || class.contains(char::is_whitespace) {
                 return Err(syntax_error(line, "class needs one node id list and one class name"));
             }
             for id in ids.split(',') {
@@ -879,17 +1023,17 @@ impl<'a> Builder<'a> {
             let Some((id, (Link { stroke, tail, head, label, length }, after_link))) = with_id
             else {
                 // Line characters that do not make a whole link are a syntax error in
-                // Mermaid, and so is an id where a link should be. An id followed by `@`
-                // may be the edge id of a link form not read here, so it falls back
-                // rather than being reported as a syntax error.
-                if rest.strip_prefix('<').unwrap_or(rest).starts_with(['-', '=']) {
+                // Mermaid, and so is anything else where a link should be, but for an id
+                // followed by `@`: that may be the edge id of a link form not read here,
+                // so it falls back rather than being reported as a syntax error.
+                if rest.strip_prefix('<').unwrap_or(rest).starts_with(['-', '=', '~']) {
                     return Err(syntax_error(line, "unclosed link"));
                 }
                 let (id, after_id) = split_id(rest);
-                if !id.is_empty() && !after_id.starts_with('@') {
-                    return Err(syntax_error(line, "expected a link"));
+                if !id.is_empty() && after_id.starts_with('@') {
+                    return Err(Failure::Unsupported);
                 }
-                return Err(Failure::Unsupported);
+                return Err(syntax_error(line, "expected a link"));
             };
             // An id that an earlier link already took names no link here, as upstream's
             // `addSingleLink` gives a repeated id a generated one instead.
@@ -902,9 +1046,13 @@ impl<'a> Builder<'a> {
                 Some(after_pipe) => {
                     let (label, after_label) = bracket_label(after_pipe, "|")
                         .ok_or_else(|| syntax_error(line, "unclosed edge label"))?;
+                    check_label(line, label, &LABEL_TOKENS)?;
                     (Some(label.trim()), after_label.trim_start())
                 }
-                None => (label, after_link.trim_start()),
+                None => {
+                    check_link_text(line, label)?;
+                    (label, after_link.trim_start())
+                }
             };
             if after_link.is_empty() {
                 return Err(syntax_error(line, "edge has no target"));
@@ -920,7 +1068,7 @@ impl<'a> Builder<'a> {
                     if self.chart.edges.len() == MAX_EDGES {
                         return Err(syntax_error(
                             line,
-                            &format!("too many edges (limit {MAX_EDGES})"),
+                            format!("too many edges (limit {MAX_EDGES})"),
                         ));
                     }
                     let name = if (Some(from), Some(to)) == named { id.take() } else { None };
@@ -931,7 +1079,7 @@ impl<'a> Builder<'a> {
                         stroke,
                         tail,
                         head,
-                        label: label.map(Label::parse),
+                        label: label.map(Label::parse_after_string),
                         length,
                         styling: Styling::default(),
                     });
@@ -943,10 +1091,11 @@ impl<'a> Builder<'a> {
     }
 
     /// Starts the subgraph declared by `text`, the part of a `subgraph` statement after
-    /// the keyword: an id, which may be a quoted string, followed by a bracketed title,
-    /// or else the rest of the statement as the id, without the quotes around it, and as
-    /// the title, quotes and all, for [`Label::parse`] to read. A subgraph opened inside
-    /// another is nested in it.
+    /// the keyword: an id, which may be a quoted string, followed by a bracketed title, or
+    /// else the rest of the statement as the id, without the quotes around it, and as the
+    /// title. Either title is read by [`Label::parse_after_string`], as it may go on in
+    /// plain text after a leading string. A subgraph opened inside another is nested in
+    /// it.
     fn open_subgraph(&mut self, line: usize, text: &'a str) -> Result<(), Failure> {
         let text = text.trim();
         let quoted = text.strip_prefix('"').and_then(|rest| rest.split_once('"'));
@@ -955,9 +1104,13 @@ impl<'a> Builder<'a> {
             Some(after_open) => {
                 let (title, _) = bracket_label(after_open, "]")
                     .ok_or_else(|| syntax_error(line, "unclosed subgraph title"))?;
-                (id, title)
+                check_label(line, title, &LABEL_TOKENS)?;
+                (id, Label::parse_after_string(title))
             }
-            None => (unquoted(text), text),
+            None => {
+                check_unbracketed_title(line, text)?;
+                (unquoted(text), Label::parse_after_string(text))
+            }
         };
         self.subgraph_ids.push(id);
         let parent = self.open.last().map(|parent| parent.index);
@@ -967,7 +1120,7 @@ impl<'a> Builder<'a> {
             members: HashSet::new(),
         });
         self.chart.subgraphs.push(Subgraph {
-            title: Label::parse(title).joined(),
+            title: title.joined(),
             members: Vec::new(),
             parent,
             direction: None,
@@ -1010,13 +1163,11 @@ impl<'a> Builder<'a> {
                         .is_some_and(|holder| holder.members.contains(&node))
                 })
                 .collect();
-            let Some(&holder) =
-                holders.iter().max_by_key(|&&holder| self.chart.enclosing(holder).len())
+            let Some(&holder) = holders.iter().max_by_key(|&&holder| self.chart.depth(holder))
             else {
                 continue;
             };
-            let enclosing = self.chart.enclosing(holder);
-            if holders.iter().any(|other| *other != holder && !enclosing.contains(other)) {
+            if holders.iter().any(|&other| other != holder && !self.chart.encloses(other, holder)) {
                 return Err(Failure::Unsupported);
             }
             parents.push((listed, holder));
@@ -1029,7 +1180,7 @@ impl<'a> Builder<'a> {
             listed.parent = Some(holder);
         }
         if (0..self.chart.subgraphs.len())
-            .any(|subgraph| self.chart.enclosing(subgraph).contains(&subgraph))
+            .any(|subgraph| self.chart.enclosing(subgraph).any(|outer| outer == subgraph))
         {
             return Err(Failure::Unsupported);
         }
@@ -1049,16 +1200,11 @@ impl<'a> Builder<'a> {
             }
         }
         // The index each node keeps once the nodes naming subgraphs are dropped.
-        let mut renumbered = Vec::with_capacity(named.len());
-        let mut kept = 0;
-        for names in &named {
-            renumbered.push(kept);
-            kept += usize::from(names.is_none());
-        }
+        let renumbered = compact_index(named.len(), |node| named.get(node) == Some(&None));
         let resolve = |end: End| match end {
             End::Node(node) => match named.get(node).copied().flatten() {
                 Some(subgraph) => Some(End::Subgraph(subgraph)),
-                None => Some(End::Node(*renumbered.get(node)?)),
+                None => Some(End::Node((*renumbered.get(node)?)?)),
             },
             End::Subgraph(_) => Some(end),
         };
@@ -1067,7 +1213,7 @@ impl<'a> Builder<'a> {
             edge.to = resolve(edge.to).ok_or(Failure::Unsupported)?;
         }
         for member in self.chart.subgraphs.iter_mut().flat_map(|subgraph| &mut subgraph.members) {
-            *member = *renumbered.get(*member).ok_or(Failure::Unsupported)?;
+            *member = renumbered.get(*member).copied().flatten().ok_or(Failure::Unsupported)?;
         }
         let mut names = named.iter();
         self.chart.nodes.retain(|_| names.next().is_some_and(Option::is_none));
@@ -1184,9 +1330,9 @@ impl<'a> Builder<'a> {
         }
         let bracketed = BRACKETS
             .into_iter()
-            .find_map(|(open, closers)| Some((rest.strip_prefix(open)?, closers)));
+            .find_map(|(open, closers)| Some((open, rest.strip_prefix(open)?, closers)));
         let rest = match bracketed {
-            Some((after_open, closers)) => {
+            Some((open, after_open, closers)) => {
                 let (label, shape, after_label) = closers
                     .iter()
                     .filter_map(|&(close, shape)| {
@@ -1196,10 +1342,14 @@ impl<'a> Builder<'a> {
                     // The closer found first ends the label.
                     .min_by_key(|(label, ..)| label.len())
                     .ok_or_else(|| syntax_error(line, "unclosed node label"))?;
+                match open {
+                    "[/" | "[\\" => check_trap_label(line, label)?,
+                    _ => check_label(line, label, &LABEL_TOKENS)?,
+                }
                 if let Some(Body::Box { label: node_label, shape: node_shape }) =
                     self.chart.nodes.get_mut(index).map(|node| &mut node.body)
                 {
-                    *node_label = Label::parse(label);
+                    *node_label = Label::parse_after_string(label);
                     *node_shape = shape;
                 }
                 after_label
@@ -1216,7 +1366,8 @@ impl<'a> Builder<'a> {
         };
         let rest = match rest.strip_prefix("@{") {
             Some(after_open) => {
-                let (data, after_data) = shape_data(line, after_open)?;
+                let closed_subgraph = self.closed_subgraphs.contains(id);
+                let (data, after_data) = shape_data(line, after_open, closed_subgraph)?;
                 if let Some(Body::Box { label, shape }) =
                     self.chart.nodes.get_mut(index).map(|node| &mut node.body)
                 {
@@ -1227,7 +1378,10 @@ impl<'a> Builder<'a> {
                         *label = data_label;
                     }
                 }
+                // Upstream's `addVertex` gives the data to a subgraph only once its `end`
+                // has been read; before that the id is a node's, which has no view.
                 match data.collapsed {
+                    _ if !closed_subgraph => {}
                     Some(true) => _ = self.collapsed.insert(id),
                     Some(false) => _ = self.collapsed.remove(id),
                     None => {}
@@ -1253,8 +1407,10 @@ struct ShapeData {
 /// Upstream's short names and aliases of every shape, the `shape` values of `@{ … }`,
 /// from `shapesDefs` in `packages/mermaid/src/rendering-util/rendering-elements/shapes.ts`
 /// in <https://github.com/mermaid-js/mermaid>, also listed in the table "Complete List of
-/// New Shapes" in <https://mermaid.js.org/syntax/flowchart.html>.
-const SHAPE_NAMES: [(&str, Shape); 141] = [
+/// New Shapes" in <https://mermaid.js.org/syntax/flowchart.html>, followed by the
+/// lowercase names of that file's `undocumentedShapes` that have a text drawing, each
+/// drawn as the documented shape it looks like.
+const SHAPE_NAMES: [(&str, Shape); 145] = [
     ("rect", Shape::Rectangle),
     ("proc", Shape::Rectangle),
     ("process", Shape::Rectangle),
@@ -1396,7 +1552,15 @@ const SHAPE_NAMES: [(&str, Shape); 141] = [
     ("cross-circ", Shape::CrossedCircle),
     ("summary", Shape::CrossedCircle),
     ("crossed-circle", Shape::CrossedCircle),
+    ("state", Shape::Rounded),
+    ("choice", Shape::Diamond),
+    ("note", Shape::Rectangle),
+    ("composite", Shape::Rectangle),
 ];
+
+/// The lowercase names of upstream's `undocumentedShapes` that a text drawing has no
+/// counterpart for: an anchor is a point without a box, and an icon is a picture.
+const UNDRAWN_SHAPE_NAMES: [&str; 2] = ["anchor", "icon"];
 
 /// The byte index of the `}` closing the shape data `text`, which follows the `@{`.
 fn shape_data_end(text: &str) -> Option<usize> {
@@ -1407,8 +1571,14 @@ fn shape_data_end(text: &str) -> Option<usize> {
 /// `@{`, and returns them with the text after the closing `}`. Text between a quoted
 /// value and the next separator is a syntax error, as YAML rejects two pairs without a
 /// separator between them. An empty `shape` or `label` sets nothing, as upstream's
-/// `addVertex` in `flowDb.ts` skips a falsy one.
-fn shape_data(line: usize, text: &str) -> Result<(ShapeData, &str), Failure> {
+/// `addVertex` in `flowDb.ts` skips a falsy one. On the id of a `subgraph` whose `end`
+/// has been read only `view` is read, as `addVertex` merges the data into the
+/// subgraph's and returns before it looks at a shape, an icon or an image.
+fn shape_data(
+    line: usize,
+    text: &str,
+    closed_subgraph: bool,
+) -> Result<(ShapeData, &str), Failure> {
     let (pairs, end) =
         scan_shape_data(text).ok_or_else(|| syntax_error(line, "unclosed shape data"))?;
     if pairs.iter().any(|pair| !pair.after_value.trim().is_empty()) {
@@ -1418,12 +1588,15 @@ fn shape_data(line: usize, text: &str) -> Result<(ShapeData, &str), Failure> {
     let mut image = false;
     for DataPair { key, value, .. } in pairs {
         match key {
+            "view" => data.collapsed = Some(value.text() == "collapsed"),
+            _ if closed_subgraph => {}
             "shape" | "label" if value.text().is_empty() => {}
+            // An image, and a shape drawn as one, has no text drawing; every other pair
+            // is checked first, so that an error beside it is reported whatever the
+            // order of the keys.
+            "shape" if UNDRAWN_SHAPE_NAMES.contains(&&*value.text()) => image = true,
             "shape" => data.shape = Some(shape_named(line, &value.text())?),
             "label" => data.label = Some(value.label()),
-            "view" => data.collapsed = Some(value.text() == "collapsed"),
-            // An image has no text drawing; every other pair is checked first, so that
-            // an error beside it is reported whatever the order of the keys.
             "icon" | "img" => image = true,
             // Upstream ignores keys it does not know, and the rest only size or place
             // icons and images.
@@ -1611,15 +1784,17 @@ fn scalar(text: &str) -> Option<(Scalar<'_>, &str)> {
 
 /// The shape a `shape` value names. A name outside [`SHAPE_NAMES`] is a syntax error, as
 /// upstream throws `No such shape`, which also covers names that are not lowercase.
-// Upstream registers each shape's short name, `aliases` and `internalAliases` as keys of
-// the `shapes` map that `isValidShape` checks (`shape in shapes`, `shapes.ts`), and
-// `flowDb` rejects only a name holding an uppercase letter or `_` before asking it. That
-// leaves `doublecircle` the one internal alias upstream accepts, so it is accepted here.
+// Upstream's `shapes` map, which `isValidShape` checks (`shape in shapes`, `shapes.ts`),
+// holds the shapes of `undocumentedShapes` under their own names and each documented
+// shape under its short name, `aliases` and `internalAliases`; `flowDb` rejects a name
+// holding an uppercase letter or `_` before asking it. What that leaves beyond the
+// documented names, `doublecircle` and the lowercase undocumented shapes, is accepted
+// here.
 fn shape_named(line: usize, name: &str) -> Result<Shape, Failure> {
     SHAPE_NAMES
         .into_iter()
         .find_map(|(known, shape)| (known == name).then_some(shape))
-        .ok_or_else(|| syntax_error(line, &format!("no such shape \"{name}\"")))
+        .ok_or_else(|| syntax_error(line, format!("no such shape \"{name}\"")))
 }
 
 /// The parts of a link token that a drawing shows.
@@ -1627,7 +1802,9 @@ struct Link<'a> {
     stroke: Stroke,
     tail: Option<Marker>,
     head: Option<Marker>,
-    /// The text of the `A -- text --> B` form, with any double quotes around it.
+    /// The text of the `A -- text --> B` form: a leading double-quoted string, if any,
+    /// quotes included, and the plain text after it, kept as written so that
+    /// [`Label::parse_after_string`] can tell the string from that text.
     label: Option<&'a str>,
     length: usize,
 }
@@ -1640,9 +1817,46 @@ fn link(text: &str) -> Option<(Link<'_>, &str)> {
         let rest = after_base.trim_start_matches('~');
         // Each tilde past the third lengthens the link, as each extra dash does.
         let length = after_base.len() - rest.len();
-        let link = Link { stroke: Stroke::Invisible, tail: None, head: None, label: None, length };
+        let link = Link {
+            stroke: Stroke::Invisible,
+            tail: None,
+            head: None,
+            label: None,
+            length: length.min(MAX_LINK_LENGTH),
+        };
         return (length > 0).then_some((link, rest));
     }
+    let (tail, stroke, after_base) = link_start(text)?;
+    let after_dots = after_base.trim_start_matches('.');
+    let dots = after_base.len() - after_dots.len();
+    let (label, closing) = match stroke {
+        Stroke::Dotted if after_dots.starts_with('-') => (None, after_dots),
+        Stroke::Dotted if opens_text(stroke, after_base) => {
+            let (label, closing) =
+                after_base.split_at_checked(find_after_quotes(after_base, ".-")?)?;
+            if label.ends_with('.') {
+                return None;
+            }
+            (Some(label.trim()), closing.get(1..)?)
+        }
+        Stroke::Solid | Stroke::Thick if opens_text(stroke, after_base) => {
+            let doubled = if stroke == Stroke::Solid { "--" } else { "==" };
+            let (label, closing) =
+                after_base.split_at_checked(find_after_quotes(after_base, doubled)?)?;
+            (Some(label.trim()), closing.get(2..)?)
+        }
+        Stroke::Dotted | Stroke::Invisible => return None,
+        Stroke::Solid | Stroke::Thick => (None, after_base),
+    };
+    let (head, length, rest) = link_end(stroke, closing)?;
+    let length = (length + dots).min(MAX_LINK_LENGTH);
+    Some((Link { stroke, tail, head, label, length }, rest))
+}
+
+/// Splits the start of a link other than `~~~` off `text`: its tail marker (`<`, `o`,
+/// `x`, or none), its stroke, read from `-.`, `--` or `==`, and the text after those two
+/// characters.
+fn link_start(text: &str) -> Option<(Option<Marker>, Stroke, &str)> {
     let tail = match text.chars().next() {
         Some('<') => Some(Marker::Arrow),
         Some('o') => Some(Marker::Circle),
@@ -1657,31 +1871,19 @@ fn link(text: &str) -> Option<(Link<'_>, &str)> {
     } else {
         (Stroke::Thick, body.strip_prefix("==")?)
     };
-    let after_dots = after_base.trim_start_matches('.');
-    let dots = after_base.len() - after_dots.len();
-    let (label, closing) = match stroke {
-        Stroke::Dotted if after_dots.starts_with('-') => (None, after_dots),
-        Stroke::Dotted if dots == 0 => {
-            let (label, closing) =
-                after_base.split_at_checked(find_after_quotes(after_base, ".-")?)?;
-            if label.ends_with('.') {
-                return None;
-            }
-            (Some(label.trim()), closing.get(1..)?)
+    Some((tail, stroke, after_base))
+}
+
+/// Whether a link start of `stroke` followed by `after_base` opens the text of a
+/// `-- text -->` link rather than going on as a link such as `-->`, `-.->` or `===`.
+fn opens_text(stroke: Stroke, after_base: &str) -> bool {
+    match stroke {
+        Stroke::Dotted => !after_base.starts_with(['.', '-']),
+        Stroke::Solid | Stroke::Thick => {
+            !after_base.starts_with(|c| c == line_char(stroke) || head_marker(c).is_some())
         }
-        Stroke::Solid | Stroke::Thick
-            if !after_base.starts_with(|c| c == line_char(stroke) || head_marker(c).is_some()) =>
-        {
-            let doubled = if stroke == Stroke::Solid { "--" } else { "==" };
-            let (label, closing) =
-                after_base.split_at_checked(find_after_quotes(after_base, doubled)?)?;
-            (Some(label.trim()), closing.get(2..)?)
-        }
-        Stroke::Dotted | Stroke::Invisible => return None,
-        Stroke::Solid | Stroke::Thick => (None, after_base),
-    };
-    let (head, length, rest) = link_end(stroke, closing)?;
-    Some((Link { stroke, tail, head, label, length: length + dots }, rest))
+        Stroke::Invisible => false,
+    }
 }
 
 /// Splits an edge id and the `@` after it off the start of `text`, for Mermaid's
@@ -1746,8 +1948,8 @@ fn head_marker(c: char) -> Option<Marker> {
     }
 }
 
-fn syntax_error(line: usize, message: &str) -> Failure {
-    Failure::Syntax(SyntaxError { line: Some(line), message: message.to_owned() })
+fn syntax_error(line: usize, message: impl Into<String>) -> Failure {
+    Failure::Syntax(SyntaxError { line: Some(line), message: message.into() })
 }
 
 /// The word after `keyword` and the rest of `statement` after that word, both trimmed
@@ -1763,13 +1965,28 @@ fn keyword_statement<'a>(statement: &'a str, keyword: &str) -> Option<(&'a str, 
     Some((word, after.trim()))
 }
 
+/// The property `list` of a `style` or `classDef` statement without the `;` ending it,
+/// when a `:`, then non-blanks, then a `#` come before that `;`. A `;` right after a hex
+/// color ends no statement (see [`split_statements`]), so it stays in the list; upstream's
+/// `encodeEntities` (`packages/mermaid/src/utils.ts`) drops it from such statements with
+/// `/style.*:\S*#.*;/` and `/classDef.*:\S*#.*;/` before parsing.
+fn without_color_semicolon(list: &str) -> &str {
+    let Some(before) = list.strip_suffix(';') else { return list };
+    let color_after_colon = before.match_indices(':').any(|(at, _)| {
+        before
+            .get(at + 1..)
+            .is_some_and(|after| after.chars().take_while(|c| !c.is_whitespace()).any(|c| c == '#'))
+    });
+    if color_after_colon { before } else { list }
+}
+
 /// The link index `position` of a `linkStyle` statement on `line`, after `links` links:
 /// digits only, as upstream's `NUM` token reads it, and below `links`, as upstream's
 /// `updateLink` and `updateLinkInterpolate` fail on a link not defined yet.
 fn link_index(line: usize, position: &str, links: usize) -> Result<usize, Failure> {
     let digits = !position.is_empty() && position.bytes().all(|byte| byte.is_ascii_digit());
     let index: usize = digits.then(|| position.parse().ok()).flatten().ok_or_else(|| {
-        syntax_error(line, &format!("linkStyle index \"{position}\" is not a number"))
+        syntax_error(line, format!("linkStyle index \"{position}\" is not a number"))
     })?;
     if index >= links {
         let range = match links.checked_sub(1) {
@@ -1786,24 +2003,144 @@ fn link_index(line: usize, position: &str, links: usize) -> Result<usize, Failur
 fn split_id(text: &str) -> (&str, &str) {
     let end = text
         .char_indices()
-        .find(|&(index, c)| !is_id_char(c, text[index + c.len_utf8()..].chars().next()))
+        .find(|&(index, c)| {
+            !is_id_char(c, text.get(index + c.len_utf8()..).and_then(|after| after.chars().next()))
+        })
         .map_or(text.len(), |(index, _)| index);
     text.split_at(end)
 }
 
+/// The characters upstream's lexer never reads as part of an unquoted label's text, with
+/// the way a syntax error names them.
+struct LabelTokens {
+    /// The characters themselves.
+    chars: &'static [char],
+    /// The characters as a syntax error names them.
+    names: &'static str,
+}
+
+/// The tokens of a plain label: upstream's `text` state takes `TEXT` as
+/// `[^\[\]\(\)\{\}\|\"]+`, a closing bracket or `|` ends the label, and `(`, `[`, `{`,
+/// `|` and `"` start a new token in every state.
+const LABEL_TOKENS: LabelTokens =
+    LabelTokens { chars: &['(', ')', '[', ']', '{', '}', '|', '"'], names: "( ) [ ] { } | or \"" };
+
+/// The tokens of a lean or trapezoid label (`[/ /]`, `[\ \]`, `[/ \]`, `[\ /]`). Upstream's
+/// `trapText` state takes `TEXT` as `\/(?!\])|\\(?!\])|[^\\\[\]\(\)\{\}\/]+`, and that
+/// rule is listed before `<*>"|"`, so `|` is text there, as are the `/` and `\` that
+/// close no label. `"` is text there too, as that `TEXT` does not leave it out: the
+/// `<*>["]` rule, listed first, starts a string only where a token starts, right after
+/// the opening bracket or after a `/` or `\`, which are tokens of their own;
+/// [`check_trap_label`] rejects the latter.
+const TRAP_LABEL_TOKENS: LabelTokens =
+    LabelTokens { chars: &['(', ')', '[', ']', '{', '}'], names: "( ) [ ] { or }" };
+
+/// Checks that the unquoted text of `label`, as [`bracket_label`] split it off on `line`
+/// — all of it, or what follows a leading double-quoted string — holds none of the
+/// characters of `tokens`, which the error names as `tokens` does: [`LABEL_TOKENS`], or
+/// [`TRAP_LABEL_TOKENS`] for a lean or trapezoid label.
+fn check_label(line: usize, label: &str, tokens: &LabelTokens) -> Result<(), Failure> {
+    let unquoted = leading_string(label).map_or(label, |(_, rest)| rest);
+    if !unquoted.contains(tokens.chars) {
+        return Ok(());
+    }
+    Err(syntax_error(
+        line,
+        format!("unquoted label contains {}; wrap the label in double quotes", tokens.names),
+    ))
+}
+
+/// Checks that the unquoted text of a subgraph `title` written without brackets on `line`
+/// — all of it, or what follows a leading double-quoted string — is made of upstream's
+/// `textNoTags` tokens (`NUM`, `NODE_STRING`, `SPACE`, `MINUS`, `AMP`, `UNICODE_TEXT`,
+/// `COLON`, `MULT`, `BRKT`, keywords and `START_LINK`), which hold no
+/// `( ) [ ] { } | < > , @ ~`, no `--`, `==` or `-.`, and a `"` only inside a word.
+/// `START_LINK` is a `textNoTags` token, but it moves upstream's lexer into link text,
+/// whose tokens no title may hold.
+fn check_unbracketed_title(line: usize, title: &str) -> Result<(), Failure> {
+    const TOKEN_CHARS: [char; 12] = ['(', ')', '[', ']', '{', '}', '|', '<', '>', ',', '@', '~'];
+    let unquoted = leading_string(title).map_or(title, |(_, rest)| rest);
+    if unquoted.contains(TOKEN_CHARS)
+        || unquoted.char_indices().any(|(at, _)| unquoted.get(at..).and_then(link_start).is_some())
+    {
+        return Err(syntax_error(
+            line,
+            "unquoted subgraph title contains ( ) [ ] { } | < > , @ ~ or a link; wrap the title in double quotes",
+        ));
+    }
+    // `textNoTags` may start with a string but takes no other.
+    if unquoted.match_indices('"').any(|(at, _)| starts_string(unquoted, at)) {
+        return Err(syntax_error(
+            line,
+            "unquoted subgraph title contains \" at the start of a word; wrap the title in double quotes",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks a lean or trapezoid `label` on `line` as [`check_label`] does with
+/// [`TRAP_LABEL_TOKENS`], and that its unquoted text has no `"` right after a `/` or
+/// `\`: upstream's `trapText` lexer reads each `/` and `\` as a token of its own, so the
+/// `"` after one starts a token, which the `<*>["]` rule, listed first, reads as the
+/// start of a string the grammar does not accept there.
+fn check_trap_label(line: usize, label: &str) -> Result<(), Failure> {
+    check_label(line, label, &TRAP_LABEL_TOKENS)?;
+    let unquoted = leading_string(label).map_or(label, |(_, rest)| rest);
+    if !unquoted.contains("/\"") && !unquoted.contains("\\\"") {
+        return Ok(());
+    }
+    Err(syntax_error(
+        line,
+        "unquoted label contains \" after / or \\; wrap the label in double quotes",
+    ))
+}
+
+/// Checks that the text of a `-- text -->` link on `line`, if any, holds no `"` outside
+/// a double-quoted string it starts with. Upstream's grammar reads it as
+/// `edgeText: edgeTextToken | edgeText edgeTextToken | STR | MD_STR`, where a string may
+/// only come first, and its `<*>["]` rule is listed before the `<edgeText>` rules, so a
+/// `"` anywhere else starts a string the grammar does not accept there. The
+/// `( ) [ ] { } |` that a bracket label may not hold are text here, as the
+/// `<edgeText>[^-]|\-(?!\-)+` rule is listed before `<*>"("` and its kin.
+fn check_link_text(line: usize, text: Option<&str>) -> Result<(), Failure> {
+    let Some(text) = text else { return Ok(()) };
+    let unquoted = leading_string(text).map_or(text, |(_, rest)| rest);
+    if !unquoted.contains('"') {
+        return Ok(());
+    }
+    Err(syntax_error(line, "unquoted link text contains \"; wrap the text in double quotes"))
+}
+
 /// Splits `text`, which follows an opening bracket, into the label and the text after
-/// the `close` bracket. A label in double quotes may contain brackets; it keeps its
-/// quotes, which tell [`Label::parse`] a quoted string, such as a markdown string, from
+/// the `close` bracket. A label may start with a string in double quotes, which may
+/// contain brackets, and go on in plain text up to `close`; it keeps its quotes, which
+/// tell [`Label::parse_after_string`] a quoted string, such as a markdown string, from
 /// plain text.
 fn bracket_label<'a>(text: &'a str, close: &str) -> Option<(&'a str, &'a str)> {
     match text.strip_prefix('"') {
         Some(quoted) => {
             let (inner, after_quote) = quoted.split_once('"')?;
-            let label = text.get(..inner.len() + 2)?;
-            Some((label, after_quote.strip_prefix(close)?))
+            let (rest, after_close) = after_quote.split_once(close)?;
+            let label = text.get(..inner.len() + 2 + rest.len())?;
+            Some((label, after_close))
         }
         None => text.split_once(close),
     }
+}
+
+/// Whether the `"` at byte index `at` of `text` starts a string: upstream's `<*>["]` rule
+/// reads one only where a token starts, and inside a word the `NODE_STRING` token, which
+/// holds `"`, has already taken it. Right after the opening bracket of a node label (see
+/// [`BRACKETS`]) a token starts even when the bracket ends in a `NODE_STRING` character,
+/// as the `/` of `[/`, the `\` of `[\` and the `-` of `(-` do: the lexer has read the
+/// bracket as a token of its own and left its `INITIAL` state.
+///
+/// This is the rule of upstream's `INITIAL` lexer state: inside the text of a link,
+/// [`split_statements`] tracks the state itself.
+fn starts_string(text: &str, at: usize) -> bool {
+    let Some(before) = text.get(..at) else { return true };
+    BRACKETS.iter().any(|(open, _)| before.ends_with(open))
+        || !before.chars().next_back().is_some_and(|before| is_id_char(before, Some('"')))
 }
 
 /// The characters of the `NODE_STRING` token of Mermaid's `flow.jison`, plus non-ASCII

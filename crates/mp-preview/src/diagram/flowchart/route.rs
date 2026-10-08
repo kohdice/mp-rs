@@ -378,11 +378,7 @@ pub(super) fn route<'a>(
         Some((scene, routed))
     };
 
-    let memberships: Vec<Vec<bool>> = chart
-        .subgraphs
-        .iter()
-        .map(|subgraph| subgraph.membership(chart.nodes.len()))
-        .collect::<Option<_>>()?;
+    let memberships = chart.memberships()?;
     // Inner frames first, so that each outer one is drawn around them.
     let innermost_first = chart.innermost_first();
     // Whether a drawn link's marker lies just before each subgraph's frame along the flow,
@@ -424,7 +420,7 @@ pub(super) fn route<'a>(
                 .collect();
             if let Some(slot) = bounds.get_mut(index) {
                 *slot = frame_bounds(
-                    (subgraph, &chart.enclosing(index)),
+                    (subgraph, &chart.enclosing(index).collect::<Vec<_>>()),
                     is_member,
                     &inner,
                     scene,
@@ -502,7 +498,9 @@ pub(super) fn route<'a>(
     let (main_shift, cross_shift) = framed.iter().fold((0, 0), |(main, cross), (.., frame)| {
         (main.max(-frame.main.0), cross.max(-frame.cross.0))
     });
-    shift(&mut scene, &mut routed, unsigned(main_shift)?, unsigned(cross_shift)?)?;
+    let (main_by, cross_by) = (unsigned(main_shift)?, unsigned(cross_shift)?);
+    shift_labels(&mut routed, main_by, cross_by)?;
+    shift_scene(&mut scene, main_by, cross_by);
     let moved =
         |(low, high): (isize, isize), by: isize| Some(unsigned(low + by)?..=unsigned(high + by)?);
     let mut frame_of = vec![None; chart.subgraphs.len()];
@@ -569,6 +567,11 @@ struct FrameBounds<'a> {
     cross: (isize, isize),
 }
 
+/// The first and last of `size` cells from `start`; `None` past `isize::MAX`.
+fn cell_span(start: usize, size: usize) -> Option<(isize, isize)> {
+    Some((signed(start)?, signed(start + size)? - 1))
+}
+
 /// The frame around `subgraph`'s boxes, the lines of the links between its members (its
 /// members' self loops among them), the `routed` labels of those links and the frames
 /// `inner` of the subgraphs nested in it, given by their first and last cells along and
@@ -589,12 +592,11 @@ fn frame_bounds<'a>(
 ) -> Option<FrameBounds<'a>> {
     let axis = direction.axis();
     let is_member = |end: End| end.node().is_some_and(|node| is_member.get(node) == Some(&true));
-    let span = |start: usize, size: usize| Some((signed(start)?, signed(start + size)? - 1));
     let boxes =
         subgraph.members.iter().filter_map(|&member| scene.boxes.get(member)).map(|placed| {
             Some((
-                span(placed.main, axis.box_main_size(placed.node))?,
-                span(placed.cross, axis.box_cross_size(placed.node))?,
+                cell_span(placed.main, axis.box_main_size(placed.node))?,
+                cell_span(placed.cross, axis.box_cross_size(placed.node))?,
             ))
         });
     // A link between members runs inside the frame, as Mermaid puts its dummy nodes in
@@ -604,7 +606,7 @@ fn frame_bounds<'a>(
         .iter()
         .filter(|link| is_member(link.edge.from) && is_member(link.edge.to))
         .flat_map(|link| &link.points)
-        .map(|&(main, cross)| Some((span(main, 1)?, span(cross, 1)?)));
+        .map(|&(main, cross)| Some((cell_span(main, 1)?, cell_span(cross, 1)?)));
     // The labels on links between members lie inside the frame like their boxes.
     let labels = routed.iter().filter_map(|&RoutedLabel { link, label, at: (main, cross) }| {
         let edge = scene.links.get(link)?.edge;
@@ -743,8 +745,7 @@ fn frames_overlap(
     scene: &Scene<'_>,
     axis: Axis,
 ) -> bool {
-    let nested =
-        |a: usize, b: usize| chart.enclosing(a).contains(&b) || chart.enclosing(b).contains(&a);
+    let nested = |a: usize, b: usize| chart.encloses(a, b) || chart.encloses(b, a);
     let meet = |(low_a, high_a): (isize, isize), (low_b, high_b): (isize, isize)| {
         low_a <= high_b && low_b <= high_a
     };
@@ -753,11 +754,9 @@ fn frames_overlap(
     };
     framed.iter().enumerate().any(|(index, (subgraph, is_member, frame))| {
         let covers_a_stranger = scene.boxes.iter().enumerate().any(|(node, placed)| {
-            let span =
-                |start: usize, size: usize| Some((signed(start)?, signed(start + size)? - 1));
             is_member.get(node) != Some(&true)
-                && span(placed.main, axis.box_main_size(placed.node))
-                    .zip(span(placed.cross, axis.box_cross_size(placed.node)))
+                && cell_span(placed.main, axis.box_main_size(placed.node))
+                    .zip(cell_span(placed.cross, axis.box_cross_size(placed.node)))
                     .is_none_or(|(main, cross)| covers(frame, main, cross))
         });
         covers_a_stranger
@@ -769,19 +768,20 @@ fn frames_overlap(
     })
 }
 
-/// Moves every box, link, frame and `routed` label `main` cells on along the flow and
-/// `cross` cells across it. `None` when a distance does not fit an `isize`.
-pub(super) fn shift(
-    scene: &mut Scene<'_>,
-    routed: &mut [RoutedLabel<'_>],
-    main: usize,
-    cross: usize,
-) -> Option<()> {
+/// Moves every `routed` label `main` cells on along the flow and `cross` cells across it.
+/// `None` when a distance does not fit an `isize`.
+fn shift_labels(routed: &mut [RoutedLabel<'_>], main: usize, cross: usize) -> Option<()> {
     let (main_by, cross_by) = (signed(main)?, signed(cross)?);
     for label in routed {
         label.at.0 += main_by;
         label.at.1 += cross_by;
     }
+    Some(())
+}
+
+/// Moves every box, link and frame of `scene` `main` cells on along the flow and `cross`
+/// cells across it.
+pub(super) fn shift_scene(scene: &mut Scene<'_>, main: usize, cross: usize) {
     for placed in &mut scene.boxes {
         placed.main += main;
         placed.cross += cross;
@@ -794,7 +794,6 @@ pub(super) fn shift(
         frame.main = frame.main.start() + main..=frame.main.end() + main;
         frame.cross = frame.cross.start() + cross..=frame.cross.end() + cross;
     }
-    Some(())
 }
 
 fn unsigned(value: isize) -> Option<usize> {
@@ -911,13 +910,13 @@ fn assign_tracks(
 fn visible_paths<'a>(
     chart: &'a Flowchart,
     layered: &'a Layered,
-) -> impl Iterator<Item = (usize, &'a Vec<usize>)> {
+) -> impl Iterator<Item = (usize, &'a [usize])> {
     chart
         .edges
         .iter()
         .zip(layered.paths.iter().enumerate())
         .filter(|(edge, _)| edge.stroke.is_visible())
-        .map(|(_, path)| path)
+        .map(|(_, (index, path))| (index, path.as_slice()))
 }
 
 /// For each edge, the cell across the flow where each of its segments enters the next
@@ -956,8 +955,8 @@ fn entry_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<V
 /// for a self loop, the cell of its first leg (see [`exit_cells`]).
 fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<usize>> {
     let slots = &layered.slots;
-    // For each node, the links to other slots, with the port of the slot each goes to,
-    // and the self loops.
+    // For each node, the links to other slots, with the order of the slot each goes to
+    // (see [`Slot::order`](super::layout::Slot::order)), and the self loops.
     let mut leaving = vec![Vec::new(); chart.nodes.len()];
     let mut loops = vec![Vec::new(); chart.nodes.len()];
     let mut exits = vec![0; layered.paths.len()];
@@ -965,8 +964,8 @@ fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<us
         let first = *path.first()?;
         let listed = match path.get(1) {
             Some(&next) => {
-                let port = slots.get(next)?.port;
-                leaving.get_mut(first).map(|leaving| leaving.push((port, edge)))
+                let order = slots.get(next)?.order;
+                leaving.get_mut(first).map(|leaving| leaving.push((order, edge)))
             }
             None => loops.get_mut(first).map(|loops| loops.push(edge)),
         };
@@ -977,7 +976,7 @@ fn exit_ports(chart: &Flowchart, layered: &Layered, axis: Axis) -> Option<Vec<us
     }
     for (((node, slot), leaving), loops) in chart.nodes.iter().zip(slots).zip(&leaving).zip(&loops)
     {
-        let targets: Vec<usize> = leaving.iter().map(|&(port, _)| port).collect();
+        let targets: Vec<usize> = leaving.iter().map(|&(order, _)| order).collect();
         let labels = loops
             .iter()
             .map(|&edge| Some(chart.edges.get(edge)?.label.as_ref()))

@@ -1,9 +1,9 @@
 //! Collapsed subgraphs drawn as one box, as upstream's collapsible subgraphs are
 //! (<https://mermaid.js.org/syntax/flowchart.html>, "Collapsible subgraphs").
 
-use std::collections::HashSet;
-
-use super::parse::{Body, Edge, End, Flowchart, Node, Shape, Subgraph};
+use super::parse::{
+    Body, Edge, End, Flowchart, Node, Shape, Subgraph, compact_index, remap_members,
+};
 
 /// `chart` with each subgraph marked [`Subgraph::collapsed`] drawn as one rectangle
 /// showing its title: its members and the subgraphs nested in it are not drawn, a link
@@ -18,10 +18,12 @@ pub(super) fn collapse(chart: Flowchart) -> Option<Flowchart> {
         return Some(chart);
     }
     let enclosing: Vec<Vec<usize>> =
-        (0..chart.subgraphs.len()).map(|subgraph| chart.enclosing(subgraph)).collect();
+        (0..chart.subgraphs.len()).map(|subgraph| chart.enclosing(subgraph).collect()).collect();
     let Flowchart { direction, nodes, edges, subgraphs } = chart;
     let placed = collapse_nodes(nodes, &subgraphs, &outermost)?;
-    let subgraph_index = kept_subgraph_index(&outermost);
+    // The index each subgraph keeps among those no collapsed subgraph holds.
+    let subgraph_index =
+        compact_index(outermost.len(), |subgraph| outermost.get(subgraph) == Some(&None));
     let edges = collapse_edges(edges, &placed, &outermost, &subgraph_index)?;
     let subgraphs =
         collapse_subgraphs(&subgraphs, &placed, &outermost, &subgraph_index, &enclosing)?;
@@ -37,7 +39,10 @@ fn outermost_collapsed(chart: &Flowchart) -> Vec<Option<usize>> {
             // the outermost.
             std::iter::once(subgraph)
                 .chain(chart.enclosing(subgraph))
-                .rfind(|&holder| chart.subgraphs.get(holder).is_some_and(|holder| holder.collapsed))
+                .filter(|&holder| {
+                    chart.subgraphs.get(holder).is_some_and(|holder| holder.collapsed)
+                })
+                .last()
         })
         .collect()
 }
@@ -109,8 +114,8 @@ fn collapse_nodes(
 }
 
 /// The links with their ends moved onto the boxes that stand for them, without those
-/// whose ends both went into the same box; `subgraph_index` is
-/// [`kept_subgraph_index`]'s.
+/// whose ends both went into the same box; `subgraph_index` gives each subgraph's index
+/// among those no collapsed subgraph holds.
 fn collapse_edges(
     edges: Vec<Edge>,
     placed: &Placed,
@@ -142,8 +147,8 @@ fn collapse_edges(
 }
 
 /// The subgraphs no collapsed subgraph holds, their members renumbered, each holding the
-/// boxes of the collapsed subgraphs nested in it; `subgraph_index` is
-/// [`kept_subgraph_index`]'s.
+/// boxes of the collapsed subgraphs nested in it; `subgraph_index` is as for
+/// [`collapse_edges`].
 fn collapse_subgraphs(
     subgraphs: &[Subgraph],
     placed: &Placed,
@@ -168,16 +173,10 @@ fn collapse_subgraphs(
         if holder.is_some() {
             continue;
         }
-        let mut seen = HashSet::new();
-        let mut members = Vec::with_capacity(subgraph.members.len() + boxes.len());
-        for &member in &subgraph.members {
-            let member = *placed.node_index.get(member)?;
-            if seen.insert(member) {
-                members.push(member);
-            }
-        }
+        let mut members =
+            remap_members(&subgraph.members, |member| placed.node_index.get(member).copied())?;
         for &box_index in boxes {
-            if seen.insert(box_index) {
+            if !members.contains(&box_index) {
                 members.push(box_index);
             }
         }
@@ -188,19 +187,4 @@ fn collapse_subgraphs(
         kept.push(Subgraph { members, parent, ..subgraph.clone() });
     }
     Some(kept)
-}
-
-/// The index each subgraph keeps among those no collapsed subgraph holds, indexed like
-/// [`Flowchart::subgraphs`]; `None` for one a collapsed subgraph holds.
-fn kept_subgraph_index(outermost: &[Option<usize>]) -> Vec<Option<usize>> {
-    let mut kept_count = 0;
-    outermost
-        .iter()
-        .map(|holder| {
-            holder.is_none().then(|| {
-                kept_count += 1;
-                kept_count - 1
-            })
-        })
-        .collect()
 }

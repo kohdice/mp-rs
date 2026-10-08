@@ -1,8 +1,11 @@
 //! Orienting a [`Scene`] on screen and drawing it with box-drawing glyphs.
 
+use std::iter;
+
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::diagram::canvas::{Canvas, HEAVY_JUNCTIONS, LIGHT_JUNCTIONS, LineGlyphs};
+use crate::diagram::canvas::{Canvas, LineGlyphs};
 use crate::style::{Line, Span, Style};
 use crate::theme::Rgb;
 use crate::theme::solarized::DARK_PALETTE;
@@ -61,11 +64,6 @@ impl Frame {
     }
 }
 
-/// Display cells the title row of `title` takes.
-pub(super) fn title_width(title: &str) -> usize {
-    title.width()
-}
-
 /// `drawing` under a row showing `title`, centred over the drawing's widest line with the
 /// odd spare cell after it, or from the first column when wider, and a blank row.
 pub(super) fn titled(drawing: Vec<Line>, title: &str) -> Vec<Line> {
@@ -74,7 +72,7 @@ pub(super) fn titled(drawing: Vec<Line>, title: &str) -> Vec<Line> {
         .map(|line| line.iter().map(|span| span.text.width()).sum::<usize>())
         .max()
         .unwrap_or(0);
-    let indent = drawing_width.saturating_sub(title_width(title)) / 2;
+    let indent = drawing_width.saturating_sub(title.width()) / 2;
     let title_row = vec![Span { text: format!("{}{title}", " ".repeat(indent)), style: TEXT }];
     [title_row, Vec::new()].into_iter().chain(drawing).collect()
 }
@@ -225,13 +223,12 @@ fn link_glyphs(edge: &Edge) -> LineGlyphs {
 /// only, so a dotted line turns in solid glyphs.
 fn line_glyphs(heavy: bool, dotted: bool) -> LineGlyphs {
     let (horizontal, vertical) = match (heavy, dotted) {
-        (false, false) => ("─", "│"),
-        (false, true) => ("┄", "┆"),
-        (true, false) => ("━", "┃"),
-        (true, true) => ("┅", "┇"),
+        (false, false) => ('─', '│'),
+        (false, true) => ('┄', '┆'),
+        (true, false) => ('━', '┃'),
+        (true, true) => ('┅', '┇'),
     };
-    let junctions = if heavy { &HEAVY_JUNCTIONS } else { &LIGHT_JUNCTIONS };
-    LineGlyphs { horizontal, vertical, junctions }
+    LineGlyphs { horizontal, vertical, heavy }
 }
 
 /// Draws a frame with the corners `top_left` and `bottom_right` and `title` in its top
@@ -261,25 +258,89 @@ fn draw_subgraph_frame<'a>(
     canvas.put(top, start + 1 + title.width(), " ", text);
 }
 
+/// Draws `drawing`, a subgraph drawn with its frame outermost, with its top-left cell at
+/// `(top, left)` and its frame grown by `spread` on both sides across the flow of `axis`,
+/// so that its content stays in the middle: the cells added continue the frame's borders
+/// and are blank inside it. Every cell becomes text, which `Canvas::line` never
+/// overwrites, so no link is drawn through the subgraph. The title stays by the
+/// top-left corner: links entering the box keep clear of it, which `spread` may widen
+/// the box for, whereas a frame drawn within the enclosing chart moves its title clear
+/// of the links instead.
+fn draw_drawing<'a>(
+    canvas: &mut Canvas<'a>,
+    (top, left): (usize, usize),
+    drawing: &'a [Line],
+    spread: usize,
+    axis: Axis,
+) {
+    // One entry per column; `None` for a column covered by the wide text before it.
+    // Grapheme clusters keep combining marks, vowel signs and joiners with the character
+    // they belong to, so each entry takes the columns its text is measured by; a
+    // zero-width cluster takes none, as the canvas would draw nothing for it.
+    let mut rows: Vec<Vec<Option<(&'a str, Style)>>> = drawing
+        .iter()
+        .map(|line| {
+            line.iter()
+                .flat_map(|span| {
+                    span.text
+                        .graphemes(true)
+                        .map(|glyph| (glyph, glyph.width()))
+                        .filter(|&(_, width)| width > 0)
+                        .flat_map(move |(glyph, width)| {
+                            iter::once(Some((glyph, span.style)))
+                                .chain(iter::repeat_n(None, width - 1))
+                        })
+                })
+                .collect()
+        })
+        .collect();
+    let last = rows.len().saturating_sub(1);
+    match axis {
+        Axis::Vertical => {
+            for (index, row) in rows.iter_mut().enumerate() {
+                let border = index == 0 || index == last;
+                let fill = if border { row.get(1).copied().flatten() } else { None };
+                // The title keeps its place by the corner, as in a grown frame.
+                let first = if index == 0 { row.len().saturating_sub(1) } else { 1 };
+                row.splice(first..first, iter::repeat_n(fill, spread));
+                let end = row.len().saturating_sub(1);
+                row.splice(end..end, iter::repeat_n(fill, spread));
+            }
+        }
+        Axis::Horizontal => {
+            if let Some(sides) = rows.get(1) {
+                let end = sides.len().saturating_sub(1);
+                let sides: Vec<_> = sides
+                    .iter()
+                    .enumerate()
+                    .map(|(col, &cell)| if col == 0 || col == end { cell } else { None })
+                    .collect();
+                rows.splice(1..1, iter::repeat_n(sides.clone(), spread));
+                let end = rows.len().saturating_sub(1);
+                rows.splice(end..end, iter::repeat_n(sides, spread));
+            }
+        }
+    }
+    for (row, cells) in (top..).zip(&rows) {
+        for (col, cell) in (left..).zip(cells) {
+            if let &Some((text, style)) = cell {
+                canvas.put(row, col, text, style);
+            }
+        }
+    }
+}
+
 /// Draws `node`'s box with its top-left cell at `(top, left)`, grown by its spread on
 /// both sides of the label across the flow of `axis`: extra rows of sides above and
 /// below the label rows in a horizontal layout, extra columns of border either side of
-/// the label in a vertical one. A hidden node draws nothing, and a drawing is copied
-/// in whole.
+/// the label in a vertical one. A hidden node draws nothing, and a drawing is drawn as
+/// [`draw_drawing`] draws it.
 fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node, axis: Axis) {
     let (label, shape) = match &node.body {
         Body::Box { label, shape } => (label, *shape),
         Body::Hidden => return,
-        Body::Drawing(drawing) => {
-            // Its cells become text, which Canvas::line never overwrites, so no link is
-            // drawn through the subgraph.
-            for (row, line) in (top..).zip(drawing) {
-                let mut col = left;
-                for span in line {
-                    canvas.put(row, col, &span.text, span.style);
-                    col += span.text.width();
-                }
-            }
+        Body::Drawing { lines, .. } => {
+            draw_drawing(canvas, (top, left), lines, node.spread, axis);
             return;
         }
     };
@@ -301,8 +362,17 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
     let label_rows = first_label_row..first_label_row + rows;
     let below_top = label_rows.end + extra_rows;
     for (row, outline_row) in (top..).zip(outline.above).chain((below_top..).zip(outline.below)) {
-        draw_row(canvas, row, left, width, *outline_row, Pen { interior: None, ..pen });
+        draw_row(canvas, row, left, width, *outline_row, Pen { interior: None, ..pen }, None);
     }
+    let label_left = left + outline.label_offset() + extra_cols;
+    // Where the label's text starts on `row`, centred as `draw_label` centres it; `None`
+    // on an empty label row, which has no text for a fill to lead up to.
+    let text_start = |row: usize| {
+        let runs = label.rows().get(row.checked_sub(first_label_row)?)?;
+        let row_width = row_width(runs);
+        (outline.shows_label() && row_width > 0)
+            .then(|| label_left + (label.width() - row_width) / 2)
+    };
     // The middle rows: the label rows and the rows the box grew by around them. Those
     // that do not carry the label row's own side glyphs continue its sides.
     let middle = first_label_row - extra_rows..below_top;
@@ -317,10 +387,10 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
             EndsOn::LastRow => row + 1 == middle.end,
             EndsOn::PortRow => row == top + outline.middle_label_row(label) + extra_rows,
         };
-        draw_row(canvas, row, left, width, if own { outline.label } else { continued }, pen);
+        let outline_row = if own { outline.label } else { continued };
+        draw_row(canvas, row, left, width, outline_row, pen, text_start(row));
     }
     if outline.shows_label() {
-        let label_left = left + outline.label_offset() + extra_cols;
         draw_label(canvas, (first_label_row, label_left), label, RowAlign::Centred, text);
     }
 }
@@ -337,7 +407,10 @@ fn plain_side(end: &'static str) -> &'static str {
 
 /// Draws `outline_row` on a box `width` cells wide from `left`: its end glyphs, its fill
 /// between them, and its mark over the fill. Blanks are drawn only where `pen` paints
-/// the interior, so an unpainted row leaves no trailing blanks behind.
+/// the interior, so an unpainted row leaves no trailing blanks behind. A row open on the
+/// right, with no glyph to end it, paints its fill only left of `text_start`, where the
+/// label's text on the row starts, or nowhere without one: painted blanks after the
+/// text would end the line in blanks.
 fn draw_row(
     canvas: &mut Canvas<'_>,
     row: usize,
@@ -345,6 +418,7 @@ fn draw_row(
     width: usize,
     outline_row: Row,
     pen: Pen,
+    text_start: Option<usize>,
 ) {
     let [inset_left, inset_right] = outline_row.inset;
     let [end_left, end_right] = outline_row.ends;
@@ -360,7 +434,9 @@ fn draw_row(
     canvas.reach_row(row);
     put_glyphs(canvas, row, start, end_left, pen);
     put_glyphs(canvas, row, right_start, end_right, pen);
+    let painted_end = if end_right.is_empty() { text_start.unwrap_or(0) } else { usize::MAX };
     for col in start + end_left.width()..right_start {
+        let pen = if col < painted_end { pen } else { Pen { interior: None, ..pen } };
         put_glyphs(canvas, row, col, outline_row.fill, pen);
     }
     if let Some((at, mark)) = outline_row.mark {

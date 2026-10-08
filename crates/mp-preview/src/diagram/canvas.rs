@@ -10,14 +10,23 @@ const DOWN: u8 = 2;
 const LEFT: u8 = 4;
 const RIGHT: u8 = 8;
 
-/// Light glyphs indexed by connection bits. A bare run in one direction is replaced by
-/// the line's own straight glyph, so only turns and junctions come from this table.
-pub(super) const LIGHT_JUNCTIONS: [&str; 16] =
-    [" ", "│", "│", "│", "─", "┘", "┐", "┤", "─", "└", "┌", "├", "─", "┴", "┬", "┼"];
+// The first of each run of Unicode's box-drawing turns and junctions in which the light
+// and heavy forms of one shape follow each other (U+250C to U+254B): the corners
+// `┌ ┐ └ ┘`, the tees `├ ┤ ┬ ┴` and the cross `┼`.
+const DOWN_RIGHT: u32 = 0x250C;
+const DOWN_LEFT: u32 = 0x2510;
+const UP_RIGHT: u32 = 0x2514;
+const UP_LEFT: u32 = 0x2518;
+const VERTICAL_RIGHT: u32 = 0x251C;
+const VERTICAL_LEFT: u32 = 0x2524;
+const DOWN_HORIZONTAL: u32 = 0x252C;
+const UP_HORIZONTAL: u32 = 0x2534;
+const CROSS: u32 = 0x253C;
 
-/// [`LIGHT_JUNCTIONS`] in heavy glyphs.
-pub(super) const HEAVY_JUNCTIONS: [&str; 16] =
-    [" ", "┃", "┃", "┃", "━", "┛", "┓", "┫", "━", "┗", "┏", "┣", "━", "┻", "┳", "╋"];
+/// How far into the run from `┼` (U+253C) to `╋` (U+254B) the cross whose arms are heavy
+/// as the connection bits of the index say lies: the run lists its sixteen mixes in an
+/// order of its own (`┽` left, `┾` right, `┿` both horizontal arms, `╀` up, …).
+const CROSS_OFFSETS: [u32; 16] = [0, 4, 5, 6, 1, 7, 9, 13, 2, 8, 10, 14, 3, 11, 12, 15];
 
 #[derive(Debug, Clone, Copy, Default)]
 enum Cell<'a> {
@@ -26,25 +35,28 @@ enum Cell<'a> {
     Text(&'a str, Style),
     /// A column covered by the wider text to its left.
     Covered,
-    /// Part of one or more lines, connecting towards the neighbours in `connections`.
+    /// Part of one or more lines, connecting towards the neighbours in `connections`, of
+    /// which those in `heavy` by a heavy line. `glyphs` and `style` are those of the
+    /// line drawn through the cell last, which shows over the earlier ones.
     Line {
         connections: u8,
+        heavy: u8,
         glyphs: LineGlyphs,
         style: Style,
     },
 }
 
 /// The glyphs of a straight horizontal and a straight vertical run of one line style,
-/// and of its turns and junctions.
+/// and whether its turns and junctions are heavy.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct LineGlyphs {
-    pub horizontal: &'static str,
-    pub vertical: &'static str,
-    pub junctions: &'static [&'static str; 16],
+pub(super) struct LineGlyphs {
+    pub horizontal: char,
+    pub vertical: char,
+    pub heavy: bool,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct Canvas<'a> {
+pub(super) struct Canvas<'a> {
     rows: Vec<Vec<Cell<'a>>>,
 }
 
@@ -54,7 +66,7 @@ impl<'a> Canvas<'a> {
     /// add up to `text.width()`, the same measure the boxes around labels are sized by.
     /// Earlier text cut by either end of the new text is blanked, since what is left of
     /// it would no longer take as many columns as it covers.
-    pub(crate) fn put(&mut self, row: usize, col: usize, text: &'a str, style: Style) {
+    pub(super) fn put(&mut self, row: usize, col: usize, text: &'a str, style: Style) {
         let width = text.width();
         if width == 0 {
             return;
@@ -90,9 +102,10 @@ impl<'a> Canvas<'a> {
 
     /// Draws a line through `points`, each `(row, col)`; between consecutive points it
     /// moves vertically to the target row first, then horizontally to its column. Where
-    /// the line meets another line the cell becomes a junction; cells holding text are
-    /// left untouched.
-    pub(crate) fn line(&mut self, points: &[(usize, usize)], glyphs: LineGlyphs, style: Style) {
+    /// the line meets another line the cell becomes a junction, light or heavy towards
+    /// each neighbour as the line drawn that way is, in this line's style; cells holding
+    /// text are left untouched.
+    pub(super) fn line(&mut self, points: &[(usize, usize)], glyphs: LineGlyphs, style: Style) {
         for pair in points.windows(2) {
             let &[mut from, to] = pair else { continue };
             while from != to {
@@ -114,16 +127,24 @@ impl<'a> Canvas<'a> {
         let Some(cell) = self.cells(row, col + 1).and_then(|cells| cells.get_mut(col)) else {
             return;
         };
+        let heavy_towards = if glyphs.heavy { towards } else { 0 };
         match cell {
-            Cell::Blank => *cell = Cell::Line { connections: towards, glyphs, style },
-            Cell::Line { connections, .. } => *connections |= towards,
+            Cell::Blank => {
+                *cell = Cell::Line { connections: towards, heavy: heavy_towards, glyphs, style };
+            }
+            Cell::Line { connections, heavy, glyphs: shown, style: shown_style } => {
+                *connections |= towards;
+                *heavy |= heavy_towards;
+                *shown = glyphs;
+                *shown_style = style;
+            }
             Cell::Text(..) | Cell::Covered => {}
         }
     }
 
     /// Grows the canvas to at least `row + 1` rows, so that a row left blank, such as a
     /// text block's border, still becomes a line.
-    pub(crate) fn reach_row(&mut self, row: usize) {
+    pub(super) fn reach_row(&mut self, row: usize) {
         self.cells(row, 0);
     }
 
@@ -140,7 +161,7 @@ impl<'a> Canvas<'a> {
     }
 
     /// The rows as lines without trailing blanks.
-    pub(crate) fn into_lines(self) -> Vec<Line> {
+    pub(super) fn into_lines(self) -> Vec<Line> {
         self.rows
             .into_iter()
             .map(|cells| {
@@ -150,8 +171,9 @@ impl<'a> Canvas<'a> {
                         Cell::Blank => push(&mut line, " ", Style::default()),
                         Cell::Text(text, style) => push(&mut line, text, style),
                         Cell::Covered => {}
-                        Cell::Line { connections, glyphs, style } => {
-                            push(&mut line, line_glyph(connections, glyphs), style);
+                        Cell::Line { connections, heavy, glyphs, style } => {
+                            let glyph = line_glyph(connections, heavy, glyphs);
+                            push(&mut line, glyph.encode_utf8(&mut [0; 4]), style);
                         }
                     }
                 }
@@ -175,14 +197,44 @@ fn step((row, col): (usize, usize), (to_row, to_col): (usize, usize)) -> ((usize
     }
 }
 
-fn line_glyph(connections: u8, glyphs: LineGlyphs) -> &'static str {
+/// The glyph of a line cell connecting towards `connections`, heavy towards those in
+/// `heavy`: the straight run of `glyphs` when the cell connects along one axis only,
+/// otherwise the turn or junction with each arm light or heavy as asked.
+fn line_glyph(connections: u8, heavy: u8, glyphs: LineGlyphs) -> char {
     if connections & (UP | DOWN) == 0 {
-        glyphs.horizontal
-    } else if connections & (LEFT | RIGHT) == 0 {
-        glyphs.vertical
-    } else {
-        glyphs.junctions.get(usize::from(connections)).copied().unwrap_or(" ")
+        return glyphs.horizontal;
     }
+    if connections & (LEFT | RIGHT) == 0 {
+        return glyphs.vertical;
+    }
+    let is_heavy = |side: u8| u32::from(heavy & side != 0);
+    let (up, down, left, right) = (is_heavy(UP), is_heavy(DOWN), is_heavy(LEFT), is_heavy(RIGHT));
+    // Within each run, a corner adds 1 for a heavy horizontal arm and 2 for a heavy
+    // vertical one, and a `┬` or `┴` tee adds 1, 2 and 4 for a heavy left, right and
+    // vertical arm. A `├` or `┤` tee lists its mixes as: the side arm heavy, the up arm,
+    // the down arm, both vertical arms, up and side, down and side, all three.
+    let side_tee = |side: u32| match (up, down, side) {
+        (0, 0, 0) => 0,
+        (0, 0, _) => 1,
+        (_, 0, 0) => 2,
+        (0, _, 0) => 3,
+        (_, _, 0) => 4,
+        (_, 0, _) => 5,
+        (0, _, _) => 6,
+        _ => 7,
+    };
+    let code = match connections {
+        c if c == DOWN | RIGHT => DOWN_RIGHT + right + 2 * down,
+        c if c == DOWN | LEFT => DOWN_LEFT + left + 2 * down,
+        c if c == UP | RIGHT => UP_RIGHT + right + 2 * up,
+        c if c == UP | LEFT => UP_LEFT + left + 2 * up,
+        c if c == UP | DOWN | RIGHT => VERTICAL_RIGHT + side_tee(right),
+        c if c == UP | DOWN | LEFT => VERTICAL_LEFT + side_tee(left),
+        c if c == DOWN | LEFT | RIGHT => DOWN_HORIZONTAL + left + 2 * right + 4 * down,
+        c if c == UP | LEFT | RIGHT => UP_HORIZONTAL + left + 2 * right + 4 * up,
+        _ => CROSS + CROSS_OFFSETS.get(usize::from(heavy & 0xF)).copied().unwrap_or(0),
+    };
+    char::from_u32(code).unwrap_or(' ')
 }
 
 /// Appends `text`, extending the last span when it has the same style.

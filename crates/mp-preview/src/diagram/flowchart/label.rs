@@ -129,10 +129,7 @@ fn entity(name: &str) -> Option<Cow<'static, str>> {
     }
     ENTITIES
         .iter()
-        .find(|entity| {
-            entity.entity.strip_prefix('&').and_then(|entity| entity.strip_suffix(';'))
-                == Some(name)
-        })
+        .find(|entity| entity.entity.strip_circumfix('&', ';') == Some(name))
         .map(|entity| Cow::Borrowed(entity.characters))
 }
 
@@ -176,12 +173,31 @@ impl Label {
         if text.len() < source.len() { Self::string(text) } else { Self::text(text) }
     }
 
+    /// The label written as `source`, which may start with a double-quoted string and go
+    /// on in plain text after it, as upstream's `text: text textToken | STR | MD_STR` and
+    /// `edgeText: edgeText edgeTextToken | STR | MD_STR` let a label do: the text after
+    /// the string is appended to the string's content, and the string decides the kind of
+    /// the whole (`$$ = {text: $text.text + $textToken, type: $text.type}`), so a markdown
+    /// string stays one. Without a leading string it is read as [`Label::parse`] reads it.
+    pub(super) fn parse_after_string(source: &str) -> Self {
+        match leading_string(source) {
+            Some((content, rest)) if !rest.is_empty() => Self::string_then(content, rest),
+            _ => Self::parse(source),
+        }
+    }
+
     /// The label of a quoted string whose content is `content`: a markdown string when
     /// wrapped in backticks, and otherwise read as [`Label::parse`] reads plain text.
     pub(super) fn string(content: &str) -> Self {
+        Self::string_then(content, "")
+    }
+
+    /// The label of a quoted string whose content is `content`, followed by the plain
+    /// text `rest`, which takes the kind of the string.
+    fn string_then(content: &str, rest: &str) -> Self {
         match content.strip_circumfix("`", "`") {
-            Some(markdown) => Self::markdown(markdown),
-            None => Self::text(content),
+            Some(markdown) => Self::markdown(&format!("{markdown}{rest}")),
+            None => Self::text(&format!("{content}{rest}")),
         }
     }
 
@@ -215,9 +231,11 @@ impl Label {
         Self { rows }
     }
 
-    /// A one-row label showing `text` as it is, such as a node's id.
+    /// A one-row label showing `text`, such as a node's id, without reading markup or
+    /// entity codes in it, but with its blanks and control characters shown as
+    /// [`shown_text`] shows them in every other label.
     pub(super) fn plain(text: &str) -> Self {
-        Self { rows: vec![vec![Run::plain(text.to_owned())]] }
+        Self { rows: vec![vec![Run::plain(shown_text(text))]] }
     }
 
     pub(super) fn rows(&self) -> &[Row] {
@@ -560,13 +578,16 @@ fn delimiter_pieces(row: &str) -> Vec<Piece> {
     pieces
 }
 
+/// Splits the double-quoted string `label` starts with, if any, into its content and the
+/// text after its closing quote.
+pub(super) fn leading_string(label: &str) -> Option<(&str, &str)> {
+    label.strip_prefix('"')?.split_once('"')
+}
+
 /// `text` without the double quotes around it when the whole of it is one quoted
 /// string, the `STR` token of Mermaid's
 /// `packages/mermaid/src/diagrams/flowchart/parser/flow.jison`, which holds no quote
 /// itself.
 pub(super) fn unquoted(text: &str) -> &str {
-    text.strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-        .filter(|inner| !inner.contains('"'))
-        .unwrap_or(text)
+    text.strip_circumfix('"', '"').filter(|inner| !inner.contains('"')).unwrap_or(text)
 }
