@@ -457,8 +457,7 @@ struct Delimiter {
 /// one for italic. Markers left unpaired are shown as written. The text is normalised
 /// by [`label_text`].
 fn emphasis_runs(row: &str) -> Row {
-    let mut pieces = delimiter_pieces(row);
-    let depth = pair_delimiters(&mut pieces);
+    let (pieces, depth) = pair_delimiters(delimiter_pieces(row));
     let mut runs: Row = Vec::new();
     for (piece, &(bold, italic)) in pieces.iter().zip(&depth) {
         let text = match piece {
@@ -480,9 +479,9 @@ fn emphasis_runs(row: &str) -> Row {
     runs
 }
 
-/// Pairs the delimiters of `pieces` as [`emphasis_runs`] describes, using up the markers
-/// paired, and returns how many bold and how many italic pairs enclose each piece.
-fn pair_delimiters(pieces: &mut [Piece]) -> Vec<(usize, usize)> {
+/// The delimiters of `pieces` paired as [`emphasis_runs`] describes: `pieces` with the
+/// paired markers used up, and how many bold and how many italic pairs enclose each piece.
+fn pair_delimiters(mut pieces: Vec<Piece>) -> (Vec<Piece>, Vec<(usize, usize)>) {
     let mut depth = vec![(0, 0); pieces.len()];
     // The delimiters that may still open emphasis, in order.
     let mut openers: Vec<usize> = Vec::new();
@@ -525,7 +524,7 @@ fn pair_delimiters(pieces: &mut [Piece]) -> Vec<(usize, usize)> {
             openers.push(closer);
         }
     }
-    depth
+    (pieces, depth)
 }
 
 /// The markers a delimiter piece has left; 0 for text.
