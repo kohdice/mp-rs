@@ -123,17 +123,11 @@ impl Scene<'_> {
 /// neither nested in it nor enclosing it.
 ///
 /// Several links entering one box get their own entry cells along its border, in the
-/// order of the cells they come from.
-///
-/// A link segment whose ends are at different positions across the flow turns on a
-/// track in the gap between the layers: lines run along rows and columns only, where
-/// upstream draws curves, which box-drawing glyphs have no cells for. A link closing a
-/// cycle is routed like the others along its reversed path, between the layers, as
-/// upstream's dagre layout routes it. Each source in a gap has tracks of its own,
-/// and the runs of its segments across the flow share a track only when they have no
-/// cell in common. A frame title moves clear of the links crossing its frame's top
-/// border, unless that makes a frame cover a box outside its subgraph or a frame
-/// neither nested in it nor enclosing it.
+/// order of the cells they come from. Lines run along rows and columns only, as
+/// box-drawing glyphs have no cells for the curves upstream draws; segments turn on
+/// tracks in the gaps between layers (see [`assign_tracks`]), and a link closing a cycle
+/// follows its reversed path (see [`lay_out`](super::layout::lay_out)). Frames are placed
+/// by [`frame_bounds`].
 pub(super) fn route<'a>(
     chart: &'a Flowchart,
     layered: &Layered,
@@ -1014,7 +1008,7 @@ fn self_loop(
 /// Cells from `node`'s bounding edge to its side glyph on the label rows, on the side
 /// links leave it by when `leaving` and on the one they enter it by otherwise: a link
 /// along a horizontal flow runs on through them, so that it meets the side as upstream's
-/// meets the shape's outline. None along a vertical flow, whose ports lie between the
+/// meets the shape's outline. 0 along a vertical flow, whose ports lie between the
 /// border's ends (see [`Axis::port_range`]).
 fn side_inset(direction: Direction, node: &Node, leaving: bool) -> usize {
     match (&node.body, direction.axis()) {

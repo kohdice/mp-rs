@@ -1,5 +1,5 @@
-//! Label text as upstream Mermaid shows it, following `packages/mermaid/src/diagrams/
-//! common/common.ts` in <https://github.com/mermaid-js/mermaid>.
+//! Label text as upstream Mermaid shows it, following
+//! `packages/mermaid/src/diagrams/common/common.ts` in <https://github.com/mermaid-js/mermaid>.
 
 use std::borrow::Cow;
 
@@ -150,7 +150,6 @@ impl Run {
 /// The runs of one label row, from left to right.
 pub(super) type Row = Vec<Run>;
 
-/// Display cells `row` takes.
 pub(super) fn row_width(row: &[Run]) -> usize {
     row.iter().map(|run| run.text.width()).sum()
 }
@@ -174,11 +173,10 @@ impl Label {
     }
 
     /// The label written as `source`, which may start with a double-quoted string and go
-    /// on in plain text after it, as upstream's `text: text textToken | STR | MD_STR` and
-    /// `edgeText: edgeText edgeTextToken | STR | MD_STR` let a label do: the text after
-    /// the string is appended to the string's content, and the string decides the kind of
-    /// the whole (`$$ = {text: $text.text + $textToken, type: $text.type}`), so a markdown
-    /// string stays one. Without a leading string it is read as [`Label::parse`] reads it.
+    /// on in plain text: the text is appended to the string's content, and the string
+    /// decides the kind of the whole, so a markdown string stays one (`flow.jison`'s
+    /// `text` and `edgeText` rules). Without a leading string it is read as
+    /// [`Label::parse`] reads it.
     pub(super) fn parse_after_string(source: &str) -> Self {
         match leading_string(source) {
             Some((content, rest)) if !rest.is_empty() => Self::string_then(content, rest),

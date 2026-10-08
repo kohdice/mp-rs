@@ -109,7 +109,7 @@ impl Outline {
 
     /// Cells from the box's bounding edge on its right side when `right`, and on its left
     /// side otherwise, to the label row's side glyph there, where a link along a
-    /// horizontal flow ends; none when that side is open, as the edge itself is then the
+    /// horizontal flow ends; 0 when that side is open, as the edge itself is then the
     /// box's side.
     pub(super) fn side_inset(&self, right: bool) -> usize {
         let [left_inset, right_inset] = self.label.inset;

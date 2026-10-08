@@ -26,7 +26,6 @@ pub(crate) struct SyntaxError {
     pub message: String,
 }
 
-/// `message` prefixed with `line N: ` when `line` is known.
 fn located(line: Option<usize>, message: &str) -> String {
     match line {
         Some(line) => format!("line {line}: {message}"),

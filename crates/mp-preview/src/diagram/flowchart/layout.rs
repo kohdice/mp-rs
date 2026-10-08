@@ -259,14 +259,13 @@ pub(super) fn title_offset(mut crossings: Vec<usize>, title_width: usize) -> usi
 }
 
 /// The cell where each link meets one border of a slot, counted from the slot's first
-/// cell and listed in the order of `others`, the positions across the flow of the
-/// links' other ends: the links take the border's port `cells` spread symmetrically
-/// about `port` (see [`symmetric_offsets`]), in the order of their other ends, ties
-/// keeping the order of `others`. Neighbouring ends are [`end_gaps`] apart, given the
-/// cells each end's label takes on either side of it, `reach`, indexed like `others`
-/// (empty when no end has a label). [`grow_boxes`] and [`grow_for_labels`] make every
-/// box border wide enough; should the cells still not hold them, the links share them
-/// out from `port` outwards, several to a cell.
+/// cell and indexed like `others`, the positions across the flow of the links' other
+/// ends, given the reach of each end's label in `reach`, indexed like `others` (empty
+/// when no end has a label). The links take the border's port `cells` about `port` in
+/// the order of their other ends (see [`ranked_ports`], [`symmetric_offsets`] and
+/// [`end_gaps`]). [`grow_boxes`] and [`grow_for_labels`] are expected to have made room;
+/// when the cells still do not hold the links, they share them out from `port`
+/// outwards, several to a cell.
 pub(super) fn port_cells<P: Ord>(
     axis: Axis,
     others: &[P],
@@ -358,12 +357,10 @@ fn box_spread(
 
 /// The cells, in order along a border running from `low` to `high`, of a frame's own link
 /// ends whose labels have the reach in `ordered`, clear of the `crossings` of links
-/// passing the border into the frame: spread about `middle` as on a box where that fits
-/// ([`box_spread`]), so a border no link crosses looks like a box's; otherwise, of the
-/// packings from each first cell on ([`packed_ports`]), the one whose farthest end lies
-/// nearest `middle`, then the one with the fewest crossings between its first and last
-/// end, so that the frame's own links stay together where they can, then the one nearest
-/// `middle` in all, then the earliest. `None` when no placement fits.
+/// passing the border into the frame. They are spread about `middle` as on a box where
+/// that fits ([`box_spread`]); otherwise they take the packing ([`packed_ports`]) whose
+/// farthest end lies nearest `middle`, ties going to the one with the fewest crossings
+/// between its ends, so the frame's own links stay together. `None` when nothing fits.
 fn frame_ports(
     axis: Axis,
     ordered: &[Reach],
@@ -410,8 +407,9 @@ fn frame_ports(
 /// The fewest cells a frame grows by on each side of its members' cells `low..=high` for
 /// [`frame_ports`] to place its own link ends, whose labels have the reach in `ordered`,
 /// about `middle` clear of `crossings`. Growing never makes them fit less well, so the
-/// count is found by halving an interval whose top is known to fit: past the members'
-/// cells and the crossings, room for every gap and one more on either side.
+/// count is found by halving an interval between a count that does not fit and one that
+/// does. The top of the interval — past the members' cells and the crossings, room for
+/// every gap and one more step on either side — is taken to fit and is never tested.
 fn frame_growth(
     axis: Axis,
     ordered: &[Reach],
@@ -707,7 +705,8 @@ fn symmetric_ports(
 /// its edges, and lets edges meet its border at any point (`intersect`); a
 /// three-row box has one non-corner cell on each side, and two links sharing a cell
 /// would show a single line and marker, so the box grows instead. Returns each box's
-/// growth; `None` when the chart cannot be searched for cycles.
+/// growth; `None` when a link joins a subgraph to itself or to one of its own members
+/// (see [`cycle_closing_edges`]).
 pub(super) fn grow_boxes(chart: &Flowchart) -> Option<Growth> {
     let axis = chart.direction.axis();
     let reversed = cycle_closing_edges(chart)?;
@@ -934,8 +933,10 @@ struct Placement {
     exits: Vec<Vec<isize>>,
 }
 
-/// A place in a layer: a node's box, or the cells a link longer than one layer passes
-/// through.
+/// A place in a layer: a node's box, the cells a link longer than one layer passes
+/// through, or the end of a link at a subgraph frame. A frame end is made for every link
+/// ending at a frame, not only for links spanning several layers, and takes no room in
+/// its layer's stack.
 #[derive(Debug)]
 pub(super) struct Slot {
     pub layer: usize,
@@ -960,7 +961,8 @@ pub(super) struct Slot {
 #[derive(Debug)]
 pub(super) struct Layered {
     /// The chart's nodes, indexed like [`Flowchart::nodes`], followed by the slots of
-    /// links that span several layers.
+    /// links that span several layers and the ends of links at subgraph frames (see
+    /// [`Slot`]).
     pub slots: Vec<Slot>,
     pub layer_count: usize,
     /// The slots each edge passes through, one per layer from the earlier of its ends to
@@ -984,8 +986,10 @@ const MAX_PASSING_SLOTS: usize = 10_000;
 
 /// Places every node in the first layer that is, for each parent, at least the link's
 /// `length` layers after that parent: the layer after its furthest parent when every
-/// link has length one. Edges closing a cycle are laid out reversed. `None` when the
-/// links spanning several layers would need more than [`MAX_PASSING_SLOTS`] slots.
+/// link has length one. Edges closing a cycle are laid out reversed. `None` when a link
+/// joins a subgraph to itself or to one of its own members (see
+/// [`cycle_closing_edges`]), or when the links spanning several layers would need more
+/// than [`MAX_PASSING_SLOTS`] slots.
 pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Option<Layered> {
     let reversed = cycle_closing_edges(chart)?;
     let mut layer_of =
@@ -1217,7 +1221,8 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     };
     let gap = signed(sibling_gap)?;
 
-    // Whether the link at the end of a link at a frame, the slot `end`, is drawn.
+    // Whether the link that ends at the frame-end slot `end` is drawn (an invisible link
+    // takes no cell).
     let end_drawn = |end: usize, entering: bool| -> Option<bool> {
         if entering {
             let (&parent, &link) = parents.get(end)?.first().zip(link_of.get(end)?.first())?;

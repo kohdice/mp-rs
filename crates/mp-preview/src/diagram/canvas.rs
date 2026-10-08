@@ -12,7 +12,12 @@ const RIGHT: u8 = 8;
 
 // The first of each run of Unicode's box-drawing turns and junctions in which the light
 // and heavy forms of one shape follow each other (U+250C to U+254B): the corners
-// `┌ ┐ └ ┘`, the tees `├ ┤ ┬ ┴` and the cross `┼`.
+// `┌ ┐ └ ┘`, the tees `├ ┤ ┬ ┴` and the cross `┼`. Within each run, a corner adds 1 for
+// a heavy horizontal arm and 2 for a heavy vertical one, and a `┬` or `┴` tee adds 1, 2
+// and 4 for a heavy left, right and vertical arm. A `├` or `┤` tee lists its mixes in an
+// order of its own: the side arm heavy, the up arm, the down arm, both vertical arms, up
+// and side, down and side, all three. The cross's sixteen mixes are mapped by
+// `CROSS_OFFSETS`.
 const DOWN_RIGHT: u32 = 0x250C;
 const DOWN_LEFT: u32 = 0x2510;
 const UP_RIGHT: u32 = 0x2514;
@@ -24,8 +29,7 @@ const UP_HORIZONTAL: u32 = 0x2534;
 const CROSS: u32 = 0x253C;
 
 /// How far into the run from `┼` (U+253C) to `╋` (U+254B) the cross whose arms are heavy
-/// as the connection bits of the index say lies: the run lists its sixteen mixes in an
-/// order of its own (`┽` left, `┾` right, `┿` both horizontal arms, `╀` up, …).
+/// as the connection bits of the index say lies (see the run layout above `DOWN_RIGHT`).
 const CROSS_OFFSETS: [u32; 16] = [0, 4, 5, 6, 1, 7, 9, 13, 2, 8, 10, 14, 3, 11, 12, 15];
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -211,10 +215,7 @@ fn line_glyph(connections: u8, heavy: u8, glyphs: LineGlyphs) -> char {
     }
     let is_heavy = |side: u8| u32::from(heavy & side != 0);
     let (up, down, left, right) = (is_heavy(UP), is_heavy(DOWN), is_heavy(LEFT), is_heavy(RIGHT));
-    // Within each run, a corner adds 1 for a heavy horizontal arm and 2 for a heavy
-    // vertical one, and a `┬` or `┴` tee adds 1, 2 and 4 for a heavy left, right and
-    // vertical arm. A `├` or `┤` tee lists its mixes as: the side arm heavy, the up arm,
-    // the down arm, both vertical arms, up and side, down and side, all three.
+    // The offsets into each run follow the layout described above `DOWN_RIGHT`.
     let side_tee = |side: u32| match (up, down, side) {
         (0, 0, 0) => 0,
         (0, 0, _) => 1,
@@ -239,7 +240,6 @@ fn line_glyph(connections: u8, heavy: u8, glyphs: LineGlyphs) -> char {
     char::from_u32(code).unwrap_or(' ')
 }
 
-/// Appends `text`, extending the last span when it has the same style.
 fn push(line: &mut Line, text: &str, style: Style) {
     match line.last_mut() {
         Some(last) if last.style == style => last.text.push_str(text),

@@ -15,10 +15,11 @@ use super::parse::{Body, Direction, End, Flowchart, Node, compact_index, remap_m
 use super::styling::Styling;
 
 /// The most subgraphs with a direction of their own a chart is drawn inside of. Each
-/// one is drawn by a call nested in the call drawing the chart around it, so without a
-/// bound a source within Mermaid's size limit could nest them about two thousand deep
-/// and overflow the stack, which aborts the process; 32 is far past what a reader
-/// follows in a terminal.
+/// one is drawn by a call nested in the call drawing the chart around it, and a source at
+/// Mermaid's `maxTextSize` of 50,000 characters can nest thousands of them (`subgraph`
+/// and `end` on lines of their own take 13 characters, and every non-empty subgraph
+/// with no link to the outside gets a direction of its own), which would overflow the
+/// stack and abort the process; 32 is far past what a reader follows in a terminal.
 const MAX_UNIT_DEPTH: usize = 32;
 
 /// Replaces each outermost subgraph that is laid out in a direction of its own (see
@@ -27,12 +28,14 @@ const MAX_UNIT_DEPTH: usize = 32;
 /// to the subgraph end at that node. `frame` is the subgraph whose drawing `chart` is,
 /// which is laid out in the chart's direction. Each drawing is made at the spacing of
 /// tightening step `level` (see [`Axis::spacing`](super::layout::Axis::spacing)), the
-/// step the chart around it is to be drawn at, so the two tighten together. A link
-/// between one of its members or nested subgraphs and anything outside it has no such
-/// node to end at, so the chart is unsupported then, and so is a subgraph with a
-/// direction of its own nested more than [`MAX_UNIT_DEPTH`] deep in them, counting
-/// itself and the `depth` of them that `chart` lies inside of, or one whose drawing
-/// spans more than [`MAX_CELLS`](super::MAX_CELLS) at step `level`.
+/// step the chart around it is to be drawn at, so the two tighten together.
+///
+/// The chart is unsupported when a link joins one of the subgraph's members or nested
+/// subgraphs to anything outside it, since that link has no cell to end at in the
+/// drawing. It is also unsupported when a subgraph with a direction of its own lies more
+/// than [`MAX_UNIT_DEPTH`] deep, counting itself and the `depth` of them `chart` lies
+/// inside of, or when its drawing spans more than [`MAX_CELLS`](super::MAX_CELLS) at
+/// step `level`.
 pub(super) fn embed_units(
     chart: Flowchart,
     depth: usize,
@@ -254,16 +257,16 @@ fn outer_chart(
     Ok(Flowchart { direction, nodes: outer_nodes, edges: outer_edges, subgraphs: outer_subgraphs })
 }
 
-/// The direction `subgraph` is laid out in as a diagram of its own, as upstream's
-/// `extractor` (`mermaid-graphlib.js`) lays out a cluster: its `direction` statement's,
-/// else the one crosswise to `enclosing` (Mermaid's default `flowchart.inheritDir:
-/// false`). `None` when a link joins something inside it — its members and the
-/// subgraphs nested in it — to something outside it, or when nothing is inside it, as
-/// upstream extracts only clusters with children: the subgraph then stays in the
-/// enclosing layout and takes its direction. A link touching the subgraph's own frame
-/// is left out of the check, as upstream's `isDescendant` does not count a cluster
-/// among its own descendants; a link between a member and its own frame is never
-/// drawn anyway.
+/// The direction `subgraph` is laid out in as a diagram of its own: its `direction`
+/// statement's, else the one crosswise to `enclosing`, and `None` — the subgraph stays in
+/// the enclosing layout — when it is empty or a link joins something inside it to
+/// something outside it. Upstream states the last rule as "If any of a subgraph's nodes
+/// are linked to the outside, subgraph direction will be ignored" (`extractor` in
+/// `mermaid-graphlib.js`). A link touching the subgraph's own frame is left out of the
+/// check: upstream keeps the direction then ("Link *to* subgraph1: subgraph1 direction is
+/// maintained" in the same section), as its `isDescendant` does not count a cluster among
+/// its own descendants, and a link between a member and its own frame is never drawn
+/// anyway.
 fn own_direction(chart: &Flowchart, subgraph: usize, enclosing: Direction) -> Option<Direction> {
     let frame = chart.subgraphs.get(subgraph)?;
     // An empty subgraph's only member is the hidden node its frame is drawn around.

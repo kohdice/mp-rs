@@ -323,16 +323,10 @@ pub(super) struct FrontMatter<'a> {
     pub first_line: usize,
 }
 
-/// Splits off the frontmatter `source` starts with, as upstream's `extractFrontMatter`
-/// (`packages/mermaid/src/diagram-api/frontmatter.ts`) does, and reads its top-level
-/// `title`. The block opens with `---` on the source's first line, which may be indented
-/// but not preceded by blank lines, and closes with the next line that is the same indent
-/// followed by `---`, as `frontMatterRegex` in `diagram-api/regexes.ts`, anchored at the
-/// start of the text (`^([^\S\n\r]*)-{3}` … `\1-{3}`), reads it; that indent is removed
-/// from each line between before its keys are read, and a line without it is read as
-/// written.
-/// Every key but `title` is skipped: upstream applies `config` (theme, curve, HTML
-/// labels, …) to the SVG it draws, and none of it has a counterpart in box-drawing text.
+/// Splits off the frontmatter `source` starts with and reads its top-level `title`,
+/// mirroring `extractFrontMatter` in `packages/mermaid/src/diagram-api/frontmatter.ts`.
+/// Other keys are ignored: nothing in upstream's `config` has a counterpart in
+/// box-drawing text. Errors with "unclosed front matter" when the block never closes.
 pub(super) fn front_matter(source: &str) -> Result<FrontMatter<'_>, Failure> {
     let none = FrontMatter { title: None, body: source, first_line: 1 };
     let mut lines = source.split_inclusive('\n').zip(1..);
@@ -346,8 +340,11 @@ pub(super) fn front_matter(source: &str) -> Result<FrontMatter<'_>, Failure> {
     let mut title = None;
     for (line, number) in lines {
         offset += line.len();
+        // The opening fence may be indented. Upstream's `frontMatterRegex`
+        // (`^([^\S\n\r]*)-{3}` … `\1-{3}`) needs the closing fence to repeat that indent,
+        // and the indent is removed from each line between, a line without it being read
+        // as written.
         let stripped = line.strip_prefix(indent);
-        // `\1-{3}` needs the closing fence to repeat the indent.
         if stripped.is_some_and(is_fence) {
             let body = source.get(offset..).unwrap_or_default();
             return Ok(FrontMatter { title, body, first_line: number + 1 });
@@ -567,16 +564,11 @@ fn direction_word(word: &str) -> Option<Direction> {
     }
 }
 
-/// `source` without its comment lines, with the 0-based line of `source` that each line
-/// of the result was, plus one entry past the last for the point after a final line
-/// break, so that errors name lines as written.
-///
-/// A comment line is one whose first non-blank characters are `%%` followed by a
-/// character other than `{` on the same line, together with any blank lines right
-/// before it: upstream's `cleanupComments`
-/// (`packages/mermaid/src/diagram-api/comments.ts`) replaces
-/// `/^\s*%%(?!{)[^\n]+\n?/gm` in the whole text before parsing, where `\s*` also spans
-/// line breaks, so it removes such a line even inside a quoted string that spans lines.
+/// `source` without its comment lines, plus the 0-based source line of each remaining
+/// line (and one past the end), so that errors name lines as written. A comment line is
+/// `%%` followed by a character other than `{`, with any blank lines right before it;
+/// upstream's `cleanupComments` (`/^\s*%%(?!{)[^\n]+\n?/gm`) removes it even inside a
+/// multi-line quoted string.
 fn without_comment_lines(source: &str) -> (String, Vec<usize>) {
     let mut cleaned = String::with_capacity(source.len());
     let mut source_lines = Vec::new();
@@ -607,23 +599,20 @@ fn without_comment_lines(source: &str) -> (String, Vec<usize>) {
 }
 
 /// Splits `source` into statements, each with the 0-based line it starts on, for error
-/// reports: at each line break and `;`, and drops each comment the text after a directive
-/// starts (see below) and the text [`passed_over`] names, ignoring all of them inside a
-/// double-quoted string (see [`starts_string`]), so that it may span lines as
-/// `flow.jison`'s `string` lexer state lets it, inside `@{ … }` shape data up to its
-/// closing brace (see [`shape_data_end`]), which upstream's `shapeData` lexer state reads
-/// across lines, and inside the text of a `-- text -->` link, from its `--`, `==` or `-.`
-/// to its closing link or the end of its statement, which upstream reads in its exclusive
-/// `edgeText` lexer states, where a `"` starts a string anywhere. The `;` closing
-/// an entity code such as `#quot;` splits nothing: upstream's `encodeEntities` in
-/// `packages/mermaid/src/utils.ts` replaces every `#\w+;` in the source before parsing
-/// it.
+/// reports: at each line break and `;`, and drops the text [`passed_over`] names,
+/// ignoring line breaks, `;` and that text inside a double-quoted string (see
+/// [`starts_string`]), so that it may span lines as `flow.jison`'s `string` lexer state
+/// lets it, inside `@{ … }` shape data up to its closing brace (see [`shape_data_end`]),
+/// which upstream's `shapeData` lexer state reads across lines, and inside the text of a
+/// `-- text -->` link, from its `--`, `==` or `-.` to its closing link or the end of its
+/// statement, which upstream reads in its exclusive `edgeText` lexer states, where a `"`
+/// starts a string anywhere. The `;` closing an entity code such as `#quot;` splits
+/// nothing: upstream's `encodeEntities` in `packages/mermaid/src/utils.ts` replaces every
+/// `#\w+;` in the source before parsing it.
 ///
-/// `source` comes without its comment lines (see [`without_comment_lines`]), but a line
-/// whose text after a directive is blank and then a comment still holds that comment:
-/// upstream removes directives before comments, so the comment then starts its line and
-/// is removed too. A `%%` anywhere else is text: `flow.jison` has no comment rule, and
-/// its `NODE_STRING` holds `%`.
+/// `source` comes without its comment lines (see [`without_comment_lines`]). A `%%` after
+/// a directive on the same line, with only blanks between, starts a comment and is
+/// dropped; any other `%%` is text, as `flow.jison`'s `NODE_STRING` holds `%`.
 fn split_statements(source: &str) -> Vec<(usize, &str)> {
     let mut statements: Vec<(usize, &str)> = Vec::new();
     let mut in_quotes = false;
@@ -780,16 +769,12 @@ fn starts_comment(rest: &str) -> bool {
 /// over whole, ending the statement before it, where `after_header` tells whether the
 /// header has been read and `blank` whether `rest` starts a statement:
 ///
-/// - A directive, `%%{` and a keyword (`init: …`), on one line or several, up to and
-///   including its `}%%`: upstream applies its configuration to the SVG, which a text
-///   drawing has no counterpart for. Upstream's `directiveRegex` (`%{2}{\s*(?:(\w+)\s*:|
-///   (\w+))`, `packages/mermaid/src/diagram-api/regexes.ts`) needs the keyword, so `%%{`
-///   without one is neither a directive nor, as `cleanupComments` keeps a line starting
-///   with `%%{`, a comment. An unclosed directive runs to the end of the source.
-/// - An accessibility statement (see [`accessibility_end`]) after the header, which
-///   draws nothing upstream. Before the header it is not passed over: upstream's
-///   detector needs the text, without frontmatter, directives and comments, to start
-///   with `flowchart` or `graph`.
+/// - A directive, `%%{` and a keyword (`init: …`), up to and including its `}%%` or the
+///   end of the source; `%%{` without a keyword is neither a directive nor a comment, as
+///   `directiveRegex` in `packages/mermaid/src/diagram-api/regexes.ts` needs one.
+/// - An accessibility statement (see [`accessibility_end`]) after the header, which draws
+///   nothing; before the header it is text, as upstream's detector needs the source to
+///   start with `flowchart` or `graph`.
 fn passed_over(rest: &str, after_header: bool, blank: bool) -> Option<usize> {
     if let Some(after_open) = rest.strip_prefix("%%{") {
         let keyword =
@@ -1107,6 +1092,9 @@ impl<'a> Builder<'a> {
                 check_label(line, title, &LABEL_TOKENS)?;
                 (id, Label::parse_after_string(title))
             }
+            // Upstream reads an unbracketed title as `textNoTags`, not as a bracket label:
+            // see `check_unbracketed_title` for what it rejects. A leading string and the
+            // text after it are joined, so `subgraph "a" b` is titled `a b`.
             None => {
                 check_unbracketed_title(line, text)?;
                 (unquoted(text), Label::parse_after_string(text))
@@ -2019,19 +2007,14 @@ struct LabelTokens {
     names: &'static str,
 }
 
-/// The tokens of a plain label: upstream's `text` state takes `TEXT` as
-/// `[^\[\]\(\)\{\}\|\"]+`, a closing bracket or `|` ends the label, and `(`, `[`, `{`,
-/// `|` and `"` start a new token in every state.
+/// The brackets, `|` and `"`, which a plain label's text may not hold, as `TEXT` in
+/// upstream's `text` lexer state is `[^\[\]\(\)\{\}\|\"]+`.
 const LABEL_TOKENS: LabelTokens =
     LabelTokens { chars: &['(', ')', '[', ']', '{', '}', '|', '"'], names: "( ) [ ] { } | or \"" };
 
-/// The tokens of a lean or trapezoid label (`[/ /]`, `[\ \]`, `[/ \]`, `[\ /]`). Upstream's
-/// `trapText` state takes `TEXT` as `\/(?!\])|\\(?!\])|[^\\\[\]\(\)\{\}\/]+`, and that
-/// rule is listed before `<*>"|"`, so `|` is text there, as are the `/` and `\` that
-/// close no label. `"` is text there too, as that `TEXT` does not leave it out: the
-/// `<*>["]` rule, listed first, starts a string only where a token starts, right after
-/// the opening bracket or after a `/` or `\`, which are tokens of their own;
-/// [`check_trap_label`] rejects the latter.
+/// The brackets, which the text of a lean or trapezoid label (`[/ /]`, `[\ \]`, `[/ \]`,
+/// `[\ /]`) may not hold, as `TEXT` in upstream's `trapText` lexer state is
+/// `\/(?!\])|\\(?!\])|[^\\\[\]\(\)\{\}\/]+`.
 const TRAP_LABEL_TOKENS: LabelTokens =
     LabelTokens { chars: &['(', ')', '[', ']', '{', '}'], names: "( ) [ ] { or }" };
 
@@ -2079,10 +2062,10 @@ fn check_unbracketed_title(line: usize, title: &str) -> Result<(), Failure> {
 }
 
 /// Checks a lean or trapezoid `label` on `line` as [`check_label`] does with
-/// [`TRAP_LABEL_TOKENS`], and that its unquoted text has no `"` right after a `/` or
-/// `\`: upstream's `trapText` lexer reads each `/` and `\` as a token of its own, so the
-/// `"` after one starts a token, which the `<*>["]` rule, listed first, reads as the
-/// start of a string the grammar does not accept there.
+/// [`TRAP_LABEL_TOKENS`], and rejects a `"` right after a `/` or `\` in its unquoted text.
+/// Elsewhere a `"` is text, but upstream's `trapText` state reads a `/` or `\` as a token
+/// of its own, so the `"` after one starts a token, which its `<*>["]` rule reads as a
+/// string the grammar does not accept there.
 fn check_trap_label(line: usize, label: &str) -> Result<(), Failure> {
     check_label(line, label, &TRAP_LABEL_TOKENS)?;
     let unquoted = leading_string(label).map_or(label, |(_, rest)| rest);
@@ -2096,12 +2079,8 @@ fn check_trap_label(line: usize, label: &str) -> Result<(), Failure> {
 }
 
 /// Checks that the text of a `-- text -->` link on `line`, if any, holds no `"` outside
-/// a double-quoted string it starts with. Upstream's grammar reads it as
-/// `edgeText: edgeTextToken | edgeText edgeTextToken | STR | MD_STR`, where a string may
-/// only come first, and its `<*>["]` rule is listed before the `<edgeText>` rules, so a
-/// `"` anywhere else starts a string the grammar does not accept there. The
-/// `( ) [ ] { } |` that a bracket label may not hold are text here, as the
-/// `<edgeText>[^-]|\-(?!\-)+` rule is listed before `<*>"("` and its kin.
+/// a double-quoted string it starts with, as `flow.jison`'s `edgeText` rule accepts a
+/// string only at its start. Brackets and `|` are text here.
 fn check_link_text(line: usize, text: Option<&str>) -> Result<(), Failure> {
     let Some(text) = text else { return Ok(()) };
     let unquoted = leading_string(text).map_or(text, |(_, rest)| rest);

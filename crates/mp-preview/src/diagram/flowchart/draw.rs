@@ -231,8 +231,8 @@ fn line_glyphs(heavy: bool, dotted: bool) -> LineGlyphs {
     LineGlyphs { horizontal, vertical, heavy }
 }
 
-/// Draws a frame with the corners `top_left` and `bottom_right` and `title` in its top
-/// border, between blanks starting `title_offset` cells right of the corner.
+/// Draws a frame with the corners `(top, left)` and `(bottom, right)` and `title` in its
+/// top border, between blanks starting `title_offset` cells right of the corner.
 fn draw_subgraph_frame<'a>(
     canvas: &mut Canvas<'a>,
     (top, left): (usize, usize),
