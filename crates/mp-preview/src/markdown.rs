@@ -42,7 +42,7 @@ fn convert_block(node: Node<'_>) -> Option<Block> {
         NodeValue::ThematicBreak => Some(Block::ThematicBreak),
         NodeValue::List(list) => Some(Block::List {
             start: match list.list_type {
-                ListType::Ordered => Some(list.start as u64),
+                ListType::Ordered => Some(u64::try_from(list.start).unwrap_or(u64::MAX)),
                 ListType::Bullet => None,
             },
             tight: list.tight,
@@ -58,13 +58,13 @@ fn convert_table(node: Node<'_>, alignments: &[TableAlignment]) -> Block {
     let mut rows = node.children().map(|row| row.children().map(convert_inlines).collect());
     let header = rows.next().unwrap_or_default();
     Block::Table {
-        align: alignments.iter().map(convert_align).collect(),
+        align: alignments.iter().copied().map(convert_align).collect(),
         header,
         rows: rows.collect(),
     }
 }
 
-fn convert_align(alignment: &TableAlignment) -> Align {
+fn convert_align(alignment: TableAlignment) -> Align {
     match alignment {
         TableAlignment::None => Align::None,
         TableAlignment::Left => Align::Left,

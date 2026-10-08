@@ -91,7 +91,7 @@ pub(crate) enum Inline {
     HardBreak,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Align {
     None,
     Left,
