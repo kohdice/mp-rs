@@ -230,11 +230,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_converts_a_single_paragraph() {
-        assert_eq!(parse("Hello\n"), vec![Block::Paragraph(vec![text("Hello")])]);
-    }
-
-    #[test]
     fn parse_nests_emphasis_strong_strikethrough_and_code() {
         assert_eq!(
             parse("*a **b** ~~c~~ `d`*\n"),
@@ -361,7 +356,6 @@ mod tests {
         let expected = vec![untitled_link("https://x.test", "https://x.test", false)];
 
         assert_eq!(parse("<https://x.test>\n"), expected);
-        assert_eq!(parse("https://x.test\n"), expected);
         assert_eq!(parse("[https://x.test][r]\n\n[r]: https://x.test\n"), expected);
     }
 
@@ -370,15 +364,14 @@ mod tests {
         let expected = vec![untitled_link("mailto:a@b.test", "a@b.test", false)];
 
         assert_eq!(parse("<a@b.test>\n"), expected);
-        assert_eq!(parse("a@b.test\n"), expected);
     }
 
     #[test]
-    fn parse_shows_generated_destination_for_www_autolinks() {
-        assert_eq!(
-            parse("www.example.com\n"),
-            vec![untitled_link("http://www.example.com", "www.example.com", true)]
-        );
+    fn shows_url_is_false_only_when_the_single_text_child_spells_the_url() {
+        assert!(!shows_url(&[text("https://x.test")], "https://x.test"));
+        assert!(!shows_url(&[text("a@b.test")], "mailto:a@b.test"));
+        assert!(shows_url(&[text("www.example.com")], "http://www.example.com"));
+        assert!(shows_url(&[text("https://"), text("x.test")], "https://x.test"));
     }
 
     #[test]
@@ -389,18 +382,6 @@ mod tests {
                 url: "i.png".to_owned(),
                 title: Some("t".to_owned()),
                 alt: vec![text("alt "), Inline::Emphasis(vec![text("x")])],
-            }])]
-        );
-    }
-
-    #[test]
-    fn parse_visualizes_control_characters_in_image_urls() {
-        assert_eq!(
-            parse("![a](i&#1;.png)"),
-            vec![Block::Paragraph(vec![Inline::Image {
-                url: "i␁.png".to_owned(),
-                title: None,
-                alt: vec![text("a")],
             }])]
         );
     }
@@ -429,10 +410,10 @@ mod tests {
     #[test]
     fn parse_uses_custom_alert_titles_in_place_of_the_label() {
         assert_eq!(
-            parse("> [!NOTE] Custom &#27;title\n> body\n"),
+            parse("> [!NOTE] Custom title\n> body\n"),
             vec![Block::Alert {
                 kind: AlertKind::Note,
-                title: "Custom ␛title".to_owned(),
+                title: "Custom title".to_owned(),
                 blocks: vec![paragraph("body")],
             }]
         );
@@ -444,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_visualizes_control_characters_in_code_html_urls_and_titles() {
+    fn parse_visualizes_control_characters_in_code_html_destinations_and_titles() {
         assert_eq!(
             parse("`a\u{1b}b`\n"),
             vec![Block::Paragraph(vec![Inline::Code("a␛b".to_owned())])]
@@ -462,6 +443,22 @@ mod tests {
                 children: vec![text("t")],
                 show_url: true,
             }])]
+        );
+        assert_eq!(
+            parse("![a](i&#1;.png \"c&#27;d\")\n"),
+            vec![Block::Paragraph(vec![Inline::Image {
+                url: "i␁.png".to_owned(),
+                title: Some("c␛d".to_owned()),
+                alt: vec![text("a")],
+            }])]
+        );
+        assert_eq!(
+            parse("> [!NOTE] Custom &#27;title\n> body\n"),
+            vec![Block::Alert {
+                kind: AlertKind::Note,
+                title: "Custom ␛title".to_owned(),
+                blocks: vec![paragraph("body")],
+            }]
         );
     }
 

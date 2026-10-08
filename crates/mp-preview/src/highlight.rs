@@ -85,26 +85,28 @@ fn convert_style(style: SyntectStyle) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{highlight, syntax_for_info};
+    use super::{highlight, language_token};
 
-    fn syntax_name(info: &str) -> Option<&'static str> {
-        syntax_for_info(info).map(|syntax| syntax.name.as_str())
+    #[test]
+    fn language_token_drops_rustdoc_style_flags() {
+        assert_eq!(language_token("rust,no_run"), Some("rust"));
     }
 
     #[test]
-    fn selects_rust_from_rustdoc_style_info_strings() {
-        assert_eq!(syntax_name("rust,no_run"), Some("Rust"));
+    fn language_token_keeps_only_the_first_word() {
+        assert_eq!(language_token("rust linenums"), Some("rust"));
     }
 
     #[test]
-    fn selects_rust_from_info_strings_with_extra_words() {
-        assert_eq!(syntax_name("rust linenums"), Some("Rust"));
+    fn language_token_is_none_without_a_language_word() {
+        assert_eq!(language_token("  "), None);
+        assert_eq!(language_token(",flags"), None);
     }
 
     #[test]
     fn rejects_empty_and_unsupported_language_tokens() {
-        assert_eq!(syntax_name("   "), None);
-        assert_eq!(syntax_name("definitely-not-a-language"), None);
+        assert_eq!(highlight("   ", "x"), None);
+        assert_eq!(highlight("definitely-not-a-language", "x"), None);
     }
 
     #[test]
@@ -112,5 +114,16 @@ mod tests {
         let code = "x\n".repeat(10_001);
 
         assert_eq!(highlight("rust", &code), None);
+    }
+
+    #[test]
+    fn rejects_code_blocks_over_the_byte_guardrail() {
+        let too_large = "x".repeat(512 * 1024 + 1);
+        let largest = "x".repeat(512 * 1024);
+        let most_lines = "x\n".repeat(10_000);
+
+        assert_eq!(highlight("rust", &too_large), None);
+        assert!(highlight("rust", &largest).is_some());
+        assert!(highlight("rust", &most_lines).is_some());
     }
 }

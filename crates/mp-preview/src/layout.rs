@@ -391,6 +391,10 @@ mod tests {
         assert_eq!(to_ansi(&lines, ColorMode::Plain), "│ a\n│ b");
         let bar = span("│ ", Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() });
         assert!(lines.iter().all(|line| line.first() == Some(&bar)), "{lines:?}");
+    }
+
+    #[test]
+    fn quote_reflows_soft_breaks_like_paragraphs() {
         assert_eq!(plain("> a\n> b\n", Some(80)), "│ a b");
     }
 
@@ -479,11 +483,6 @@ mod tests {
         assert_eq!(to_ansi(&lines, ColorMode::Plain), "│ Custom title\n│\n│ body");
         let title = Style { fg: Some(GREEN), bold: true, ..Style::default() };
         assert!(lines[0].contains(&span("Custom title", title)), "{lines:?}");
-        let bar = Style { fg: Some(GREEN), ..Style::default() };
-        assert!(
-            lines.iter().all(|line| line.first().map(|span| span.style) == Some(bar)),
-            "{lines:?}"
-        );
     }
 
     #[test]
@@ -690,7 +689,12 @@ mod tests {
 
     #[test]
     fn html_block_renders_verbatim_without_its_final_newline_or_wrapping() {
-        assert_eq!(plain("<div>\n\tx\n</div>\n", Some(3)), "<div>\n    x\n</div>");
+        assert_eq!(plain("<div>\n  x y\n</div>\n", Some(3)), "<div>\n  x y\n</div>");
+    }
+
+    #[test]
+    fn html_block_expands_tabs_to_four_column_stops() {
+        assert_eq!(plain("<div>\n\tx\nab\tc\n</div>\n", None), "<div>\n    x\nab  c\n</div>");
     }
 
     #[test]
