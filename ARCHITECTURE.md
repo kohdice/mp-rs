@@ -38,10 +38,10 @@ Markdown text ──> markdown ──> model ──> layout ──> ansi ──>
 
 The project is a Cargo workspace whose members live under `crates/*`.
 
-| Crate               | Responsibility                                                                                                                                           |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, render policy (pass-through on piped stdout), file reading, error-to-exit-code mapping. |
-| `crates/mp-preview` | Library: Markdown parsing, terminal layout, Mermaid flowchart drawing, and ANSI encoding behind the single `preview` function.                           |
+| Crate               | Responsibility                                                                                                                                                                                                                                                                                                                                              |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, render policy (pass-through on piped stdout), file reading, error-to-exit-code mapping. A thin `main.rs` wires the process streams into `lib.rs`, which exposes `run`, `Cli`, and `Env`; `run` takes the streams and environment facts as parameters, so it is testable without a process. |
+| `crates/mp-preview` | Library: Markdown parsing, terminal layout, Mermaid flowchart drawing, and ANSI encoding behind the single `preview` function.                                                                                                                                                                                                                              |
 
 ## Dependency graph
 
@@ -74,11 +74,14 @@ These are guarantees the code relies on; changing one requires updating its cons
   list is loose. Blank-line counts in the source are never reproduced.
 - **Styles are data.** `layout` produces lines of spans carrying a `Style`; `ansi` is the
   only place that emits escape sequences, and nothing reads ANSI bytes back. Styles never
-  carry across lines.
+  carry across lines. `ColorMode` lives beside `Style` in `style`, so `layout` decides
+  whether to highlight code without depending on `ansi`.
 - **External libraries stay at the edges.** Only `markdown` names a comrak type, only
   `highlight` names a syntect type, and only the flowchart `label` module reads the
   `entities` table of HTML named character references. The comrak arena never escapes
-  `markdown::parse`.
+  `markdown::parse`. `thiserror` is the exception: its derive macro only generates the
+  `Display` and `Error` impls, and none of its types appears in an API, so any module
+  may use it for its error types.
 - **Text is safe once it leaves `markdown`.** Inline text, inline code, URLs, titles, alert
   titles, and code-fence info strings contain no line breaks or tabs: LF, CR, and HT become
   one space. Code and HTML block bodies keep LF and HT, with CR and CRLF normalized to LF.
@@ -89,9 +92,9 @@ These are guarantees the code relies on; changing one requires updating its cons
   (`control::visualize_control`), so a drawing is as safe as the text it came from.
 - **Non-empty rendering ends with exactly one trailing newline.** `preview` appends the
   newline to every encoded block, and empty input writes nothing. This holds for the
-  rendering only: pass-through writes the file byte for byte (a file that is not valid
-  UTF-8 is a read error in both modes, because the file is read once with
-  `read_to_string`).
+  rendering only: pass-through writes the file byte for byte (it reads raw bytes, so a
+  file that is not valid UTF-8 passes through unchanged; only rendering reads the file
+  as text and reports invalid UTF-8 as a read error).
 - **Width handling is the library's job.** The binary only detects whether stdout is a
   terminal and how wide it is; every wrapping and table-shrinking decision is made in
   `layout` from the `Options` it receives.

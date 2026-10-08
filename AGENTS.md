@@ -8,9 +8,6 @@ mp-rs (markdown-preview) is a command-line tool to preview Markdown in the termi
 
 Rust project organized as a Cargo workspace.
 
-- Binary crates own process-level concerns such as CLI argument parsing, logging setup, and application startup.
-- Library crates own reusable functionality such as input validation, domain logic, external-system access, and response conversion.
-- Binary crates may depend on library crates; library crates must not depend on binary crates.
 - Crate responsibilities, the dependency graph, and design invariants are documented in [ARCHITECTURE.md](./ARCHITECTURE.md). Development setup and workflow are in [CONTRIBUTING.md](./CONTRIBUTING.md).
 - `missing_docs` is `warn` in `[workspace.lints]`, but `cargo lint` escalates it to an error: every public item and each crate root needs a doc comment. Document private items only when behavior is not obvious.
 
@@ -26,7 +23,7 @@ Rust project organized as a Cargo workspace.
 
 ## Coding Style & Naming Conventions
 
-- Never call `.unwrap()` / `.expect()` in library or production paths. Use `Result`, `?`, `ok_or`, and `anyhow` in binary crates / `thiserror` in library crates.
+- Never call `.unwrap()` / `.expect()` in library or production paths. Use `Result`, `?`, and `ok_or`; library and binary crates define their error types with `thiserror`, and the binary walks the `source()` chain when printing a diagnostic (no `anyhow`).
 - Until the version reaches `1.0.0`, backward compatibility can be disregarded: prioritize changing the implementation to match the recommended approach.
 - Specify the patch version when adding a new crate to `Cargo.toml`.
 - Follow the Actions / Calculations / Data separation from "Grokking Simplicity", and isolate actions carefully:
