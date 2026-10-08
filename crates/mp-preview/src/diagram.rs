@@ -60,10 +60,10 @@ pub(crate) fn render_mermaid(source: &str, width: Option<usize>) -> Result<Vec<L
 
 #[cfg(test)]
 mod tests {
-    use crate::ansi::{ColorMode, to_ansi};
+    use crate::ansi::to_ansi;
     use crate::layout::lay_out_block;
     use crate::markdown::parse;
-    use crate::style::{Line, Span, Style};
+    use crate::style::{ColorMode, Line, Span, Style};
     use crate::theme::Rgb;
     use crate::theme::solarized::DARK_PALETTE;
 

@@ -16,7 +16,7 @@ mod theme;
 
 use std::io::{self, Write};
 
-pub use ansi::ColorMode;
+pub use style::ColorMode;
 
 use layout::lay_out_block;
 

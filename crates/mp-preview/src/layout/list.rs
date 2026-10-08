@@ -2,9 +2,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::ansi::ColorMode;
 use crate::model::ListItem;
-use crate::style::{Line, Span, Style};
+use crate::style::{ColorMode, Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
 /// A loose list separates items, and the direct child blocks of each item, with one

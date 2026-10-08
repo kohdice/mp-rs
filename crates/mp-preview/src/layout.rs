@@ -6,9 +6,8 @@ mod quote;
 mod table;
 mod text;
 
-use crate::ansi::ColorMode;
 use crate::model::Block;
-use crate::style::{Line, Span, Style};
+use crate::style::{ColorMode, Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
 /// Lays out `block` in `width` columns; `None` means no width limit, so nothing is
@@ -87,10 +86,10 @@ fn heading_style(level: u8) -> Style {
 #[cfg(test)]
 mod tests {
     use super::lay_out_block;
-    use crate::ansi::{ColorMode, to_ansi};
+    use crate::ansi::to_ansi;
     use crate::markdown::parse;
     use crate::model::{Block, ListItem};
-    use crate::style::{Line, Span, Style};
+    use crate::style::{ColorMode, Line, Span, Style};
     use crate::theme::solarized::{
         BLUE, CYAN, DARK_PALETTE, GREEN, MAGENTA, ORANGE, RED, VIOLET, YELLOW,
     };

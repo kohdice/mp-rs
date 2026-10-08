@@ -2,9 +2,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::ansi::ColorMode;
 use crate::model::{AlertKind, Block, Inline};
-use crate::style::{Line, Span, Style};
+use crate::style::{ColorMode, Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
 /// Prefix of quoted content lines; blank quoted lines carry the bar without the space.

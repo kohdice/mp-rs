@@ -2,18 +2,8 @@
 
 use std::fmt::Write as _;
 
-use crate::style::{Line, Style};
+use crate::style::{ColorMode, Line, Style};
 use crate::theme::Rgb;
-
-/// Whether output carries ANSI escape sequences.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ColorMode {
-    /// 24-bit color and SGR attributes; code blocks are syntax highlighted.
-    Ansi,
-    /// Text only, with no escape sequences.
-    #[default]
-    Plain,
-}
 
 pub(crate) fn to_ansi(lines: &[Line], mode: ColorMode) -> String {
     let mut encoded = String::new();

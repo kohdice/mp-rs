@@ -2,10 +2,9 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::ansi::ColorMode;
 use crate::diagram::{Failure, render_mermaid};
 use crate::highlight::{highlight, language_token};
-use crate::style::{Line, Span, Style};
+use crate::style::{ColorMode, Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
 const FENCE: &str = "```";
