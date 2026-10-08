@@ -4,4 +4,4 @@
 
 mod cli;
 
-pub use cli::{Cli, Env, run};
+pub use cli::{Cli, Env, no_color_requested, run, usable_width};
