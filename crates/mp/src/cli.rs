@@ -115,16 +115,23 @@ fn render_file<W>(
     path: &Path,
     output: Output,
     width: Option<usize>,
-    stdout: &mut W,
+    mut stdout: W,
 ) -> Result<(), CliError>
 where
     W: Write,
 {
-    let markdown = std::fs::read_to_string(path)
-        .map_err(|source| CliError::Read { path: path.to_path_buf(), source })?;
+    let read_error = |source| CliError::Read { path: path.to_path_buf(), source };
     match output {
-        Output::PassThrough => stdout.write_all(markdown.as_bytes()),
-        Output::Render(color) => mp_preview::preview(&markdown, &Options { width, color }, stdout),
+        // Read raw bytes so passing through works like `cat` even for files that
+        // are not valid UTF-8; only rendering needs the contents as text.
+        Output::PassThrough => {
+            let bytes = std::fs::read(path).map_err(read_error)?;
+            stdout.write_all(&bytes)
+        }
+        Output::Render(color) => {
+            let markdown = std::fs::read_to_string(path).map_err(read_error)?;
+            mp_preview::preview(&markdown, &Options { width, color }, stdout)
+        }
     }
     .map_err(CliError::WriteStdout)
 }
@@ -327,6 +334,23 @@ mod tests {
     }
 
     #[test]
+    fn run_passes_non_utf8_bytes_through_unchanged() -> io::Result<()> {
+        let bytes = b"caf\xe9\n";
+        let file = write_temp_markdown(bytes)?;
+        let cli = parse(&["--render", "never"], &file)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
+
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(stdout, bytes);
+        assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+        fs::remove_file(file)?;
+        Ok(())
+    }
+
+    #[test]
     fn run_renders_when_stdout_is_a_terminal() -> io::Result<()> {
         let output = run_on("# Title\n", &[], Env { stdout_is_terminal: true, ..Env::default() })?;
 
@@ -465,7 +489,7 @@ mod tests {
         Env::default()
     }
 
-    fn write_temp_markdown(contents: &str) -> io::Result<PathBuf> {
+    fn write_temp_markdown(contents: impl AsRef<[u8]>) -> io::Result<PathBuf> {
         let path = unique_temp_path();
         fs::write(&path, contents)?;
         Ok(path)
