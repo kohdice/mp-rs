@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn shows_link_urls_and_titles_only_when_show_url_is_set() {
+    fn shows_link_urls_only_when_show_url_is_set() {
         let lines = lay_out("[t](u \"T\")\n", None);
 
         let muted = Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() };
@@ -249,6 +249,14 @@ mod tests {
             ]]
         );
         assert_eq!(plain("<https://x.test>\n", None), "https://x.test");
+    }
+
+    #[test]
+    fn shows_link_titles_even_when_the_url_is_hidden() {
+        assert_eq!(
+            plain("[https://example.com](https://example.com \"Example site\")\n", None),
+            "https://example.com — Example site"
+        );
     }
 
     #[test]
