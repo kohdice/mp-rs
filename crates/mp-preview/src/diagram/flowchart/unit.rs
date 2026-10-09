@@ -265,8 +265,8 @@ fn outer_chart(
 /// `mermaid-graphlib.js`). A link touching the subgraph's own frame is left out of the
 /// check: upstream keeps the direction then ("Link *to* subgraph1: subgraph1 direction is
 /// maintained" in the same section), as its `isDescendant` does not count a cluster among
-/// its own descendants, and a link between a member and its own frame is never drawn
-/// anyway.
+/// its own descendants; a link between the frame and something inside it is not drawn at
+/// all (see [`drop_own_frame_links`](super::own_frame::drop_own_frame_links)).
 fn own_direction(chart: &Flowchart, subgraph: usize, enclosing: Direction) -> Option<Direction> {
     let frame = chart.subgraphs.get(subgraph)?;
     // An empty subgraph's only member is the hidden node its frame is drawn around.

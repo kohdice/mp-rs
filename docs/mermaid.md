@@ -96,6 +96,10 @@ These are drawn differently:
   without links to the outside is laid out left to right, as inside `direction TB`. A
   browser lays it out top to bottom there, because Mermaid compares the subgraph's
   direction with `TB` as written and does not read `TD` as `TB` inside subgraphs.
+- A link between a subgraph and a node or subgraph inside it (`A --> s` where `A` is
+  inside `s`, in either direction) is not drawn, as in a browser; a browser still keeps
+  room in the subgraph for the hidden link, and here the subgraph is drawn as if the
+  link were not written.
 
 These render as the plain code block:
 
@@ -105,7 +109,7 @@ These render as the plain code block:
   1,000,000 cells.
 - Subgraphs laid out in a direction of their own, given by `direction` or crosswise,
   nested more than 32 deep.
-- A link between a subgraph and one of its own members (`A --> s` where `A` is inside
-  `s`).
+- `A -->|text| s` or `s -->|text| A`, where `A` is a node or subgraph inside `s`: the
+  link is not drawn, so the text has no line to ride, as with `~~~|text|`.
 - Charts whose subgraph frames keep changing size while links are fitted to their
   borders, which would otherwise make two links share a cell.

@@ -1,11 +1,13 @@
 //! Flowcharts (`flowchart` / `graph` diagrams): parse, collapse the subgraphs marked
-//! collapsed, lay out in layers, route the links, then draw.
+//! collapsed, drop the links between a subgraph and what lies inside it, lay out in
+//! layers, route the links, then draw.
 
 mod collapse;
 mod draw;
 mod label;
 mod layout;
 mod outline;
+mod own_frame;
 mod parse;
 mod route;
 mod styling;
@@ -32,15 +34,17 @@ fn signed(value: usize) -> Option<isize> {
     isize::try_from(value).ok()
 }
 
-/// Parses `source`, collapses its collapsed subgraphs, draws each subgraph laid out in a
-/// direction of its own as one box (see [`unit::embed_units`]) and the chart around them
-/// as [`render_chart`] does, under the frontmatter's title when it gives one, at the
-/// default spacing and then tighter ones until the drawing fits; unsupported when none
-/// does. A syntax error comes from parsing.
+/// Parses `source`, collapses its collapsed subgraphs, drops the links between a
+/// subgraph and what lies inside it (see [`own_frame::drop_own_frame_links`]), draws each
+/// subgraph laid out in a direction of its own as one box (see [`unit::embed_units`])
+/// and the chart around them as [`render_chart`] does, under the frontmatter's title
+/// when it gives one, at the default spacing and then tighter ones until the drawing
+/// fits; unsupported when none does. A syntax error comes from parsing.
 pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
     let front = parse::front_matter(source)?;
     let chart = parse::parse(front.body, front.first_line)?;
     let chart = collapse::collapse(chart).ok_or(Failure::Unsupported)?;
+    let chart = own_frame::drop_own_frame_links(chart)?;
     // A unit's drawing tightens along with the chart around it, so each step draws the
     // units again rather than embedding drawings made at the default spacing.
     for level in 0..layout::LEVELS {

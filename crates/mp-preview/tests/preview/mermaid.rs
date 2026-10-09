@@ -3722,8 +3722,68 @@ fn mermaid_label_on_a_link_into_a_subgraph_sits_before_the_frame() {
 }
 
 #[test]
-fn mermaid_link_from_a_member_to_its_own_subgraph_falls_back() {
-    let body = "flowchart LR\n    subgraph s\n    A\n    end\n    A --> s\n";
+fn mermaid_link_from_a_member_to_its_own_subgraph_is_dropped() {
+    assert_eq!(
+        mermaid("flowchart LR\n    subgraph s\n    A\n    end\n    A --> s\n"),
+        "┌─ s ───┐\n│ ┌───┐ │\n│ │ A │ │\n│ └───┘ │\n└───────┘"
+    );
+
+    let without = "flowchart LR\n    subgraph s\n    A\n    B\n    end\n";
+    assert_eq!(mermaid(&format!("{without}    A --> s\n")), drawn(without));
+}
+
+#[test]
+fn mermaid_link_from_a_subgraph_to_its_own_member_is_dropped() {
+    let without = "flowchart LR\n    subgraph s\n    A\n    B\n    end\n";
+
+    assert_eq!(mermaid(&format!("{without}    s --> A\n")), drawn(without));
+}
+
+#[test]
+fn mermaid_link_from_a_member_of_a_nested_subgraph_to_the_outer_subgraph_is_dropped() {
+    let without = "flowchart LR\n    subgraph t\n    subgraph s\n    A\n    end\n    B\n    end\n";
+
+    assert_eq!(mermaid(&format!("{without}    A --> t\n")), drawn(without));
+}
+
+#[test]
+fn mermaid_link_between_a_subgraph_and_a_subgraph_nested_in_it_is_dropped() {
+    let without = "flowchart LR\n    subgraph t\n    subgraph s\n    A\n    end\n    B\n    end\n";
+    let expected = drawn(without);
+
+    for link in ["t --> s", "s --> t"] {
+        assert_eq!(mermaid(&format!("{without}    {link}\n")), expected, "{link}");
+    }
+}
+
+#[test]
+fn mermaid_dropped_link_keeps_its_link_style_index() {
+    let body = |index: usize| {
+        format!(
+            "flowchart LR\n    subgraph s\n    A\n    end\n    A --> s\n    B --> C\n    linkStyle {index} stroke-width:4px\n"
+        )
+    };
+
+    let line_between_b_and_c = |output: &str| {
+        output.lines().find_map(|line| {
+            line.split_once("│ B │")
+                .and_then(|(_, after)| after.split_once("►│ C │"))
+                .map(|(link, _)| link.to_owned())
+        })
+    };
+
+    for (index, glyph) in [(1, '━'), (0, '─')] {
+        let output = drawn(&body(index));
+        let Some(link) = line_between_b_and_c(&output) else {
+            panic!("no link from B to C in\n{output}");
+        };
+        assert!(!link.is_empty() && link.chars().all(|c| c == glyph), "{index}:\n{output}");
+    }
+}
+
+#[test]
+fn mermaid_labelled_link_from_a_member_to_its_own_subgraph_falls_back() {
+    let body = "flowchart LR\n    subgraph s\n    A\n    B\n    end\n    A -->|yes| s\n";
 
     assert_eq!(mermaid(body), unsupported(body), "{body}");
 }
