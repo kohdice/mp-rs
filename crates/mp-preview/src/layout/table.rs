@@ -125,7 +125,7 @@ fn table_total_width(widths: &[usize]) -> usize {
     widths.iter().sum::<usize>() + 3 * widths.len() + 1
 }
 
-/// Shrinks the tallest columns toward the next-tallest level until the table
+/// Shrinks the widest columns toward the next-widest width until the table
 /// fits in `available`, never dropping a column below the minimum width.
 ///
 /// Lowering tied columns together bounds the number of iterations by the column
@@ -143,18 +143,18 @@ fn shrink_to_fit(widths: &mut [usize], available: usize) {
         else {
             return;
         };
-        let next_level = widths
+        let next_width = widths
             .iter()
             .copied()
             .filter(|width| *width < max)
             .max()
             .unwrap_or(MIN_COLUMN_WIDTH)
             .max(MIN_COLUMN_WIDTH);
-        let tallest = widths.iter().filter(|width| **width == max).count();
-        let headroom = max - next_level;
-        let batch = overflow.min(tallest.saturating_mul(headroom));
-        let base_step = batch / tallest;
-        let mut extra_steps = batch % tallest;
+        let widest_count = widths.iter().filter(|width| **width == max).count();
+        let headroom = max - next_width;
+        let batch = overflow.min(widest_count.saturating_mul(headroom));
+        let base_step = batch / widest_count;
+        let mut extra_steps = batch % widest_count;
         for width in widths.iter_mut() {
             if *width == max {
                 let extra_step = if extra_steps > 0 {
