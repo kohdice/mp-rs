@@ -1,8 +1,10 @@
-//! Mermaid flowchart drawings, checked through the plain-text output of [`mp_preview::preview`].
+//! Mermaid flowchart drawings, checked through the output of [`preview`]: plain text,
+//! except where a test checks colors.
 
 use std::ops::Range;
 
 use crate::common::plain;
+use mp_preview::{ColorMode, Options, preview};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const A_TO_B: &str = "┌───┐     ┌───┐\n│ A │────►│ B │\n└───┘     └───┘";
@@ -405,10 +407,24 @@ fn mermaid_semicolons_comments_and_missing_spaces_are_accepted() {
 }
 
 #[test]
-fn mermaid_style_directives_do_not_change_the_drawing() {
+fn mermaid_style_statements_and_click_do_not_change_the_plain_drawing() {
     let body = "flowchart LR\n    A:::hot --> B\n    style A fill:#f9f\n    classDef hot fill:#f00\n    class B hot\n    linkStyle 0 stroke:red\n    click A href \"https://example.com\"\n";
 
     assert_eq!(mermaid(body), mermaid(LR_A_TO_B));
+}
+
+#[test]
+fn preview_colors_a_styled_mermaid_node_in_ansi_mode() {
+    let mut output = Vec::new();
+    preview(
+        "```mermaid\nflowchart LR\n    A --> B\n    style A stroke:#ff0000\n```\n",
+        &Options { width: None, color: ColorMode::Ansi },
+        &mut output,
+    )
+    .unwrap_or_else(|error| panic!("preview failed: {error}"));
+    let text = String::from_utf8(output).unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(text.contains("38;2;255;0;0"), "{text:?}");
 }
 
 #[test]

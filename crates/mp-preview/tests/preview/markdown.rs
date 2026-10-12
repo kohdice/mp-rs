@@ -54,20 +54,6 @@ fn preview_emits_escape_sequences_in_ansi_mode() {
 }
 
 #[test]
-fn preview_colors_a_styled_mermaid_node_in_ansi_mode() {
-    let mut output = Vec::new();
-    preview(
-        "```mermaid\nflowchart LR\n    A --> B\n    style A stroke:#ff0000\n```\n",
-        &Options { width: None, color: ColorMode::Ansi },
-        &mut output,
-    )
-    .unwrap_or_else(|error| panic!("preview failed: {error}"));
-    let text = String::from_utf8(output).unwrap_or_else(|error| panic!("{error}"));
-
-    assert!(text.contains("38;2;255;0;0"), "{text:?}");
-}
-
-#[test]
 fn preview_writes_earlier_blocks_before_later_ones_fail() {
     let mut writer = FirstWriteOnly { bytes: Vec::new(), writes: 0 };
 
@@ -337,6 +323,11 @@ fn code_blocks_are_never_wrapped() {
     let output = plain(&format!("```\n{code_line}\n```\n"), Some(20));
 
     assert_eq!(output, format!("```\n{code_line}\n```\n"));
+}
+
+#[test]
+fn code_block_expands_tabs_to_four_column_stops() {
+    assert_eq!(plain("```\n\tx\nab\tc\n```\n", None), "```\n    x\nab  c\n```\n");
 }
 
 #[test]

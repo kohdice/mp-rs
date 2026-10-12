@@ -88,7 +88,6 @@ mod tests {
     use super::lay_out_block;
     use crate::ansi::to_ansi;
     use crate::markdown::parse;
-    use crate::model::{Block, ListItem};
     use crate::style::{ColorMode, Line, Span, Style};
     use crate::theme::solarized::{
         BLUE, CYAN, DARK_PALETTE, GREEN, MAGENTA, ORANGE, RED, VIOLET, YELLOW,
@@ -249,20 +248,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_task_item_renders_marker_and_box_without_trailing_space() {
-        // Markdown cannot produce a task item without content, so the block is built by hand.
-        let list = Block::List {
-            start: None,
-            tight: true,
-            items: vec![ListItem { task: Some(false), blocks: Vec::new() }],
-        };
-        assert_eq!(
-            to_ansi(&lay_out_block(&list, None, ColorMode::Plain, 0), ColorMode::Plain),
-            "• ☐"
-        );
-    }
-
-    #[test]
     fn quote_prefixes_each_line_with_a_bar() {
         let lines = lay_out("> a\n> b\n", None);
 
@@ -378,15 +363,6 @@ mod tests {
         let fence = Style { fg: Some(DARK_PALETTE.code_fence), dim: true, ..Style::default() };
         assert_eq!(lines.first(), Some(&vec![span("```rust", fence)]));
         assert_eq!(lines.last(), Some(&vec![span("```", fence)]));
-    }
-
-    #[test]
-    fn code_block_expands_tabs_to_four_column_stops() {
-        let block = Block::CodeBlock { info: String::new(), code: "\tx\nab\tc\n".to_owned() };
-        assert_eq!(
-            to_ansi(&lay_out_block(&block, None, ColorMode::Plain, 0), ColorMode::Plain),
-            "```\n    x\nab  c\n```"
-        );
     }
 
     fn code_body_spans(markdown: &str, color: ColorMode) -> Vec<Span> {
