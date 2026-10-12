@@ -19,7 +19,7 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
 - **Header and direction.** `flowchart`, `graph` or `flowchart-elk`, followed by `TB`,
   `TD`, `BT`, `LR`, `RL` or `BR`, or by `v`, `^`, `>` or `<`; no direction means
   top-down. `BR` is drawn top-down, as Mermaid draws it. Statements end at a line break
-  or `;`.
+  or `;` outside labels.
 - **Nodes.** A bare id, or an id with a bracketed label: `[ ]`, `( )`, `{ }`, `([ ])`,
   `[[ ]]`, `[( )]`, `(( ))`, `((( )))`, `{{ }}`, `> ]`, `[/ /]`, `[\ \]`, `[/ \]`,
   `[\ /]` and `(- -)`. `id@{ shape: …, label: … }` takes every shape name and alias

@@ -46,14 +46,15 @@ pub(super) fn without_comment_lines(source: &str) -> (String, Vec<usize>) {
 /// reports: at each line break and `;`, and drops the text [`passed_over`] names,
 /// ignoring line breaks, `;` and that text inside a double-quoted string (see
 /// [`starts_string`]), so that it may span lines as `flow.jison`'s `string` lexer state
-/// lets it, inside `@{ … }` shape data up to its closing brace (see [`shape_data_end`]),
-/// which upstream's `shapeData` lexer state reads across lines, and inside the text of a
-/// `-- text -->` link, from its `--`, `==` or `-.` to its closing link or the end of its
-/// statement, which upstream reads in its exclusive `edgeText` lexer states, where a `"`
-/// starts a string anywhere. The `;` closing an entity code such as `#quot;` splits
-/// nothing: upstream's `encodeEntities` in `packages/mermaid/src/utils.ts` replaces every
-/// `#\w+;` in the source before parsing it. Statements are slices of `source`, untrimmed,
-/// and may be empty.
+/// lets it, inside a label from its `[`, `(`, `{`, `|` or `>` to its closer, which
+/// upstream reads in its `text` and `trapText` lexer states, inside `@{ … }` shape data
+/// up to its closing brace (see [`shape_data_end`]), which upstream's `shapeData` lexer
+/// state reads across lines, and inside the text of a `-- text -->` link, from its `--`,
+/// `==` or `-.` to its closing link or the end of its statement, which upstream reads in
+/// its exclusive `edgeText` lexer states, where a `"` starts a string anywhere. The `;`
+/// closing an entity code such as `#quot;` splits nothing: upstream's `encodeEntities` in
+/// `packages/mermaid/src/utils.ts` replaces every `#\w+;` in the source before parsing
+/// it. Statements are slices of `source`, untrimmed, and may be empty.
 ///
 /// `source` comes without its comment lines (see [`without_comment_lines`]). A `%%` after
 /// a directive on the same line, with only blanks between, starts a comment and is
@@ -66,6 +67,14 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
     // string anywhere and `;` and `@{` are text. A link that closes on its line is passed
     // over whole below.
     let mut in_link_text = false;
+    // The label lexer states upstream has pushed and not yet popped, innermost last. `[`,
+    // `(` and `{` push `text` everywhere, as their rules are `<*>`, except that `[/` and
+    // `[\` push `trapText`. `|` pushes `text` outside a label and pops it inside one, as
+    // `<text>"|"` comes before `<*>"|"`, but is a character in `trapText`, whose `TEXT`
+    // rule holds it. The `>` opening an asymmetric label pushes `text` outside a label
+    // only. `]`, `)` and `}` pop whichever state is innermost. Upstream's `;` rule has no
+    // state prefix, so inside a label `;` and line breaks are text.
+    let mut labels: Vec<LabelState> = Vec::new();
     let mut line = 0;
     let (mut start_line, mut start) = (0, 0);
     // Where a `%%` comment cut the current statement short.
@@ -77,10 +86,8 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
     // How many name characters follow the last `#`, while they may still make an entity
     // code; `None` outside one.
     let mut entity_name: Option<usize> = None;
-    // Whether the current statement holds nothing but blanks so far. An accessibility
-    // statement is read only where a statement starts: this scanner does not track
-    // bracket labels, so "accDescr:" inside A[see accDescr: x] must stay text, as
-    // upstream's lexer keeps it in its text state.
+    // Whether the current statement holds nothing but blanks so far: `flow.jison`'s
+    // grammar admits an accessibility statement only as a whole statement.
     let mut blank = true;
     // Whether a statement with text, the header, has been split off.
     let mut after_header = false;
@@ -95,13 +102,44 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
         // the start of a statement.
         let mut restarts = false;
         match c {
-            '\n' => ends_statement = !in_quotes,
+            '\n' => ends_statement = !in_quotes && labels.is_empty(),
             _ if comment.is_some() => {}
             '"' if in_quotes => in_quotes = false,
             '"' => in_quotes = in_link_text || starts_string(source, index),
+            '[' if !in_quotes
+                && !in_link_text
+                && chars.peek().is_some_and(|&(_, next)| matches!(next, '/' | '\\')) =>
+            {
+                labels.push(LabelState::Trap);
+            }
+            '[' | '(' | '{' if !in_quotes && !in_link_text => labels.push(LabelState::Text),
+            ']' | ')' | '}' if !in_quotes && !in_link_text => {
+                labels.pop();
+            }
+            '|' if !in_quotes && !in_link_text => match labels.last() {
+                Some(LabelState::Text) => {
+                    labels.pop();
+                }
+                Some(LabelState::Trap) => {}
+                None => labels.push(LabelState::Text),
+            },
+            // The `>` closing an arrow belongs to its `LINK` token, and the header's `>`
+            // is a direction, read in upstream's `dir` lexer state.
+            '>' if !in_quotes
+                && !in_link_text
+                && labels.is_empty()
+                && after_header
+                && !source.get(..index).is_some_and(|before| {
+                    ["--", "==", ".-"].iter().any(|end| before.ends_with(end))
+                }) =>
+            {
+                labels.push(LabelState::Text);
+            }
             ';' => {
-                ends_statement =
-                    !in_quotes && !in_link_text && !entity_name.is_some_and(|length| length > 0);
+                ends_statement = !in_quotes
+                    && !in_link_text
+                    && labels.is_empty()
+                    && !entity_name.is_some_and(|length| length > 0);
             }
             '%' | 'a' if !in_quotes && !in_link_text => {
                 let rest = source.get(index..).unwrap_or_default();
@@ -126,7 +164,7 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
                     None => {}
                 }
             }
-            '-' | '=' if !in_quotes => {
+            '-' | '=' if !in_quotes && labels.is_empty() => {
                 // Upstream reads the text of a `-- text -->` link in exclusive lexer
                 // states (`edgeText` and its thick and dotted kin), where `@{`, `;` and
                 // `%%` are text, so a link closing on its line is passed over whole, and
@@ -156,6 +194,7 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
             }
             '@' if !in_quotes
                 && !in_link_text
+                && labels.is_empty()
                 && chars.peek().is_some_and(|&(_, next)| next == '{') =>
             {
                 // Unclosed shape data runs to the end of the source, for the statement to
@@ -199,6 +238,14 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
     let end = comment.unwrap_or(source.len());
     statements.push((start_line, source.get(start..end).unwrap_or_default()));
     statements
+}
+
+/// A label lexer state of upstream's `flow.jison` that [`split_statements`] tracks.
+enum LabelState {
+    /// `text`, pushed by `[`, `(`, `{`, `|` and `>`.
+    Text,
+    /// `trapText`, pushed by `[/` and `[\`.
+    Trap,
 }
 
 /// Whether `rest`, which starts a line after blanks, starts a comment: `%%` and a

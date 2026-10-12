@@ -411,6 +411,27 @@ fn mermaid_semicolons_comments_and_missing_spaces_are_accepted() {
 }
 
 #[test]
+fn mermaid_semicolon_inside_a_label_is_text() {
+    let node = mermaid("flowchart LR\n    A[Wait; retry] --> B\n");
+    let link = mermaid("flowchart LR\n    A -->|yes; go| B\n");
+    // A trapezoid label holds `|` as text, so the `;` after it is text as well.
+    let trapezoid = drawn("flowchart LR\n    A[/Wait|retry; go/] --> B\n");
+
+    assert!(is_lr_chain(&node, &["Wait; retry", "B"]), "{node}");
+    assert!(is_lr_chain(&link, &["A", "B"]), "{link}");
+    assert_label_on_line(&link, "yes; go");
+    assert!(trapezoid.contains("Wait|retry; go"), "{trapezoid}");
+}
+
+#[test]
+fn mermaid_semicolon_inside_an_asymmetric_label_is_text() {
+    assert_eq!(
+        mermaid("flowchart LR\n    A>Wait; retry] --> B\n"),
+        "╲──────────────┐     ┌───┐\n > Wait; retry │────►│ B │\n╱──────────────┘     └───┘"
+    );
+}
+
+#[test]
 fn mermaid_style_statements_and_click_do_not_change_the_plain_drawing() {
     let body = "flowchart LR\n    A:::hot --> B\n    style A fill:#f9f\n    classDef hot fill:#f00\n    class B hot\n    linkStyle 0 stroke:red\n    click A href \"https://example.com\"\n";
 
