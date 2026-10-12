@@ -171,32 +171,3 @@ const fn resolve_color_mode(color_policy: When, env: Env) -> ColorMode {
         When::Auto => ColorMode::Plain,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use mp_preview::ColorMode;
-
-    use super::{Env, When, resolve_color_mode};
-
-    #[test]
-    fn auto_with_no_color_set_downgrades_to_plain() {
-        assert_eq!(
-            resolve_color_mode(
-                When::Auto,
-                Env { no_color: true, stdout_is_terminal: true, ..Env::default() }
-            ),
-            ColorMode::Plain
-        );
-    }
-
-    #[test]
-    fn explicit_always_outranks_no_color() {
-        assert_eq!(
-            resolve_color_mode(
-                When::Always,
-                Env { no_color: true, stdout_is_terminal: true, ..Env::default() }
-            ),
-            ColorMode::Ansi
-        );
-    }
-}

@@ -177,6 +177,32 @@ fn run_renders_when_stdout_is_a_terminal() -> TestResult {
 }
 
 #[test]
+fn run_renders_plain_on_a_terminal_when_no_color_is_set() -> TestResult {
+    let output = run_on(
+        "# Title\n",
+        &[],
+        Env { no_color: true, stdout_is_terminal: true, ..Env::default() },
+    )?;
+
+    assert_eq!(output, "Title\n");
+    Ok(())
+}
+
+#[test]
+fn run_color_always_outranks_no_color_on_a_terminal() -> TestResult {
+    let output = run_on(
+        "# Title\n",
+        &["--color", "always"],
+        Env { no_color: true, stdout_is_terminal: true, ..Env::default() },
+    )?;
+
+    assert!(output.contains("Title"), "{output:?}");
+    assert!(!output.contains("# Title"), "{output:?}");
+    assert!(output.contains("\x1b["), "{output:?}");
+    Ok(())
+}
+
+#[test]
 fn run_passes_the_file_through_on_a_terminal_with_render_never() -> TestResult {
     let output = run_on(
         "# Title\n",
