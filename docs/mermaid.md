@@ -87,7 +87,8 @@ These are drawn differently:
   bold, italic, heavy and dotted are all shown.
 - `stroke:none`, `stroke:transparent` and `color:transparent` reset the border, line or
   text to the default color instead of hiding it; `fill:none` and `fill:transparent`
-  remove the fill.
+  remove the fill. A hex color with zero alpha (`#f000`, `#ff000000`) counts as
+  `transparent`; any other alpha is dropped.
 - On a shape open on the right, such as `brace`, `text` or `datastore`, `fill` colors
   only the label's characters.
 - FontAwesome tokens such as `fa:fa-car` are dropped from labels; a label made only of

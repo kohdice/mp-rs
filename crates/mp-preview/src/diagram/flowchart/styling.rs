@@ -116,10 +116,11 @@ fn without_important(value: &str) -> &str {
 const RESETS: [&str; 2] = ["none", "transparent"];
 
 /// What the color property value `value` sets: [`ColorSetting::Reset`] for one of
-/// `resets`, the color it names, or nothing for a value that is no color, which CSS
-/// drops.
+/// `resets`, which all hold `transparent`, or for a hex color with zero alpha, which a
+/// browser draws as `transparent`; the color it names; or nothing for a value that is
+/// no color, which CSS drops.
 fn paint(value: &str, resets: &[&str]) -> ColorSetting {
-    if resets.iter().any(|reset| reset.eq_ignore_ascii_case(value)) {
+    if resets.iter().any(|reset| reset.eq_ignore_ascii_case(value)) || has_zero_alpha(value) {
         return ColorSetting::Reset;
     }
     color(value).map_or(ColorSetting::Unset, ColorSetting::Color)
@@ -163,9 +164,19 @@ fn is_italic(value: &str) -> Option<bool> {
     }
 }
 
+/// Whether `value` is a `#rgba` or `#rrggbbaa` color whose alpha is zero.
+fn has_zero_alpha(value: &str) -> bool {
+    let alpha_digits = match value.strip_prefix('#').map(str::len) {
+        Some(4) => 1,
+        Some(8) => 2,
+        _ => return false,
+    };
+    color(value).is_some() && value.bytes().rev().take(alpha_digits).all(|byte| byte == b'0')
+}
+
 /// The color `value` names: `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`, whose alpha a
-/// terminal cannot show and which is dropped, or a CSS named color in any case. `None`
-/// for anything else.
+/// terminal cannot show and which is dropped unless it is zero (see [`paint`]), or a
+/// CSS named color in any case. `None` for anything else.
 fn color(value: &str) -> Option<Rgb> {
     let Some(hex) = value.strip_prefix('#') else {
         return NAMED_COLORS

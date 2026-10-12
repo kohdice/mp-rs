@@ -206,6 +206,19 @@ mod tests {
     }
 
     #[test]
+    fn mermaid_hex_color_with_zero_alpha_is_transparent() {
+        let box_styles = |fill: &str| {
+            let lines = mermaid_lines(&format!(
+                "flowchart LR\n    A:::c\n    classDef c fill:#f00\n    style A fill:{fill}\n"
+            ));
+            styles_in(&lines, 0..3, 0..5)
+        };
+
+        assert!(box_styles("#f00f").iter().any(|style| style.bg.is_some()));
+        assert_eq!(box_styles("#f000"), box_styles("transparent"));
+    }
+
+    #[test]
     fn mermaid_style_id_is_one_node_declared_when_new() {
         let body = "flowchart LR\n    A\n    style A,B stroke:#ff0000\n";
         let output = mermaid(body);
