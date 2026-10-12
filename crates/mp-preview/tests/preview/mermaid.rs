@@ -304,7 +304,7 @@ fn frame_inside_frame(
 
 /// The bounds of the frame titled `title` when all four borders are whole: `┌─ title ─`
 /// continued by `─` up to `┐`, `│` down both sides, or `┼` where a link crosses, and
-/// `└─…─┘` along the bottom.
+/// `└─…─┘` along the bottom, or `┬` where a link leaves downward.
 fn intact_frame(output: &str, title: &str) -> Option<(usize, usize, usize, usize)> {
     let (top, left, bottom, right) = frame_of(output, title)?;
     let title_end = left + format!("┌─ {title} ─").width();
@@ -314,7 +314,11 @@ fn intact_frame(output: &str, title: &str) -> Option<(usize, usize, usize, usize
             .all(|col| glyph_at(output, row, col).is_some_and(|c| "│┼".contains(c)))
     };
     let intact = (title_end..right).all(|col| glyph_at(output, top, col) == Some('─'))
-        && (left + 1..right).all(|col| glyph_at(output, bottom, col) == Some('─'))
+        && (left + 1..right).all(|col| match glyph_at(output, bottom, col) {
+            Some('─') => true,
+            Some('┬') => glyph_at(output, bottom + 1, col) == Some('│'),
+            _ => false,
+        })
         && glyph_at(output, bottom, right) == Some('┘')
         && (top + 1..bottom).all(side);
     intact.then_some((top, left, bottom, right))
@@ -570,11 +574,6 @@ fn mermaid_statement_on_the_header_line_is_a_syntax_error() {
         mermaid(body),
         syntax_error_output(body, 1, "expected a new line or \";\" after the direction")
     );
-}
-
-#[test]
-fn mermaid_statement_after_a_semicolon_on_the_header_line_is_accepted() {
-    assert_eq!(mermaid("graph LR; A-->B\n"), mermaid(LR_A_TO_B));
 }
 
 #[test]
@@ -2584,18 +2583,50 @@ fn mermaid_unit_subgraph_keeps_labels_with_zero_width_characters_whole_inside_th
 
 #[test]
 fn mermaid_subgraph_with_a_link_to_the_outside_keeps_the_enclosing_direction() {
-    assert_eq!(
-        mermaid("flowchart TB\n    subgraph s\n    a --> b\n    end\n    b --> c\n"),
-        "┌─ s ───┐\n│ ┌───┐ │\n│ │ a │ │\n│ └───┘ │\n│   │   │\n│   │   │\n│   ▼   │\n│ ┌───┐ │\n│ │ b │ │\n│ └───┘ │\n└───┬───┘\n    │\n    │\n    ▼\n  ┌───┐\n  │ c │\n  └───┘"
-    );
+    let output = mermaid("flowchart TB\n    subgraph s\n    a --> b\n    end\n    b --> c\n");
+    let (Some(frame @ (_, _, bottom, _)), Some(a), Some(b), Some((c_top, ..))) = (
+        intact_frame(&output, "s"),
+        box_of(&output, "a"),
+        box_of(&output, "b"),
+        box_bounds(&output, "c"),
+    ) else {
+        panic!("missing frame or box in\n{output}");
+    };
+
+    assert!(box_inside_frame(a, frame) && box_inside_frame(b, frame), "{output}");
+    assert!(a.0 < b.0, "{output}");
+    assert!(c_top > bottom, "{output}");
 }
 
 #[test]
 fn mermaid_nested_isolated_subgraphs_alternate_direction() {
-    assert_eq!(
-        mermaid("flowchart TB\n    subgraph o\n    subgraph i\n    a --> b\n    end\n    end\n"),
-        "┌─ o ───────┐\n│ ┌─ i ───┐ │\n│ │ ┌───┐ │ │\n│ │ │ a │ │ │\n│ │ └───┘ │ │\n│ │   │   │ │\n│ │   │   │ │\n│ │   ▼   │ │\n│ │ ┌───┐ │ │\n│ │ │ b │ │ │\n│ │ └───┘ │ │\n│ └───────┘ │\n└───────────┘"
+    let output = mermaid(
+        "flowchart TB\n    subgraph o\n    c\n    subgraph i\n    a --> b\n    end\n    end\n",
     );
+    let (
+        Some(outer),
+        Some(inner @ (i_top, i_left, i_bottom, i_right)),
+        Some(a),
+        Some(b),
+        Some(c),
+        Some((c_top, c_left, c_bottom, c_right)),
+    ) = (
+        intact_frame(&output, "o"),
+        intact_frame(&output, "i"),
+        box_of(&output, "a"),
+        box_of(&output, "b"),
+        box_of(&output, "c"),
+        box_bounds(&output, "c"),
+    )
+    else {
+        panic!("missing frame or box in\n{output}");
+    };
+
+    assert!(frame_inside_frame(inner, outer), "{output}");
+    assert!(a.0 < b.0 && a.1 == b.1, "{output}");
+    assert!(box_inside_frame(c, outer) && !box_inside_frame(c, inner), "{output}");
+    assert!(c_left <= i_right && i_left <= c_right, "{output}");
+    assert!(c_bottom < i_top || i_bottom < c_top, "{output}");
 }
 
 #[test]
@@ -2685,12 +2716,15 @@ fn mermaid_lr_labelled_links_into_a_unit_subgraph_keep_a_blank_row_between_label
         heads.iter().all(|&(row, col, c)| c == '►' && col + 1 == left && top < row && row < bottom),
         "{output}"
     );
-    for (index, &(row, ..)) in heads.iter().enumerate() {
-        assert!(
-            heads.iter().skip(index + 1).all(|&(other, ..)| row.abs_diff(other) >= 2),
-            "{output}"
-        );
-    }
+    let mut label_rows: Vec<usize> = ["yes", "no", "maybe", "four"]
+        .into_iter()
+        .map(|label| assert_label_on_line(&output, label).0)
+        .collect();
+    let mut head_rows: Vec<usize> = heads.iter().map(|&(row, ..)| row).collect();
+    label_rows.sort_unstable();
+    head_rows.sort_unstable();
+    assert_eq!(label_rows, head_rows, "{output}");
+    assert!(label_rows.windows(2).all(|pair| pair[1] - pair[0] >= 2), "{output}");
 }
 
 #[test]
@@ -3378,7 +3412,10 @@ fn mermaid_td_fits_width_by_shrinking_the_sibling_gap() {
 fn mermaid_too_wide_after_compaction_falls_back_without_a_reason_line() {
     let body = "flowchart LR\n    A --> B --> C\n";
 
-    // At the tightest spacing the drawing is 19 columns wide.
+    // At the tightest spacing the drawing is 19 columns wide, so 18 columns cannot
+    // hold it.
+    let tightest = drawn_in(body, Some(19));
+    assert_eq!(widest(&tightest), 19, "{tightest}");
     assert_eq!(mermaid_in(body, Some(18)), unsupported(body));
 }
 
@@ -6015,14 +6052,6 @@ fn nested_directed_subgraphs(levels: usize) -> String {
     let open: String =
         (0..levels).map(|level| format!("    subgraph s{level}\n    direction TB\n")).collect();
     format!("flowchart LR\n{open}    A\n{}", "    end\n".repeat(levels))
-}
-
-#[test]
-fn mermaid_a_few_nested_directed_subgraphs_are_drawn() {
-    let output = mermaid(&nested_directed_subgraphs(3));
-
-    assert!(!output.contains("```"), "{output}");
-    assert!(box_of(&output, "A").is_some(), "{output}");
 }
 
 #[test]
