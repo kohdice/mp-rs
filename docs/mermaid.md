@@ -30,18 +30,23 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   but not a `"` right after a `/` or `\` (`A[/a/"b/]`), which is a syntax error. An id
   may hold `:` and `,` (`ns:a`, `A,B`), as in Mermaid, while `:::` after an id
   attaches a class.
-- **Labels.** Quoted strings, which may span lines; markdown strings (`` "`…`" ``) with
+- **Labels.** Quoted strings, which may span lines; markdown strings (``"`…`"``) with
   bold and italic; `<br>` line breaks; entity codes such as `#quot;`, `#35;` and HTML
   names. A label may go on in plain text after a leading quoted string
   (`A["hi" there]`), which then decides whether the whole label is a markdown string;
   a second quoted string after it is a syntax error, as in Mermaid.
 - **Links.** `-->`, `---`, `-.->`, `-.-`, `==>`, `===`, `~~~`, with `o` and `x` ends and
-  `<` at the start for two-headed links; longer links (`--->`, up to 10 layers, as in
-  Mermaid); labels as `-->|text|` or `-- text -->`; chains (`A --> B --> C`); `&` groups
+  `<`, `o` or `x` at the start for two-headed links (`<-->`, `o--o`, `x--x`); a start
+  character that does not match the end is part of the line, and makes an `==` link a
+  normal one, as in Mermaid (`A <--- B` is `A ---- B`, `A <=== B` is `A ---- B`);
+  longer links (`--->`, up to 10 layers, as in Mermaid); labels as `-->|text|` or
+  `-- text -->`, but not both on one link; chains (`A --> B --> C`); `&` groups
   (`A & B --> C`), which need a blank on both sides of `&`, as in Mermaid; edge ids
-  (`A e1@--> B`). The text of `-- text -->` may hold
-  `( ) [ ] { } |`, but a `"` only as the start of a leading quoted string
-  (`A -- "hi" there --> B`), as in Mermaid; otherwise it is a syntax error.
+  (`A e1@--> B`). The text of `-- text -->` may hold `( ) [ ] { } |`, but a `"` only as
+  the start of a leading quoted string (`A -- "hi" there --> B`), as in Mermaid;
+  otherwise it is a syntax error. A `-- text -->` link without text (`A -- --> B`) is a
+  syntax error, as in Mermaid, and so is one whose start does not match its end
+  (`A o-- text --> B`; see below).
 - **Subgraphs.** `subgraph id [title]` … `end`, nested, or `subgraph title` without
   brackets, whose title may start with a quoted string and may not hold
   `( ) [ ] { } | < > , @ ~`, a link (`-->`, `---`, `~~~`, `-.-`, `==>`, …), the start of
@@ -103,6 +108,11 @@ These are drawn differently:
   inside `s`, in either direction) is not drawn, as in a browser; a browser still keeps
   room in the subgraph for the hidden link, and here the subgraph is drawn as if the
   link were not written.
+
+These are syntax errors here:
+
+- A `-- text -->` link whose start marker does not match its end (`A o-- text --> B`);
+  Mermaid stores it as an invalid link, and a browser's drawing of it is undefined.
 
 These render as the plain code block:
 

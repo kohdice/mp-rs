@@ -4826,6 +4826,49 @@ fn mermaid_unclosed_link_is_a_syntax_error() {
 }
 
 #[test]
+fn mermaid_malformed_text_link_is_a_syntax_error() {
+    let pipe = "flowchart LR\n    A -- text -->|more| B\n";
+    let empty = "flowchart LR\n    A -- --> B\n";
+
+    assert_eq!(mermaid(pipe), syntax_error_output(pipe, 2, "edge label after link text"));
+    assert_eq!(mermaid(empty), syntax_error_output(empty, 2, "link text is empty"));
+}
+
+#[test]
+fn mermaid_dotted_text_link_may_close_with_a_dash_or_extra_dots() {
+    assert_eq!(
+        mermaid("flowchart LR\n    A -. text ..-> B\n"),
+        drawn("flowchart LR\n    A -..->|text| B\n")
+    );
+    assert_eq!(
+        mermaid("flowchart LR\n    A -. text -.-> B\n"),
+        drawn("flowchart LR\n    A -.->|text| B\n")
+    );
+}
+
+#[test]
+fn mermaid_text_link_takes_its_heads_from_the_closing_token() {
+    assert_eq!(
+        mermaid("flowchart LR\n    A -- text o--o B\n"),
+        drawn("flowchart LR\n    A o--o|text| B\n")
+    );
+}
+
+#[test]
+fn mermaid_start_marker_without_a_matching_end_is_part_of_the_line() {
+    assert_eq!(mermaid("flowchart LR\n    A <--- B\n"), drawn("flowchart LR\n    A ---- B\n"));
+    assert_eq!(mermaid("flowchart LR\n    A o--> B\n"), drawn("flowchart LR\n    A ---> B\n"));
+    assert_eq!(
+        mermaid("flowchart LR\n    A -- text o--> B\n"),
+        drawn("flowchart LR\n    A --->|text| B\n")
+    );
+    assert_eq!(
+        mermaid("flowchart LR\n    A -. text o.-> B\n"),
+        drawn("flowchart LR\n    A -.->|text| B\n")
+    );
+}
+
+#[test]
 fn mermaid_edge_id_before_a_link_renders_the_link() {
     assert_eq!(mermaid("flowchart LR\n    A e1@--> B\n"), A_TO_B);
     assert_eq!(mermaid("flowchart LR\n    A e1@-- yes --> B\n"), A_YES_B);

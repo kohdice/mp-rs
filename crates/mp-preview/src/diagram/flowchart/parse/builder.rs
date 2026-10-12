@@ -229,7 +229,8 @@ impl<'a> Builder<'a> {
             let with_id = edge_id(rest)
                 .and_then(|(id, after_id)| Some((Some(id), link(after_id)?)))
                 .or_else(|| Some((None, link(rest)?)));
-            let Some((id, (Link { stroke, tail, head, label, length }, after_link))) = with_id
+            let Some((id, (Link { stroke, tail, head, label, length, mismatched }, after_link))) =
+                with_id
             else {
                 // Line characters that do not make a whole link are a syntax error in
                 // Mermaid, and so is anything else where a link should be, but for an id
@@ -244,6 +245,9 @@ impl<'a> Builder<'a> {
                 }
                 return Err(syntax_error(line, "expected a link"));
             };
+            if mismatched {
+                return Err(syntax_error(line, "link start and end markers do not match"));
+            }
             // An id that an earlier link already took names no link here, as upstream's
             // `addSingleLink` gives a repeated id a generated one instead.
             let mut id = id.filter(|&id| self.edge_ids.insert(id));
@@ -252,6 +256,10 @@ impl<'a> Builder<'a> {
                 // that is not drawn has no line to carry the text, so the block falls
                 // back rather than dropping the text.
                 Some(_) if !stroke.is_visible() => return Err(Failure::Unsupported),
+                // Upstream's `START_LINK edgeText LINK` takes no `arrowText` after it.
+                Some(_) if label.is_some() => {
+                    return Err(syntax_error(line, "edge label after link text"));
+                }
                 Some(after_pipe) => {
                     let (label, after_label) = bracket_label(after_pipe, "|")
                         .ok_or_else(|| syntax_error(line, "unclosed edge label"))?;

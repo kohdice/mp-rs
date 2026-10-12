@@ -124,11 +124,16 @@ pub(super) fn check_trap_label(line: usize, label: &str) -> Result<(), Failure> 
     ))
 }
 
-/// Checks that the text of a `-- text -->` link on `line`, if any, holds no `"` outside
-/// a double-quoted string it starts with, as `flow.jison`'s `edgeText` rule accepts a
-/// string only at its start. Brackets and `|` are text here.
+/// Checks that the text of a `-- text -->` link on `line`, if any, is not blank and holds
+/// no `"` outside a double-quoted string it starts with. `flow.jison`'s `edgeText` needs
+/// one token at least, and `START_LINK` takes the blanks after it, so `A -- --> B` has
+/// none; its `edgeText` rule accepts a string only at its start. Brackets and `|` are
+/// text here.
 pub(super) fn check_link_text(line: usize, text: Option<&str>) -> Result<(), Failure> {
     let Some(text) = text else { return Ok(()) };
+    if text.trim().is_empty() {
+        return Err(syntax_error(line, "link text is empty"));
+    }
     let unquoted = leading_string(text).map_or(text, |(_, rest)| rest);
     if !unquoted.contains('"') {
         return Ok(());
