@@ -63,7 +63,13 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
 - **Frontmatter.** A `---` block on the first line; its `title` is drawn above the
   diagram.
 - **Styling.** `style`, `classDef` (including `default` and `node`), `class`, `:::` and
-  `linkStyle` (indexes, lists and `default`).
+  `linkStyle` (indexes, lists and `default`). A property list may hold only the
+  characters of Mermaid's style tokens: letters, digits, blanks and
+  ``! " # $ % & ' * + , - . / : = ? \ _ ` ``; any other, such as the `(` of
+  `fill:rgb(255,0,0)`, is a syntax error, as in Mermaid. So are a `"`, `&` or `*`
+  starting a word, a word that is just `v`, and `--`, `-.`, `->` or `==` anywhere
+  (`font-family:"Arial"`, `stroke-dasharray:5--5`), while `fill:violet` and `fill:a"b`
+  are accepted, as in Mermaid.
 - **Other statements.** `%%` comment lines, `%%{init: …}%%` directives,
   `accTitle` / `accDescr`, `click`.
 

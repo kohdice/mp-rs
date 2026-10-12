@@ -115,9 +115,10 @@ impl<'a> Builder<'a> {
             // `addVertex`, which declares a node; a node whose id names a subgraph is
             // turned into that subgraph by `resolve_subgraph_ids`, as upstream's
             // `getData` merges the two.
+            let styling = Styling::parse(property_list(line, without_color_semicolon(list))?);
             self.declare(id);
             let styles = self.styles.entry(id).or_default();
-            *styles = styles.then(Styling::parse(without_color_semicolon(list)));
+            *styles = styles.then(styling);
             return Ok(());
         }
         if let Some((names, list)) = keyword_statement(statement, "classDef") {
@@ -127,7 +128,7 @@ impl<'a> Builder<'a> {
             if list.is_empty() {
                 return Err(syntax_error(line, "classDef has no property list"));
             }
-            let styling = Styling::parse(without_color_semicolon(list));
+            let styling = Styling::parse(property_list(line, without_color_semicolon(list))?);
             for name in names.split(',') {
                 let class = self.class_defs.entry(name).or_default();
                 *class = class.then(styling);
@@ -166,7 +167,7 @@ impl<'a> Builder<'a> {
             }
             // Each statement replaces the style it names, as upstream's `updateLink`
             // assigns the list rather than appending to it.
-            let styling = Styling::parse(list);
+            let styling = Styling::parse(property_list(line, list)?);
             let Some(indexes) = indexes else {
                 self.default_link_style = styling;
                 return Ok(());
@@ -643,6 +644,48 @@ fn without_color_semicolon(list: &str) -> &str {
             .is_some_and(|after| after.chars().take_while(|c| !c.is_whitespace()).any(|c| c == '#'))
     });
     if color_after_colon { before } else { list }
+}
+
+/// The property `list` of a `style`, `classDef` or `linkStyle` statement on `line`, or a
+/// syntax error quoting the first character or pair that no token of upstream's
+/// `styleComponent` (`NUM`, `NODE_STRING`, `COLON`, `SPACE`, `BRKT`, `STYLE`) nor the
+/// `COMMA` between declarations reads: a character outside those tokens, such as the `(`
+/// of `fill:rgb(255,0,0)`, which upstream lexes as a label opener; a `"`, `&` or `*`
+/// starting a word, or a word that is just `v`, which upstream lexes as a string, `AMP`,
+/// `MULT` or `DOWN`; and `--`, `-.`, `->` or `==` anywhere, where `NODE_STRING`'s
+/// lookaheads end the word and a link token follows. A word starts the list or follows a
+/// blank, `:` or `,`. A `;` reaches here only where the statement splitter kept it after
+/// an entity code.
+///
+/// Upstream's lexer takes the first rule that matches, and jison appends `\b` to a
+/// pattern ending in a word character, so `"v"` (`DOWN`) matches only a whole word
+/// while `"&"`, `"*"` and `["]` match at any token start; inside a word `NODE_STRING`
+/// has already taken them.
+fn property_list(line: usize, list: &str) -> Result<&str, Failure> {
+    let held = |c: char| {
+        c.is_ascii_alphanumeric()
+            || "!\"#$%&'*+,-./:;=?\\_`".contains(c)
+            || (c.is_whitespace() && !matches!(c, '\n' | '\r'))
+    };
+    let is_word_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut previous: Option<char> = None;
+    let mut chars = list.chars().peekable();
+    while let Some(c) = chars.next() {
+        let next = chars.peek().copied();
+        let starts_word = previous.is_none_or(|p| p.is_whitespace() || matches!(p, ':' | ','));
+        let rejected = match (c, next) {
+            _ if !held(c) => Some(c.to_string()),
+            ('-', Some(n @ ('-' | '.' | '>'))) | ('=', Some(n @ '=')) => Some(format!("{c}{n}")),
+            ('"' | '&' | '*', _) if starts_word => Some(c.to_string()),
+            ('v', _) if starts_word && !next.is_some_and(is_word_char) => Some(c.to_string()),
+            _ => None,
+        };
+        if let Some(rejected) = rejected {
+            return Err(syntax_error(line, format!("property list holds \"{rejected}\"")));
+        }
+        previous = Some(c);
+    }
+    Ok(list)
 }
 
 /// The link index `position` of a `linkStyle` statement on `line`, after `links` links:

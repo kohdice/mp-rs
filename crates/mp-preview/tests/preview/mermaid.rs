@@ -512,6 +512,31 @@ fn mermaid_thick_link_turns_with_heavy_corners() {
 }
 
 #[test]
+fn mermaid_style_value_outside_the_style_tokens_is_a_syntax_error() {
+    for statement in ["style A", "classDef c", "linkStyle 0"] {
+        for (list, held) in [
+            ("fill:rgb(255,0,0)", "("),
+            ("font-family:\"Arial\"", "\""),
+            ("fill:#f00[", "["),
+            ("fill:&foo", "&"),
+            ("fill:v", "v"),
+            ("stroke-dasharray:5--5", "--"),
+            ("fill:==x", "=="),
+        ] {
+            let body = format!("flowchart LR\n    A --> B\n    {statement} {list}\n");
+            let message = format!("property list holds \"{held}\"");
+
+            assert_eq!(mermaid(&body), syntax_error_output(&body, 3, &message), "{body}");
+        }
+        for list in ["stroke-width:2px,fill:#f9f", "fill:violet", "fill:a\"b"] {
+            let body = format!("flowchart LR\n    A --> B\n    {statement} {list}\n");
+
+            assert_eq!(mermaid(&body), mermaid(LR_A_TO_B), "{body}");
+        }
+    }
+}
+
+#[test]
 fn mermaid_style_or_class_def_without_a_property_list_is_a_syntax_error() {
     for (statement, message) in [
         ("style A", "style has no property list"),
