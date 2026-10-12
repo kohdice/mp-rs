@@ -308,7 +308,12 @@ impl<'a> Builder<'a> {
     fn open_subgraph(&mut self, line: usize, text: &'a str) -> Result<(), Failure> {
         let text = text.trim();
         let quoted = text.strip_prefix('"').and_then(|rest| rest.split_once('"'));
-        let (id, after_id) = quoted.unwrap_or_else(|| split_id(text));
+        // Upstream reads a subgraph id as `textNoTags`, which, unlike a node's
+        // `idString`, holds no `COMMA`.
+        let (id, after_id) = quoted.unwrap_or_else(|| {
+            let (id, _) = split_id(text);
+            text.split_at(id.find(',').unwrap_or(id.len()))
+        });
         let (id, title) = match after_id.trim_start().strip_prefix('[') {
             Some(after_open) => {
                 let (title, _) = bracket_label(after_open, "]")

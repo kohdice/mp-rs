@@ -27,12 +27,20 @@ pub(super) const BRACKETS: [(&str, &[(&str, Shape)]); 13] = [
 ];
 
 /// Splits the longest id prefix off `text`; the id is empty when `text` does not start
-/// with an id character.
+/// with an id character. An id is upstream's `idString`, which joins `NODE_STRING`
+/// characters (see [`is_id_char`]) with `COLON` and `COMMA` tokens. A `:` starting
+/// `:::` ends the id, as the lexer reads `:::` as `STYLE_SEPARATOR` before `:`.
 pub(super) fn split_id(text: &str) -> (&str, &str) {
     let end = text
         .char_indices()
         .find(|&(index, c)| {
-            !is_id_char(c, text.get(index + c.len_utf8()..).and_then(|after| after.chars().next()))
+            let after = text.get(index + c.len_utf8()..).unwrap_or_default();
+            let joins = match c {
+                ',' => true,
+                ':' => !after.starts_with("::"),
+                _ => is_id_char(c, after.chars().next()),
+            };
+            !joins
         })
         .map_or(text.len(), |(index, _)| index);
     text.split_at(end)

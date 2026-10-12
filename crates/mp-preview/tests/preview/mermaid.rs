@@ -432,6 +432,15 @@ fn mermaid_semicolon_inside_an_asymmetric_label_is_text() {
 }
 
 #[test]
+fn mermaid_id_may_hold_colons_and_commas() {
+    let colon = mermaid("flowchart LR\n    ns:a --> B\n");
+    let comma = mermaid("flowchart LR\n    A,B --> C\n");
+
+    assert!(is_lr_chain(&colon, &["ns:a", "B"]), "{colon}");
+    assert!(is_lr_chain(&comma, &["A,B", "C"]), "{comma}");
+}
+
+#[test]
 fn mermaid_style_statements_and_click_do_not_change_the_plain_drawing() {
     let body = "flowchart LR\n    A:::hot --> B\n    style A fill:#f9f\n    classDef hot fill:#f00\n    class B hot\n    linkStyle 0 stroke:red\n    click A href \"https://example.com\"\n";
 
@@ -2520,6 +2529,28 @@ fn mermaid_unclosed_subgraph_is_a_syntax_error() {
     let body = "flowchart LR\n    subgraph s\n    A\n";
 
     assert_eq!(mermaid(body), syntax_error_output(body, 2, "subgraph is not closed with \"end\""));
+}
+
+#[test]
+fn mermaid_subgraph_id_may_hold_colons_but_not_commas() {
+    let comma = "flowchart LR\n    subgraph a,b[T]\n    x\n    end\n";
+    assert_eq!(
+        mermaid(comma),
+        syntax_error_output(
+            comma,
+            2,
+            "unquoted subgraph title contains ( ) [ ] { } | < > , @ ~ or a link; wrap the title in double quotes",
+        )
+    );
+
+    let colon = mermaid("flowchart LR\n    subgraph a:b[T]\n    x\n    end\n    a:b --> y\n");
+    let (Some(frame), Some(x)) = (intact_frame(&colon, "T"), box_of(&colon, "x")) else {
+        panic!("missing frame or box in\n{colon}");
+    };
+
+    assert!(box_inside_frame(x, frame), "{colon}");
+    assert_eq!(box_of(&colon, "a:b"), None, "{colon}");
+    assert_eq!(colon, mermaid("flowchart LR\n    subgraph s[T]\n    x\n    end\n    s --> y\n"));
 }
 
 #[test]
