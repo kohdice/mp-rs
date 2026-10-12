@@ -167,6 +167,23 @@ fn run_passes_non_utf8_bytes_through_unchanged() -> TestResult {
 }
 
 #[test]
+fn run_reports_a_non_utf8_file_as_unreadable_when_rendering() -> TestResult {
+    let file = TempMarkdown::new(b"caf\xe9\n")?;
+    let cli = parse(&["--render", "always"], file.path())?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    let exit_code = run(&cli, &mut stdout, &mut stderr, Env::default());
+
+    assert_eq!(exit_code, ExitCode::FAILURE);
+    assert!(stdout.is_empty());
+    let diagnostic = String::from_utf8(stderr)?;
+    assert!(diagnostic.starts_with("mp: unable to read '"), "{diagnostic:?}");
+    assert!(diagnostic.contains(&format!("'{}'", file.path().display())), "{diagnostic:?}");
+    Ok(())
+}
+
+#[test]
 fn run_renders_when_stdout_is_a_terminal() -> TestResult {
     let output = run_on("# Title\n", &[], Env { stdout_is_terminal: true, ..Env::default() })?;
 
