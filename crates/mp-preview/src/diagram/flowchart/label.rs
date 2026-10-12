@@ -164,9 +164,8 @@ pub(super) struct Label {
 impl Label {
     /// The label written as `source`, which may be a double-quoted string: a markdown
     /// string when its content is wrapped in backticks (see [`Label::markdown`]), and
-    /// otherwise a row for each part between line breaks (see [`split_rows`]), the source
-    /// lines a quoted string spans joined by a space, its text normalised by
-    /// [`label_text`].
+    /// otherwise a row for each part between line breaks (see [`Label::text`]), its text
+    /// normalised by [`label_text`].
     pub(super) fn parse(source: &str) -> Self {
         let text = unquoted(source);
         if text.len() < source.len() { Self::string(text) } else { Self::text(text) }
@@ -200,11 +199,15 @@ impl Label {
     }
 
     /// A row for each part of `text` between line breaks, without FontAwesome icons (see
-    /// [`without_icons`]).
+    /// [`without_icons`]). A source line break and the two characters `\n` break a row
+    /// as `<br>` does (see [`split_rows`]): upstream's `nonMarkdownToHTML` replaces both
+    /// with `<br />`. The blanks and line breaks at both ends are dropped, as upstream's
+    /// `addVertex` and `addSingleLink` trim the text.
     fn text(text: &str) -> Self {
-        let rows = split_rows(text)
+        let text = text.trim().replace("\\n", "<br>").replace('\n', "<br>");
+        let rows = split_rows(&text)
             .into_iter()
-            .map(|row| vec![Run::plain(label_text(&without_icons(&joined_lines(row))))]);
+            .map(|row| vec![Run::plain(label_text(&without_icons(row)))]);
         Self { rows: rows.collect() }
     }
 
@@ -377,7 +380,14 @@ fn without_icon_runs(row: Row) -> Row {
 /// `/<\/?br\s*\/?>/gi`: `<br>`, `<br/>`, `<br />` and `</br>` in any case, with any
 /// blanks before the closing `/` or `>`. The blanks around a break are dropped, as a
 /// browser drops them at the ends of a line.
-fn split_rows(source: &str) -> Vec<&str> {
+fn split_rows<'s>(source: &'s str) -> Vec<&'s str> {
+    let push = |rows: &mut Vec<&'s str>, row: &'s str| match rows.last_mut() {
+        Some(previous) => {
+            *previous = previous.trim_end();
+            rows.push(row.trim_start());
+        }
+        None => rows.push(row),
+    };
     let mut rows = Vec::new();
     let mut start = 0;
     for (at, _) in source.match_indices('<') {
@@ -385,16 +395,16 @@ fn split_rows(source: &str) -> Vec<&str> {
             continue;
         }
         let Some(length) = source.get(at..).and_then(line_break_length) else { continue };
-        rows.push(source.get(start..at).unwrap_or_default());
+        push(&mut rows, source.get(start..at).unwrap_or_default());
         start = at + length;
     }
     // A last break ends the row before it without starting another, as in HTML, unless
     // nothing else is written: a lone `<br>` is one empty row.
     let rest = source.get(start..).unwrap_or_default();
     if rows.is_empty() || !rest.trim().is_empty() {
-        rows.push(rest);
+        push(&mut rows, rest);
     }
-    trimmed_at_breaks(rows)
+    rows
 }
 
 /// The length in bytes of the line break tag `text` starts with, if it starts with one
@@ -407,30 +417,6 @@ fn line_break_length(text: &str) -> Option<usize> {
     let rest = rest.strip_prefix('/').unwrap_or(rest);
     let rest = rest.strip_prefix('>')?;
     Some(text.len() - rest.len())
-}
-
-/// `text` with the source lines a quoted string spans joined by one space, the blanks
-/// around each line break dropped, as upstream's HTML label collapses them.
-fn joined_lines(text: &str) -> Cow<'_, str> {
-    if !text.contains('\n') {
-        return Cow::Borrowed(text);
-    }
-    Cow::Owned(trimmed_at_breaks(text.split('\n').collect()).join(" "))
-}
-
-/// `parts`, the pieces of a text cut at line breaks, without the blanks next to a break:
-/// those at the end of every part but the last and at the start of every part but the
-/// first.
-fn trimmed_at_breaks(parts: Vec<&str>) -> Vec<&str> {
-    let last = parts.len().saturating_sub(1);
-    parts
-        .into_iter()
-        .enumerate()
-        .map(|(index, part)| {
-            let part = if index > 0 { part.trim_start() } else { part };
-            if index < last { part.trim_end() } else { part }
-        })
-        .collect()
 }
 
 /// A piece of a markdown string's row: text, or a run of one emphasis character.
@@ -454,8 +440,10 @@ struct Delimiter {
 /// when a non-blank follows it and close emphasis when a non-blank precedes it, an `_`
 /// only at a word's edge; a closing run pairs with the nearest opening run of the same
 /// character before it, two markers at a time for bold when both have two, otherwise
-/// one for italic. Markers left unpaired are shown as written. The text is normalised
-/// by [`label_text`].
+/// one for italic. Markers left unpaired are shown as written. A backslash before an
+/// ASCII punctuation character is not shown and makes that character plain text, so
+/// `\*` marks nothing and `\\` is one backslash, as `marked` reads CommonMark's
+/// backslash escapes. The text is normalised by [`label_text`].
 fn emphasis_runs(row: &str) -> Row {
     let (pieces, depth) = pair_delimiters(delimiter_pieces(row));
     let mut runs: Row = Vec::new();
@@ -543,6 +531,13 @@ fn delimiter_pieces(row: &str) -> Vec<Piece> {
     let mut chars = row.chars().peekable();
     let mut previous: Option<char> = None;
     while let Some(c) = chars.next() {
+        if c == '\\'
+            && let Some(escaped) = chars.next_if(char::is_ascii_punctuation)
+        {
+            text.push(escaped);
+            previous = Some(escaped);
+            continue;
+        }
         if c != '*' && c != '_' {
             text.push(c);
             previous = Some(c);

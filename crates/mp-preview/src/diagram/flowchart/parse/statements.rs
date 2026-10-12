@@ -50,8 +50,8 @@ pub(super) fn without_comment_lines(source: &str) -> (String, Vec<usize>) {
 /// upstream reads in its `text` and `trapText` lexer states, inside `@{ … }` shape data
 /// up to its closing brace (see [`shape_data_end`]), which upstream's `shapeData` lexer
 /// state reads across lines, and inside the text of a `-- text -->` link, from its `--`,
-/// `==` or `-.` to its closing link or the end of its statement, which upstream reads in
-/// its exclusive `edgeText` lexer states, where a `"` starts a string anywhere. The `;`
+/// `==` or `-.` to its closing link or the end of `source`, which upstream reads in its
+/// exclusive `edgeText` lexer states, where a `"` starts a string anywhere. The `;`
 /// closing an entity code such as `#quot;` splits nothing: upstream's `encodeEntities` in
 /// `packages/mermaid/src/utils.ts` replaces every `#\w+;` in the source before parsing
 /// it. Statements are slices of `source`, untrimmed, and may be empty.
@@ -64,8 +64,8 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
     let mut in_quotes = false;
     // Whether the scanner is inside the text of a link that does not close on its line:
     // upstream reads it in the exclusive `edgeText` lexer state, where a `"` starts a
-    // string anywhere and `;` and `@{` are text. A link that closes on its line is passed
-    // over whole below.
+    // string anywhere and `;`, `@{` and line breaks are text. A link that closes on its
+    // line is passed over whole below.
     let mut in_link_text = false;
     // The label lexer states upstream has pushed and not yet popped, innermost last. `[`,
     // `(` and `{` push `text` everywhere, as their rules are `<*>`, except that `[/` and
@@ -102,7 +102,7 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
         // the start of a statement.
         let mut restarts = false;
         match c {
-            '\n' => ends_statement = !in_quotes && labels.is_empty(),
+            '\n' => ends_statement = !in_quotes && !in_link_text && labels.is_empty(),
             _ if comment.is_some() => {}
             '"' if in_quotes => in_quotes = false,
             '"' => in_quotes = in_link_text || starts_string(source, index),

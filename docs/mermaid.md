@@ -19,7 +19,7 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
 - **Header and direction.** `flowchart`, `graph` or `flowchart-elk`, followed by `TB`,
   `TD`, `BT`, `LR`, `RL` or `BR`, or by `v`, `^`, `>` or `<`; no direction means
   top-down. `BR` is drawn top-down, as Mermaid draws it. Statements end at a line break
-  or `;` outside labels.
+  or `;` outside labels and link text.
 - **Nodes.** A bare id, or an id with a bracketed label: `[ ]`, `( )`, `{ }`, `([ ])`,
   `[[ ]]`, `[( )]`, `(( ))`, `((( )))`, `{{ }}`, `> ]`, `[/ /]`, `[\ \]`, `[/ \]`,
   `[\ /]` and `(- -)`. `id@{ shape: …, label: … }` takes every shape name and alias
@@ -30,17 +30,20 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   but not a `"` right after a `/` or `\` (`A[/a/"b/]`), which is a syntax error. An id
   may hold `:` and `,` (`ns:a`, `A,B`), as in Mermaid, while `:::` after an id
   attaches a class.
-- **Labels.** Quoted strings, which may span lines; markdown strings (``"`…`"``) with
-  bold and italic; `<br>` line breaks; entity codes such as `#quot;`, `#35;` and HTML
-  names. A label may go on in plain text after a leading quoted string
-  (`A["hi" there]`), which then decides whether the whole label is a markdown string;
-  a second quoted string after it is a syntax error, as in Mermaid.
+- **Labels.** Quoted strings, which may span lines, each line a row, and so may
+  unquoted labels in brackets; markdown strings (``"`…`"``) with bold and italic, where
+  a backslash escapes the ASCII punctuation character after it (`\*` is a plain `*`);
+  `<br>` line breaks, and in labels other than markdown strings `\n` as well; entity
+  codes such as `#quot;`, `#35;` and HTML names. A label may go on in plain text after a
+  leading quoted string (`A["hi" there]`), which then decides whether the whole label is
+  a markdown string; a second quoted string after it is a syntax error, as in Mermaid.
 - **Links.** `-->`, `---`, `-.->`, `-.-`, `==>`, `===`, `~~~`, with `o` and `x` ends and
   `<`, `o` or `x` at the start for two-headed links (`<-->`, `o--o`, `x--x`); a start
   character that does not match the end is part of the line, and makes an `==` link a
   normal one, as in Mermaid (`A <--- B` is `A ---- B`, `A <=== B` is `A ---- B`);
   longer links (`--->`, up to 10 layers, as in Mermaid); labels as `-->|text|` or
-  `-- text -->`, but not both on one link; chains (`A --> B --> C`); `&` groups
+  `-- text -->`, but not both on one link, where the text of `-- text -->` may span
+  lines, each line a row; chains (`A --> B --> C`); `&` groups
   (`A & B --> C`), which need a blank on both sides of `&`, as in Mermaid; edge ids
   (`A e1@--> B`). The text of `-- text -->` may hold `( ) [ ] { } |`, but a `"` only as
   the start of a leading quoted string (`A -- "hi" there --> B`), as in Mermaid;
@@ -102,7 +105,9 @@ These are drawn differently:
 - A subgraph title with line breaks is drawn on one row.
 - Markdown strings are not wrapped automatically; they break only at written line
   breaks and `<br>`.
-- `@{ label: "…" }` values keep YAML escapes other than `\"` and `\\` as written.
+- `@{ label: "…" }` values keep YAML escapes other than `\"` and `\\` as written; `\n`
+  still breaks the row, as a decoded line break does, except in a markdown string, where
+  it stays as written.
 - An unknown entity code such as `#nosuch;` is shown as written.
 - A drawing too wide for the terminal first tightens its spacing, inside a subgraph laid
   out in a direction of its own as well as around it; a browser shrinks the picture

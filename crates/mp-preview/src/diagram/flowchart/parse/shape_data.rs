@@ -263,15 +263,42 @@ impl<'a> Scalar<'a> {
     /// The label the value gives: a quoted value is a string, which may be a markdown
     /// string, as a quoted label in brackets is. A line break in a double-quoted value
     /// breaks the label, as upstream's `shapeDataStr` lexer rule replaces each line break
-    /// and the blanks after it with `<br/>` before YAML reads the value; YAML folds one
-    /// in a single-quoted value to a blank.
+    /// and the blanks after it with `<br/>` before YAML reads the value; YAML folds the
+    /// line breaks of a single-quoted value (see [`folded_breaks`]).
     fn label(self) -> Label {
         match self {
             Self::Plain(text) => Label::parse(text),
             Self::DoubleQuoted(_) => Label::string(&breaks_as_tags(&self.text())),
-            Self::SingleQuoted(_) => Label::string(&self.text()),
+            Self::SingleQuoted(_) => Label::string(&folded_breaks(&self.text())),
         }
     }
+}
+
+/// `text` folded as YAML folds a flow scalar spanning lines: the blanks around each line
+/// break are dropped, a line break followed by a non-blank line becomes one space, and
+/// each blank line between two lines becomes one line break.
+fn folded_breaks(text: &str) -> Cow<'_, str> {
+    let Some((first, rest)) = text.split_once('\n') else {
+        return Cow::Borrowed(text);
+    };
+    let mut folded = first.to_owned();
+    let mut blank_lines = 0;
+    let mut lines = rest.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let line = line.trim_start();
+        if line.is_empty() && lines.peek().is_some() {
+            blank_lines += 1;
+            continue;
+        }
+        folded.truncate(folded.trim_end().len());
+        if blank_lines == 0 {
+            folded.push(' ');
+        }
+        folded.extend(std::iter::repeat_n('\n', blank_lines));
+        folded.push_str(line);
+        blank_lines = 0;
+    }
+    Cow::Owned(folded)
 }
 
 /// `text` with each line break and the blanks after it replaced by `<br/>`.

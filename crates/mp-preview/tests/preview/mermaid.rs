@@ -676,6 +676,14 @@ fn mermaid_line_break_in_a_single_quoted_shape_data_value_folds_to_a_blank() {
 }
 
 #[test]
+fn mermaid_blank_line_in_a_single_quoted_shape_data_value_breaks_the_label() {
+    assert_eq!(
+        mermaid("flowchart LR\n    A@{ label: 'a\n\n    b' }\n"),
+        mermaid("flowchart LR\n    A[\"a<br>b\"]\n")
+    );
+}
+
+#[test]
 fn mermaid_empty_shape_data_values_are_ignored() {
     for data in ["shape: ", "label: \"\" ", "label: "] {
         assert_eq!(
@@ -5268,10 +5276,38 @@ fn mermaid_br_in_a_subgraph_title_joins_the_rows_with_a_space() {
 }
 
 #[test]
-fn mermaid_quoted_label_spanning_source_lines_joins_them_with_a_space() {
+fn mermaid_quoted_label_spanning_source_lines_draws_a_row_per_line() {
     assert_eq!(
         mermaid("flowchart LR\n    A[\"first\n    second\"] --> B\n"),
-        mermaid("flowchart LR\n    A[\"first second\"] --> B\n")
+        mermaid("flowchart LR\n    A[\"first<br>second\"] --> B\n")
+    );
+    assert_eq!(
+        mermaid("flowchart LR\n    A[\"a\\nb\"]\n"),
+        mermaid("flowchart LR\n    A[\"a<br>b\"]\n")
+    );
+}
+
+#[test]
+fn mermaid_unquoted_bracket_label_may_span_lines() {
+    assert_eq!(
+        mermaid("flowchart LR\n    A[first\nsecond] --> B\n"),
+        mermaid("flowchart LR\n    A[first<br>second] --> B\n")
+    );
+}
+
+#[test]
+fn mermaid_label_blanks_and_line_breaks_at_its_ends_are_dropped() {
+    for body in ["flowchart LR\n    A[\n  foo\n] --> B\n", "flowchart LR\n    A[\" foo \"] --> B\n"]
+    {
+        assert_eq!(mermaid(body), mermaid("flowchart LR\n    A[foo] --> B\n"), "{body}");
+    }
+}
+
+#[test]
+fn mermaid_link_text_may_span_lines() {
+    assert_eq!(
+        mermaid("flowchart LR\n    A -- first\nsecond --> B\n"),
+        mermaid("flowchart LR\n    A -->|first<br>second| B\n")
     );
 }
 
@@ -5313,6 +5349,15 @@ fn mermaid_asterisks_outside_a_markdown_string_are_text() {
 fn mermaid_markdown_string_unpaired_markers_and_inner_underscores_stay_text() {
     for written in ["*x", "snake_case_name"] {
         assert_eq!(quoted_box(&format!("`{written}`")), box_around(written), "{written}");
+    }
+}
+
+#[test]
+fn mermaid_markdown_string_backslash_escapes_ascii_punctuation() {
+    for (text, label) in
+        [("`\\*a*`", "*a*"), ("`\\_a_`", "_a_"), ("`\\\\*a*`", "\\a"), ("`a \\# b`", "a # b")]
+    {
+        assert_eq!(quoted_box(text), box_around(label), "{text}");
     }
 }
 
@@ -5950,9 +5995,11 @@ fn mermaid_string_right_after_a_slash_backslash_or_hyphen_opener_keeps_semicolon
             assert!(output.contains(word), "{body}: {output}");
         }
     }
-    // Like any quoted label spanning source lines, the kept line break joins with a space.
+    // Like any quoted label spanning source lines, the kept line break starts a row.
     let output = mermaid("flowchart LR\n    A[/\"line1\nline2\"/]\n");
-    assert!(output.contains("line1 line2"), "{output}");
+    let Some((first, _)) = position_of_word(&output, "line1") else { panic!("{output}") };
+    let Some((second, _)) = position_of_word(&output, "line2") else { panic!("{output}") };
+    assert_eq!(second, first + 1, "{output}");
 }
 
 #[test]
