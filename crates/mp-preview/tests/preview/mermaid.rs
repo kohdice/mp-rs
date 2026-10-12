@@ -4804,6 +4804,20 @@ fn mermaid_node_followed_by_another_node_is_a_syntax_error() {
 }
 
 #[test]
+fn mermaid_ampersand_needs_blanks_on_both_sides() {
+    for body in ["flowchart LR\n    A &B --> C\n", "flowchart LR\n    A[x]& B --> C\n"] {
+        assert_eq!(
+            mermaid(body),
+            syntax_error_output(body, 2, "& needs a blank on both sides"),
+            "{body}"
+        );
+    }
+
+    let word = mermaid("flowchart LR\n    A&B --> C\n");
+    assert!(is_lr_chain(&word, &["A&B", "C"]), "{word}");
+}
+
+#[test]
 fn mermaid_unclosed_link_is_a_syntax_error() {
     for link in ["A -- text", "A --B", "A == text", "A -. text"] {
         let body = format!("flowchart LR\n    {link}\n");

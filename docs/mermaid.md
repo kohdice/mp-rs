@@ -38,7 +38,8 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
 - **Links.** `-->`, `---`, `-.->`, `-.-`, `==>`, `===`, `~~~`, with `o` and `x` ends and
   `<` at the start for two-headed links; longer links (`--->`, up to 10 layers, as in
   Mermaid); labels as `-->|text|` or `-- text -->`; chains (`A --> B --> C`); `&` groups
-  (`A & B --> C`); edge ids (`A e1@--> B`). The text of `-- text -->` may hold
+  (`A & B --> C`), which need a blank on both sides of `&`, as in Mermaid; edge ids
+  (`A e1@--> B`). The text of `-- text -->` may hold
   `( ) [ ] { } |`, but a `"` only as the start of a leading quoted string
   (`A -- "hi" there --> B`), as in Mermaid; otherwise it is a syntax error.
 - **Subgraphs.** `subgraph id [title]` … `end`, nested, or `subgraph title` without

@@ -438,14 +438,23 @@ impl<'a> Builder<'a> {
     }
 
     /// Reads node references joined by `&` at the start of `text`, and returns their
-    /// indices with the text after them.
+    /// indices with the text after them. Upstream's `node spaceList AMP spaceList
+    /// styledVertex` needs a blank on both sides of each `&`.
     fn group(&mut self, line: usize, text: &'a str) -> Result<(Vec<usize>, &'a str), Failure> {
         let (first, mut rest) = self.node(line, text)?;
         let mut nodes = vec![first];
-        while let Some(after_ampersand) = rest.strip_prefix('&') {
+        while let Some(after_ampersand) = rest
+            .strip_prefix(char::is_whitespace)
+            .and_then(|after_blank| after_blank.trim_start().strip_prefix('&'))
+            .filter(|after_ampersand| after_ampersand.starts_with(char::is_whitespace))
+        {
             let (node, after_node) = self.node(line, after_ampersand.trim_start())?;
             nodes.push(node);
             rest = after_node;
+        }
+        let rest = rest.trim_start();
+        if rest.starts_with('&') {
+            return Err(syntax_error(line, "& needs a blank on both sides"));
         }
         Ok((nodes, rest))
     }
@@ -608,7 +617,8 @@ impl<'a> Builder<'a> {
             }
             None => rest,
         };
-        Ok((index, rest.trim_start()))
+        // Untrimmed: `group` needs the blank before an `&` to tell `A & B` from `A &B`.
+        Ok((index, rest))
     }
 }
 
