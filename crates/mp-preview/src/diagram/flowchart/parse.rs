@@ -9,7 +9,7 @@ mod shape_data;
 mod statements;
 mod tokens;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::diagram::{Failure, SyntaxError};
 use crate::style::Line;
@@ -228,17 +228,21 @@ impl Edge {
     }
 }
 
-/// A `subgraph … end` block, drawn as a titled frame.
+/// The `subgraph … end` blocks with one id, drawn as a titled frame. The first block to
+/// end gives the title and direction; a node or subgraph id listed in blocks of several
+/// subgraphs belongs to the one whose block ended first, as upstream's `addSubGraph`
+/// and `makeUniq` decide.
 #[derive(Debug, Clone)]
 pub(super) struct Subgraph {
     pub title: Label,
-    /// Indices into [`Flowchart::nodes`] of the nodes referenced inside the block or
-    /// inside the subgraphs nested in it, in order of first reference.
+    /// Indices into [`Flowchart::nodes`] of the nodes the subgraph holds, directly or
+    /// through the subgraphs nested in it, in the order its blocks list them.
     pub members: Vec<usize>,
     /// Index into [`Flowchart::subgraphs`] of the subgraph this one is nested in.
     pub parent: Option<usize>,
-    /// The direction of the block's `direction` statement, if it has one; of several,
-    /// the last wins.
+    /// The direction of the first block's `direction` statement, if it has one; of
+    /// several in that block, the last wins. Those in later blocks with the same id are
+    /// ignored, as upstream's `addSubGraph` adds only nodes to an existing subgraph.
     pub direction: Option<Direction>,
     /// Cells the frame is grown by across the flow on each side of its members, so that
     /// every link end on one of its borders has a cell of its own; measured by
@@ -304,49 +308,11 @@ pub(super) fn parse(source: &str, first_line: usize) -> Result<Flowchart, Failur
         })
         .filter(|(_, text)| !text.is_empty());
     let (header_line, header) = statements.next().ok_or(Failure::Unsupported)?;
-    let direction = direction(header_line, header)?;
-    let mut builder = Builder {
-        chart: Flowchart { direction, nodes: Vec::new(), edges: Vec::new(), subgraphs: Vec::new() },
-        index_of: HashMap::new(),
-        open: Vec::new(),
-        subgraph_ids: Vec::new(),
-        edge_ids: HashSet::new(),
-        collapsed: HashSet::new(),
-        closed_subgraphs: HashSet::new(),
-        styles: HashMap::new(),
-        class_defs: HashMap::new(),
-        classes: HashMap::new(),
-        edge_names: Vec::new(),
-        link_styles: HashMap::new(),
-        default_link_style: Styling::default(),
-    };
+    let mut builder = Builder::new(direction(header_line, header)?);
     for (line, text) in statements {
         builder.statement(line, text)?;
     }
-    if let Some(open) = builder.open.last() {
-        return Err(syntax_error(open.line, "subgraph is not closed with \"end\""));
-    }
-    builder.apply_styles();
-    builder.resolve_subgraph_ids()?;
-    let mut chart = builder.chart;
-    // Mermaid draws an empty subgraph as a frame showing only its title, placed in the
-    // flow like a node: a hidden member gives it a place and its frame the least size.
-    // Inner subgraphs come first, so that a subgraph holding only an empty one is not
-    // empty itself.
-    for subgraph in chart.innermost_first() {
-        if chart.subgraphs.get(subgraph).is_some_and(|subgraph| subgraph.members.is_empty()) {
-            let hidden = chart.nodes.len();
-            chart.nodes.push(Node { body: Body::Hidden, spread: 0, styling: Styling::default() });
-            let holders: Vec<usize> =
-                std::iter::once(subgraph).chain(chart.enclosing(subgraph)).collect();
-            for holder in holders {
-                if let Some(holder) = chart.subgraphs.get_mut(holder) {
-                    holder.members.push(hidden);
-                }
-            }
-        }
-    }
-    Ok(chart)
+    builder.finish()
 }
 
 impl Flowchart {

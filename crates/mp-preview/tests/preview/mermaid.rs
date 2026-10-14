@@ -76,17 +76,32 @@ fn box_of(output: &str, label: &str) -> Option<(usize, usize, usize)> {
 }
 
 /// The top row, left column, bottom row and right column of the subgraph frame whose
-/// top border shows `title`.
+/// top border shows `title`; of several, the first of [`frames_of`]. `None` when any of
+/// them is broken, as [`frames_of`] reports it.
 fn frame_of(output: &str, title: &str) -> Option<(usize, usize, usize, usize)> {
+    frames_of(output, title)?.into_iter().next()
+}
+
+/// The bounds, as [`frame_of`] gives them, of every subgraph frame whose top border
+/// shows `title`, top to bottom and then left to right; `None` when any such border has
+/// no `┐` on its row or no `└` below its left column.
+fn frames_of(output: &str, title: &str) -> Option<Vec<(usize, usize, usize, usize)>> {
     let title_border = format!("┌─ {title} ─");
-    let (top, line) = output.lines().enumerate().find(|(_, line)| line.contains(&title_border))?;
-    let start = line.find(&title_border)?;
-    let left = line.get(..start)?.width();
-    let after = line.get(start..)?;
-    let right = left + after.get(..after.find('┐')?)?.width();
-    let bottom =
-        (top + 1..output.lines().count()).find(|&row| glyph_at(output, row, left) == Some('└'))?;
-    Some((top, left, bottom, right))
+    output
+        .lines()
+        .enumerate()
+        .flat_map(|(top, line)| {
+            line.match_indices(&title_border).map(move |(start, _)| (top, line, start))
+        })
+        .map(|(top, line, start)| {
+            let left = line.get(..start)?.width();
+            let after = line.get(start..)?;
+            let right = left + after.get(..after.find('┐')?)?.width();
+            let bottom = (top + 1..output.lines().count())
+                .find(|&row| glyph_at(output, row, left) == Some('└'))?;
+            Some((top, left, bottom, right))
+        })
+        .collect()
 }
 
 /// Like [`frame_of`], for a frame whose top border links may cross: `┌`, then `─` or
@@ -300,22 +315,37 @@ fn frame_inside_frame(
 /// continued by `─` up to `┐`, `│` down both sides, or `┼` where a link crosses, and
 /// `└─…─┘` along the bottom, or `┬` where a link leaves downward.
 fn intact_frame(output: &str, title: &str) -> Option<(usize, usize, usize, usize)> {
-    let (top, left, bottom, right) = frame_of(output, title)?;
+    frame_of(output, title).filter(|&frame| is_intact(output, title, frame))
+}
+
+/// The bounds of every frame titled `title`, as [`frames_of`] gives them, when each one
+/// is whole as [`intact_frame`] describes.
+fn intact_frames(output: &str, title: &str) -> Option<Vec<(usize, usize, usize, usize)>> {
+    let frames = frames_of(output, title)?;
+    frames.iter().all(|&frame| is_intact(output, title, frame)).then_some(frames)
+}
+
+/// Whether the frame titled `title` at `(top, left, bottom, right)` is whole, as
+/// [`intact_frame`] describes.
+fn is_intact(
+    output: &str,
+    title: &str,
+    (top, left, bottom, right): (usize, usize, usize, usize),
+) -> bool {
     let title_end = left + format!("┌─ {title} ─").width();
     let side = |row: usize| {
         [left, right]
             .into_iter()
             .all(|col| glyph_at(output, row, col).is_some_and(|c| "│┼".contains(c)))
     };
-    let intact = (title_end..right).all(|col| glyph_at(output, top, col) == Some('─'))
+    (title_end..right).all(|col| glyph_at(output, top, col) == Some('─'))
         && (left + 1..right).all(|col| match glyph_at(output, bottom, col) {
             Some('─') => true,
             Some('┬') => glyph_at(output, bottom + 1, col) == Some('│'),
             _ => false,
         })
         && glyph_at(output, bottom, right) == Some('┘')
-        && (top + 1..bottom).all(side);
-    intact.then_some((top, left, bottom, right))
+        && (top + 1..bottom).all(side)
 }
 
 /// Like [`intact_frame`], for a frame that links may cross on any border: ` title ` in
@@ -3991,10 +4021,69 @@ fn mermaid_labelled_link_from_a_member_to_its_own_subgraph_falls_back() {
 }
 
 #[test]
-fn mermaid_subgraph_listed_in_two_blocks_that_do_not_nest_falls_back() {
-    let body = "flowchart LR\n    subgraph a\n    x\n    end\n    subgraph b\n    x\n    end\n    subgraph x\n    C\n    end\n";
+fn mermaid_node_listed_in_two_sibling_subgraphs_stays_in_the_first() {
+    let output =
+        drawn("flowchart LR\n    subgraph a\n    X\n    end\n    subgraph b\n    X\n    end\n");
+    let (Some(a), Some(b)) = (intact_frame(&output, "a"), intact_frame(&output, "b")) else {
+        panic!("missing frame in\n{output}");
+    };
+    let Some(x) = box_of(&output, "X") else {
+        panic!("missing box in\n{output}");
+    };
 
-    assert_eq!(mermaid(body), unsupported(body), "{body}");
+    assert!(box_inside_frame(x, a), "{output}");
+    assert!(box_outside_frame(&output, "X", b), "{output}");
+    assert_eq!(whole_words(&output, "X"), 1, "{output}");
+}
+
+#[test]
+fn mermaid_repeated_subgraph_id_merges_into_the_first_block() {
+    let output = drawn(
+        "flowchart LR\n    subgraph s\n    A\n    end\n    subgraph s [Two]\n    B\n    end\n",
+    );
+    let Some(s) = intact_frame(&output, "s") else {
+        panic!("missing frame in\n{output}");
+    };
+    let (Some(a), Some(b)) = (box_of(&output, "A"), box_of(&output, "B")) else {
+        panic!("missing box in\n{output}");
+    };
+
+    assert_eq!(whole_words(&output, "s"), 1, "{output}");
+    assert_eq!(whole_words(&output, "Two"), 0, "{output}");
+    assert!(box_inside_frame(a, s), "{output}");
+    assert!(box_inside_frame(b, s), "{output}");
+
+    // An unbracketed title with a blank gives the block no id, so nothing merges.
+    let output = drawn(
+        "flowchart LR\n    subgraph My Group\n    A\n    end\n    subgraph My Group\n    B\n    end\n",
+    );
+    let (Some(a), Some(b)) = (box_of(&output, "A"), box_of(&output, "B")) else {
+        panic!("missing box in\n{output}");
+    };
+    let Some(frames) = intact_frames(&output, "My Group") else {
+        panic!("broken frame in\n{output}");
+    };
+
+    assert_eq!(frames.len(), 2, "{output}");
+    for frame in frames {
+        assert!(box_inside_frame(a, frame) != box_inside_frame(b, frame), "{output}");
+    }
+}
+
+#[test]
+fn mermaid_subgraph_listed_in_two_blocks_nests_in_the_first() {
+    let output = drawn(
+        "flowchart LR\n    subgraph i\n    X\n    end\n    subgraph a\n    i\n    end\n    subgraph b\n    i\n    end\n",
+    );
+    let (Some(i), Some(a), Some(b)) =
+        (intact_frame(&output, "i"), intact_frame(&output, "a"), intact_frame(&output, "b"))
+    else {
+        panic!("missing frame in\n{output}");
+    };
+
+    assert!(frame_inside_frame(i, a), "{output}");
+    assert!(!frame_inside_frame(i, b), "{output}");
+    assert!(box_outside_frame(&output, "X", b), "{output}");
 }
 
 #[test]

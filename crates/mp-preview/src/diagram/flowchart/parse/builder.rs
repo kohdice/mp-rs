@@ -14,7 +14,8 @@ use super::tokens::{
     check_unbracketed_title, split_id,
 };
 use super::{
-    Body, Edge, End, Flowchart, Node, Shape, Subgraph, compact_index, direction_word, syntax_error,
+    Body, Direction, Edge, End, Flowchart, Node, Shape, Subgraph, compact_index, direction_word,
+    syntax_error,
 };
 
 /// Mermaid's default `maxEdges`, a top-level configuration key like `maxTextSize`.
@@ -29,47 +30,143 @@ const LINK_TARGETS: [&str; 4] = ["_self", "_blank", "_parent", "_top"];
 const NODE_CLASSES: [&str; 2] = ["default", "node"];
 
 pub(super) struct Builder<'a> {
-    pub(super) chart: Flowchart,
-    pub(super) index_of: HashMap<&'a str, usize>,
-    /// The subgraphs whose `end` has not been read yet, innermost last.
-    pub(super) open: Vec<OpenSubgraph>,
-    /// The id of every subgraph, indexed like [`Flowchart::subgraphs`], which Mermaid
-    /// lets a link point to.
-    pub(super) subgraph_ids: Vec<&'a str>,
+    chart: Flowchart,
+    index_of: HashMap<&'a str, usize>,
+    /// Every `subgraph … end` block, in the order the blocks open.
+    blocks: Vec<Block<'a>>,
+    /// Indices into `blocks` of the blocks whose `end` has not been read yet, innermost
+    /// last.
+    open: Vec<usize>,
+    /// The ids a registered subgraph has already taken into its list, which no later
+    /// block may list again.
+    claimed: HashSet<SubgraphId<'a>>,
+    /// The id of every subgraph, indexed like [`Flowchart::subgraphs`]; a named one is
+    /// what a link may point to. Filled by [`Builder::finish`].
+    subgraph_ids: Vec<SubgraphId<'a>>,
     /// The ids given to links (`A e1@--> B`), which an `e1@{ … }` statement refers to.
-    pub(super) edge_ids: HashSet<&'a str>,
+    edge_ids: HashSet<&'a str>,
     /// The ids of closed subgraphs whose last `view` in `@{ … }` data, given after their
     /// `end`, is `collapsed`.
-    pub(super) collapsed: HashSet<&'a str>,
-    /// The ids of the subgraphs whose `end` has been read, which upstream's
-    /// `addSubGraph` registers only then.
-    pub(super) closed_subgraphs: HashSet<&'a str>,
+    collapsed: HashSet<&'a str>,
+    /// The id of each subgraph whose `end` has been read, which upstream's `addSubGraph`
+    /// registers only then, and the index into `blocks` of the first block that ended
+    /// with the id.
+    closed_subgraphs: HashMap<SubgraphId<'a>, usize>,
     /// What the `style` statements naming each id set, the later ones over the earlier.
-    pub(super) styles: HashMap<&'a str, Styling>,
+    styles: HashMap<&'a str, Styling>,
     /// What the `classDef` statements naming each class set, the later ones over the
     /// earlier.
-    pub(super) class_defs: HashMap<&'a str, Styling>,
+    class_defs: HashMap<&'a str, Styling>,
     /// The classes attached to each id, in the order they were attached.
-    pub(super) classes: HashMap<&'a str, Vec<&'a str>>,
+    classes: HashMap<&'a str, Vec<&'a str>>,
     /// The id of each link, indexed like [`Flowchart::edges`].
-    pub(super) edge_names: Vec<Option<&'a str>>,
+    edge_names: Vec<Option<&'a str>>,
     /// What the last `linkStyle` statement naming each link's index sets.
-    pub(super) link_styles: HashMap<usize, Styling>,
+    link_styles: HashMap<usize, Styling>,
     /// What the last `linkStyle default` statement sets.
-    pub(super) default_link_style: Styling,
+    default_link_style: Styling,
 }
 
-/// A subgraph whose `end` has not been read yet.
-pub(super) struct OpenSubgraph {
+/// A `subgraph … end` block.
+struct Block<'a> {
     /// The line its `subgraph` statement is on, for error reports.
-    pub(super) line: usize,
-    /// Its index into [`Flowchart::subgraphs`].
-    index: usize,
-    /// The nodes already among its members.
-    members: HashSet<usize>,
+    line: usize,
+    id: SubgraphId<'a>,
+    title: Label,
+    /// The direction of its last `direction` statement, if any.
+    direction: Option<Direction>,
+    /// The ids it lists, in order: those of the nodes its own statements reference and
+    /// those of the subgraphs whose blocks end inside it, as upstream's grammar hands a
+    /// block's `document` to `addSubGraph`. Once the block is registered, only the ids
+    /// left to it, and those a later block with the same id adds.
+    listed: Vec<SubgraphId<'a>>,
+}
+
+/// An id a block lists or a subgraph has: a name, which a node or a subgraph may have,
+/// or, for a block whose id upstream generates, the block's index into
+/// [`Builder::blocks`], which nothing in the source can refer to.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SubgraphId<'a> {
+    Named(&'a str),
+    Anonymous(usize),
+}
+
+impl<'a> SubgraphId<'a> {
+    /// The name, unless the id is anonymous.
+    fn name(self) -> Option<&'a str> {
+        match self {
+            Self::Named(name) => Some(name),
+            Self::Anonymous(_) => None,
+        }
+    }
 }
 
 impl<'a> Builder<'a> {
+    /// A builder for a chart running in `direction` that has read no statement yet.
+    pub(super) fn new(direction: Direction) -> Self {
+        Self {
+            chart: Flowchart {
+                direction,
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                subgraphs: Vec::new(),
+            },
+            index_of: HashMap::new(),
+            blocks: Vec::new(),
+            open: Vec::new(),
+            claimed: HashSet::new(),
+            subgraph_ids: Vec::new(),
+            edge_ids: HashSet::new(),
+            collapsed: HashSet::new(),
+            closed_subgraphs: HashMap::new(),
+            styles: HashMap::new(),
+            class_defs: HashMap::new(),
+            classes: HashMap::new(),
+            edge_names: Vec::new(),
+            link_styles: HashMap::new(),
+            default_link_style: Styling::default(),
+        }
+    }
+
+    /// The chart the statements read so far make, or a syntax error when a subgraph is
+    /// still open. Each node, link and subgraph gets its styles, references to subgraph
+    /// ids become references to the subgraphs, and every empty subgraph gets one hidden
+    /// member.
+    pub(super) fn finish(mut self) -> Result<Flowchart, Failure> {
+        if let Some(open) = self.open.last().and_then(|&open| self.blocks.get(open)) {
+            return Err(syntax_error(open.line, "subgraph is not closed with \"end\""));
+        }
+        let lists = self.add_subgraphs();
+        // Styles are written through the node indices `index_of` holds, which stop
+        // being valid once `resolve_subgraph_ids` drops the nodes named by subgraph ids,
+        // and to subgraphs through `subgraph_ids`, which `add_subgraphs` fills.
+        self.apply_styles();
+        self.resolve_subgraph_ids(&lists)?;
+        let mut chart = self.chart;
+        // Mermaid draws an empty subgraph as a frame showing only its title, placed in the
+        // flow like a node: a hidden member gives it a place and its frame the least size.
+        // Inner subgraphs come first, so that a subgraph holding only an empty one is not
+        // empty itself.
+        for subgraph in chart.innermost_first() {
+            if chart.subgraphs.get(subgraph).is_some_and(|subgraph| subgraph.members.is_empty()) {
+                let hidden = chart.nodes.len();
+                chart.nodes.push(Node {
+                    body: Body::Hidden,
+                    spread: 0,
+                    styling: Styling::default(),
+                });
+                let holders: Vec<usize> =
+                    std::iter::once(subgraph).chain(chart.enclosing(subgraph)).collect();
+                for holder in holders {
+                    if let Some(holder) = chart.subgraphs.get_mut(holder) {
+                        holder.members.push(hidden);
+                    }
+                }
+            }
+        }
+        Ok(chart)
+    }
+
     /// Applies one statement, whose first word picks its form: `subgraph`, `end`, `style`,
     /// `classDef`, `linkStyle`, `class`, `click` (checked, then dropped), `direction`, link data
     /// (`e1@{ … }`), or else a group of nodes optionally followed by links to further
@@ -97,9 +194,7 @@ impl<'a> Builder<'a> {
                 .open
                 .pop()
                 .ok_or_else(|| syntax_error(line, "\"end\" without an open subgraph"))?;
-            if let Some(&id) = self.subgraph_ids.get(closed.index) {
-                self.closed_subgraphs.insert(id);
-            }
+            self.register(closed);
             return Ok(());
         }
         // Upstream's grammar needs every part of a styling statement, so a statement
@@ -205,9 +300,7 @@ impl<'a> Builder<'a> {
         if words.next() == Some("direction")
             && let Some(direction) = words.next().and_then(direction_word)
         {
-            if let Some(open) = self.open.last().map(|open| open.index)
-                && let Some(open) = self.chart.subgraphs.get_mut(open)
-            {
+            if let Some(open) = self.open.last().and_then(|&open| self.blocks.get_mut(open)) {
                 open.direction = Some(direction);
             }
             return Ok(());
@@ -315,8 +408,7 @@ impl<'a> Builder<'a> {
     /// the keyword: an id, which may be a quoted string, followed by a bracketed title, or
     /// else the rest of the statement as the id, without the quotes around it, and as the
     /// title. Either title is read by [`Label::parse_after_string`], as it may go on in
-    /// plain text after a leading string. A subgraph opened inside another is nested in
-    /// it.
+    /// plain text after a leading string.
     fn open_subgraph(&mut self, line: usize, text: &'a str) -> Result<(), Failure> {
         let text = text.trim();
         // Upstream's grammar accepts a bare `subgraph`, but its `addSubGraph` then reads
@@ -336,102 +428,138 @@ impl<'a> Builder<'a> {
                 let (title, _) = bracket_label(after_open, "]")
                     .ok_or_else(|| syntax_error(line, "unclosed subgraph title"))?;
                 check_label(line, title, &LABEL_TOKENS)?;
-                (id, Label::parse_after_string(title))
+                (SubgraphId::Named(id), Label::parse_after_string(title))
             }
             // Upstream reads an unbracketed title as `textNoTags`, not as a bracket label:
             // see `check_unbracketed_title` for what it rejects. A leading string and the
-            // text after it are joined, so `subgraph "a" b` is titled `a b`.
+            // text after it are joined, so `subgraph "a" b` is titled `a b`. When the
+            // title holds a blank, upstream's `addSubGraph` drops the id and generates
+            // `subGraph` plus a counter, which no statement can name: such a block never
+            // merges with another, and nothing links to, styles or nests it by id.
             None => {
                 check_unbracketed_title(line, text)?;
-                (unquoted(text), Label::parse_after_string(text))
+                let id = unquoted(text);
+                let id = match id.contains(char::is_whitespace) {
+                    true => SubgraphId::Anonymous(self.blocks.len()),
+                    false => SubgraphId::Named(id),
+                };
+                (id, Label::parse_after_string(text))
             }
         };
-        self.subgraph_ids.push(id);
-        let parent = self.open.last().map(|parent| parent.index);
-        self.open.push(OpenSubgraph {
+        self.open.push(self.blocks.len());
+        self.blocks.push(Block {
             line,
-            index: self.chart.subgraphs.len(),
-            members: HashSet::new(),
-        });
-        self.chart.subgraphs.push(Subgraph {
+            id,
             title: title.joined(),
-            members: Vec::new(),
-            parent,
             direction: None,
-            spread: 0,
-            collapsed: false,
-            styling: Styling::default(),
+            listed: Vec::new(),
         });
         Ok(())
     }
 
-    /// Turns every reference to an id that is also a subgraph's, declared before or
-    /// after it, into a reference to the subgraph, as Mermaid reads it: a link end
-    /// becomes [`End::Subgraph`], a subgraph listed inside another's block is nested in
-    /// it, and the node declared for the id is dropped. A subgraph listed in two blocks
-    /// that do not nest, or nested in itself through such lists, is
-    /// [`Failure::Unsupported`], as is an index outside the chart's subgraphs or nodes. Each
-    /// subgraph whose id was last given `view: collapsed` is marked
-    /// [`Subgraph::collapsed`].
-    pub(super) fn resolve_subgraph_ids(&mut self) -> Result<(), Failure> {
-        for (subgraph, id) in self.chart.subgraphs.iter_mut().zip(&self.subgraph_ids) {
-            subgraph.collapsed = self.collapsed.contains(id);
+    /// Registers the subgraph of block `closed`, whose `end` has just been read, as
+    /// upstream's `addSubGraph` does: the ids a registered subgraph already lists, and
+    /// the block's own id, are dropped from the block's list, so that the first block
+    /// to end listing an id keeps it; and a block whose id is already registered adds
+    /// what is left of its list to that subgraph, which keeps its title, direction and
+    /// place. The id then joins the list of the block enclosing this one.
+    fn register(&mut self, closed: usize) {
+        let Some(block) = self.blocks.get_mut(closed) else { return };
+        let id = block.id;
+        let listed = std::mem::take(&mut block.listed);
+        let kept: Vec<SubgraphId<'a>> = listed
+            .into_iter()
+            .filter(|&listed| listed != id && self.claimed.insert(listed))
+            .collect();
+        let first = *self.closed_subgraphs.entry(id).or_insert(closed);
+        if let Some(first) = self.blocks.get_mut(first) {
+            first.listed.extend(kept);
         }
+        if let Some(open) = self.open.last().and_then(|&open| self.blocks.get_mut(open)) {
+            open.listed.push(id);
+        }
+    }
+
+    /// Makes one [`Subgraph`] for each registered id, in the order their first blocks
+    /// open, with neither members nor parent yet, and fills `subgraph_ids`; returns the
+    /// ids each one lists, indexed like [`Flowchart::subgraphs`].
+    fn add_subgraphs(&mut self) -> Vec<Vec<SubgraphId<'a>>> {
+        let mut first_blocks: Vec<usize> = self.closed_subgraphs.values().copied().collect();
+        first_blocks.sort_unstable();
+        let blocks: Vec<&Block<'a>> =
+            first_blocks.iter().filter_map(|&block| self.blocks.get(block)).collect();
+        self.subgraph_ids = blocks.iter().map(|block| block.id).collect();
+        self.chart.subgraphs = blocks
+            .iter()
+            .map(|block| Subgraph {
+                title: block.title.clone(),
+                members: Vec::new(),
+                parent: None,
+                direction: block.direction,
+                spread: 0,
+                collapsed: false,
+                styling: Styling::default(),
+            })
+            .collect();
+        blocks.into_iter().map(|block| block.listed.clone()).collect()
+    }
+
+    /// Gives each subgraph the parent and members its list `lists` names, indexed like
+    /// [`Flowchart::subgraphs`]: a subgraph whose id is listed is nested in the subgraph
+    /// listing it, and every other listed id is a node's. Then turns every reference to
+    /// a subgraph's name, declared before or after it, into a reference to the subgraph,
+    /// as Mermaid reads it: a link end becomes [`End::Subgraph`], and the node declared
+    /// for the name is dropped. Subgraphs nested in themselves through such lists are
+    /// [`Failure::Unsupported`], as is an index outside the chart's subgraphs or nodes.
+    /// Each subgraph whose name was last given `view: collapsed` is marked
+    /// [`Subgraph::collapsed`].
+    fn resolve_subgraph_ids(&mut self, lists: &[Vec<SubgraphId<'a>>]) -> Result<(), Failure> {
+        for (subgraph, id) in self.chart.subgraphs.iter_mut().zip(&self.subgraph_ids) {
+            subgraph.collapsed = id.name().is_some_and(|name| self.collapsed.contains(name));
+        }
+        let subgraph_of: HashMap<SubgraphId<'a>, usize> =
+            self.subgraph_ids.iter().enumerate().map(|(subgraph, &id)| (id, subgraph)).collect();
         let mut named = vec![None; self.chart.nodes.len()];
-        for (subgraph, id) in self.subgraph_ids.iter().enumerate() {
-            if let Some(&node) = self.index_of.get(id)
+        for (&id, &subgraph) in &subgraph_of {
+            if let Some(&node) = id.name().and_then(|name| self.index_of.get(name))
                 && let Some(slot) = named.get_mut(node)
             {
                 *slot = Some(subgraph);
             }
         }
-        // Each listed subgraph's parent is the innermost block listing it, which every
-        // other block listing it encloses.
-        let mut parents = Vec::new();
-        for (node, &listed) in named.iter().enumerate() {
-            let Some(listed) = listed else { continue };
-            let holders: Vec<usize> = (0..self.chart.subgraphs.len())
-                .filter(|&holder| {
-                    self.chart
-                        .subgraphs
-                        .get(holder)
-                        .is_some_and(|holder| holder.members.contains(&node))
-                })
-                .collect();
-            let Some(&holder) = holders.iter().max_by_key(|&&holder| self.chart.depth(holder))
-            else {
-                continue;
-            };
-            if holders.iter().any(|&other| other != holder && !self.chart.encloses(other, holder)) {
-                return Err(Failure::Unsupported);
+        for (holder, list) in lists.iter().enumerate() {
+            for id in list {
+                if let Some(&listed) = subgraph_of.get(id) {
+                    let listed =
+                        self.chart.subgraphs.get_mut(listed).ok_or(Failure::Unsupported)?;
+                    listed.parent = Some(holder);
+                }
             }
-            parents.push((listed, holder));
-        }
-        for (listed, holder) in parents {
-            let listed = self.chart.subgraphs.get_mut(listed).ok_or(Failure::Unsupported)?;
-            if listed.parent.is_some_and(|parent| parent != holder) {
-                return Err(Failure::Unsupported);
-            }
-            listed.parent = Some(holder);
         }
         if (0..self.chart.subgraphs.len())
             .any(|subgraph| self.chart.enclosing(subgraph).any(|outer| outer == subgraph))
         {
             return Err(Failure::Unsupported);
         }
-        for subgraph in &mut self.chart.subgraphs {
-            subgraph.members.retain(|&member| named.get(member).is_some_and(Option::is_none));
-        }
-        // The members of a nested subgraph are members of every subgraph enclosing it.
+        // A subgraph's members are its listed nodes and the members of the subgraphs it
+        // lists, which come first as they are nested deeper. No id is listed twice, so
+        // no member repeats.
         for subgraph in self.chart.innermost_first() {
-            let Some(inner) = self.chart.subgraphs.get(subgraph) else { continue };
-            let (members, parent) = (inner.members.clone(), inner.parent);
-            if let Some(parent) = parent.and_then(|parent| self.chart.subgraphs.get_mut(parent)) {
-                for member in members {
-                    if !parent.members.contains(&member) {
-                        parent.members.push(member);
-                    }
+            let mut members = Vec::new();
+            for id in lists.get(subgraph).into_iter().flatten() {
+                match subgraph_of.get(id) {
+                    Some(&inner) => members.extend(
+                        self.chart.subgraphs.get(inner).ok_or(Failure::Unsupported)?.members.iter(),
+                    ),
+                    None => members.push(
+                        *id.name()
+                            .and_then(|name| self.index_of.get(name))
+                            .ok_or(Failure::Unsupported)?,
+                    ),
                 }
+            }
+            if let Some(subgraph) = self.chart.subgraphs.get_mut(subgraph) {
+                subgraph.members = members;
             }
         }
         let renumbered = compact_index(named.len(), |node| named.get(node) == Some(&None));
@@ -494,7 +622,7 @@ impl<'a> Builder<'a> {
     /// Classes are looked up only after every statement is read, so that a `classDef`
     /// may follow the `class` statement using it, as upstream compiles them when the
     /// diagram is drawn.
-    pub(super) fn apply_styles(&mut self) {
+    fn apply_styles(&mut self) {
         let resolved: Vec<(usize, Styling)> = self
             .index_of
             .iter()
@@ -519,8 +647,11 @@ impl<'a> Builder<'a> {
             edge.styling = styling;
         }
         // Upstream compiles no `default` class for a subgraph, only its own classes.
-        let subgraph_stylings: Vec<Styling> =
-            self.subgraph_ids.iter().map(|id| self.styling_of(id, &[])).collect();
+        let subgraph_stylings: Vec<Styling> = self
+            .subgraph_ids
+            .iter()
+            .map(|id| id.name().map(|name| self.styling_of(name, &[])).unwrap_or_default())
+            .collect();
         for (subgraph, styling) in self.chart.subgraphs.iter_mut().zip(subgraph_stylings) {
             subgraph.styling = styling;
         }
@@ -547,7 +678,7 @@ impl<'a> Builder<'a> {
     fn attach_class(&mut self, id: &'a str, class: &'a str) {
         let known = self.index_of.contains_key(id)
             || self.edge_ids.contains(id)
-            || self.closed_subgraphs.contains(id);
+            || self.closed_subgraphs.contains_key(&SubgraphId::Named(id));
         if known {
             self.classes.entry(id).or_default().push(class);
         }
@@ -564,13 +695,8 @@ impl<'a> Builder<'a> {
             return Err(syntax_error(line, "\"end\" cannot be a node id"));
         }
         let index = self.declare(id);
-        // A node referenced in a nested block is a member of every enclosing one too.
-        for open in &mut self.open {
-            if open.members.insert(index)
-                && let Some(subgraph) = self.chart.subgraphs.get_mut(open.index)
-            {
-                subgraph.members.push(index);
-            }
+        if let Some(open) = self.open.last().and_then(|&open| self.blocks.get_mut(open)) {
+            open.listed.push(SubgraphId::Named(id));
         }
         let bracketed = BRACKETS
             .into_iter()
@@ -615,7 +741,7 @@ impl<'a> Builder<'a> {
         };
         let rest = match rest.strip_prefix("@{") {
             Some(after_open) => {
-                let closed_subgraph = self.closed_subgraphs.contains(id);
+                let closed_subgraph = self.closed_subgraphs.contains_key(&SubgraphId::Named(id));
                 let (data, after_data) = shape_data(line, after_open, closed_subgraph)?;
                 if let Some(Body::Box { label, shape }) =
                     self.chart.nodes.get_mut(index).map(|node| &mut node.body)

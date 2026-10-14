@@ -64,7 +64,11 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   `flowchart.inheritDir: false`); links entering a subgraph drawn in its own direction
   keep clear of its title, and its frame widens to make room for them;
   `id@{ view: collapsed }` after the subgraph's `end`
-  draws it as one box.
+  draws it as one box. A second block with an id already used adds its members to the
+  first, which keeps its title, direction and place, and a node or subgraph listed in
+  the blocks of two subgraphs belongs to the one whose block ends first, as in Mermaid.
+  A block whose unbracketed title holds a blank (`subgraph My Group`) has no id, as in
+  Mermaid, so such blocks are never merged and cannot be linked to or styled.
   A `subgraph` with neither id nor title is a syntax error; Mermaid fails to render it.
 - **Frontmatter.** A `---` block on the first line; its `title` is drawn above the
   diagram, on one row with each run of blanks and line breaks drawn as one space, as a
