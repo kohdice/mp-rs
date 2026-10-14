@@ -5507,6 +5507,57 @@ fn mermaid_frontmatter_title_is_drawn_centred_above_the_diagram() {
 }
 
 #[test]
+fn mermaid_frontmatter_title_forms_draw_the_same_row() {
+    let one_line = mermaid("---\ntitle: Release flow\n---\nflowchart LR\n    A --> B\n");
+    assert!(one_line.starts_with(" Release flow\n"), "{one_line}");
+
+    for title in [
+        "title: |\n  Release flow",
+        "title: >\n  Release flow",
+        "title:\n  Release flow",
+        "title: Release\n  flow",
+        "title: |- # note\n  Release flow",
+        // A block scalar of several lines is drawn on one row.
+        "title: |\n  Release\n  flow",
+        // Comments before the value are passed over.
+        "title: # note\n  Release flow",
+        "title:\n# note\n  Release flow",
+        "title:\n  \"Release flow\"",
+        // A quoted value runs to its closing quote whatever the indentation.
+        "title: \"Release\nflow\"",
+        // Runs of blanks are drawn as one, as a browser draws them.
+        "title: \"  Release    flow  \"",
+        // A quoted key reads as its text.
+        "\"title\": Release flow",
+    ] {
+        assert_eq!(
+            mermaid(&format!("---\n{title}\n---\nflowchart LR\n    A --> B\n")),
+            one_line,
+            "{title}"
+        );
+    }
+    for (title, written) in [
+        ("title:\n  - a\n  - b", "title: a,b"),
+        ("title:\n- a\n- b", "title: a,b"),
+        ("title:\n- \"a\nb\"\n- c", "title: \"a b,c\""),
+        ("title:\n  - \"a\nb\"\n  - c", "title: \"a b,c\""),
+        ("title:\n  - a: \"x\"\n  - b", "title: \"[object Object],b\""),
+        ("title: [a, b]", "title: a,b"),
+        ("title: [a, # c\n  b]", "title: a,b"),
+        // A block that is one flow mapping is that mapping.
+        ("{\ntitle: [a, b]\n}", "title: a,b"),
+        ("title:\n  a: b", "title: \"[object Object]\""),
+        ("title: {a: b}", "title: \"[object Object]\""),
+    ] {
+        assert_eq!(
+            mermaid(&format!("---\n{title}\n---\nflowchart LR\n    A --> B\n")),
+            mermaid(&format!("---\n{written}\n---\nflowchart LR\n    A --> B\n")),
+            "{title}"
+        );
+    }
+}
+
+#[test]
 fn mermaid_frontmatter_title_wider_than_the_drawing_starts_at_column_0() {
     assert_eq!(
         mermaid("---\ntitle: A much longer diagram title\n---\nflowchart LR\n    A --> B\n"),
@@ -5528,13 +5579,143 @@ fn mermaid_frontmatter_config_is_ignored() {
         ),
         A_TO_B
     );
+    // A quoted value of another key may run past the lines nested under it.
+    assert_eq!(
+        mermaid("---\nconfig:\n  a: \"x\ntitle: y\"\n---\nflowchart LR\n    A --> B\n"),
+        A_TO_B
+    );
+    // Another key's sequence may stand at the key's own indentation.
+    assert_eq!(
+        mermaid("---\nfoo:\n- a\ntitle: x\n---\nflowchart LR\n    A --> B\n"),
+        mermaid("---\ntitle: x\n---\nflowchart LR\n    A --> B\n")
+    );
 }
 
 #[test]
-fn mermaid_unclosed_frontmatter_is_a_syntax_error() {
-    let body = "---\ntitle: x\nflowchart LR\n    A --> B\n";
-
-    assert_eq!(mermaid(body), syntax_error_output(body, 1, "unclosed front matter"));
+fn mermaid_malformed_frontmatter_is_a_syntax_error() {
+    for (body, line, message) in [
+        ("---\ntitle: x\nflowchart LR\n    A --> B\n", 1, "unclosed front matter"),
+        (
+            "---\ntitle: |\n    a\n  b\n---\nflowchart LR\n    A --> B\n",
+            4,
+            "bad indentation of a mapping entry",
+        ),
+        (
+            "---\ntitle: Release\n  flow: x\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "bad indentation of a mapping entry",
+        ),
+        ("---\ntitle: a\ntitle: b\n---\nflowchart LR\n    A --> B\n", 3, "duplicated mapping key"),
+        (
+            "---\ntitle: \"a\" b\n---\nflowchart LR\n    A --> B\n",
+            2,
+            "bad indentation of a mapping entry",
+        ),
+        (
+            "---\ntitle: \"a\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "unexpected end of the stream within a double quoted scalar",
+        ),
+        (
+            "---\ntitle: 'a\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "unexpected end of the stream within a single quoted scalar",
+        ),
+        (
+            "---\ntitle: [a\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "unexpected end of the stream within a flow collection",
+        ),
+        (
+            "---\ntitle: \"a\nb\"\n  c\n---\nflowchart LR\n    A --> B\n",
+            4,
+            "bad indentation of a mapping entry",
+        ),
+        (
+            "---\ntitle:\n  - a\n    b: c\n---\nflowchart LR\n    A --> B\n",
+            4,
+            "bad indentation of a sequence entry",
+        ),
+        (
+            "---\ntitle: x\nfoo\n  bar\n---\nflowchart LR\n    A --> B\n",
+            5,
+            "can not read a block mapping entry; a multiline key may not be an implicit key",
+        ),
+        (
+            "---\nfoo\ntitle: x\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "end of the stream or a document separator is expected",
+        ),
+        (
+            "---\ntitle: x\n- a\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "end of the stream or a document separator is expected",
+        ),
+        (
+            "---\ntitle: x\nfoo # c\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "can not read an implicit mapping pair; a colon is missed",
+        ),
+        (
+            "---\ntitle: a\n\tb\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "tab characters must not be used in indentation",
+        ),
+        (
+            "---\ntitle: x\n\"a\"\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "can not read an implicit mapping pair; a colon is missed",
+        ),
+        (
+            "---\ntitle: x\nfoo\nbar: y\n---\nflowchart LR\n    A --> B\n",
+            4,
+            "can not read a block mapping entry; a multiline key may not be an implicit key",
+        ),
+        (
+            "---\ntitle:\n  - \"a\nb\"\n  c\n---\nflowchart LR\n    A --> B\n",
+            5,
+            "bad indentation of a mapping entry",
+        ),
+        (
+            "---\ntitle: a: b\n---\nflowchart LR\n    A --> B\n",
+            2,
+            "bad indentation of a mapping entry",
+        ),
+        (
+            "---\ntitle:\n  - a\n  b: c\n---\nflowchart LR\n    A --> B\n",
+            4,
+            "bad indentation of a mapping entry",
+        ),
+        (
+            "---\nfoo\n\"title: x\"\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "end of the stream or a document separator is expected",
+        ),
+        (
+            "---\nfoo\nbar # c\nbaz\n---\nflowchart LR\n    A --> B\n",
+            4,
+            "end of the stream or a document separator is expected",
+        ),
+        (
+            "---\n- a\n  title: x\n---\nflowchart LR\n    A --> B\n",
+            3,
+            "bad indentation of a sequence entry",
+        ),
+        (
+            "---\ntitle: [\"a\" b]\n---\nflowchart LR\n    A --> B\n",
+            2,
+            "missed comma between flow collection entries",
+        ),
+        (
+            "---\n{title: a: b}\n---\nflowchart LR\n    A --> B\n",
+            2,
+            "missed comma between flow collection entries",
+        ),
+    ] {
+        // The code block shows a tab at a line's start as four columns.
+        let shown = body.replace('\t', "    ");
+        assert_eq!(mermaid(body), syntax_error_output(&shown, line, message), "{body}");
+    }
 }
 
 #[test]
@@ -5679,9 +5860,23 @@ fn mermaid_fontawesome_token_is_dropped_inside_a_markdown_string() {
 
 #[test]
 fn mermaid_frontmatter_lines_that_give_no_title_draw_no_title_row() {
-    for lines in
-        ["title:", "title: \"\"", "title: null", "title:x", "title: # note", "config:\n  title: x"]
-    {
+    for lines in [
+        "title:",
+        // A quoted value of blanks only draws nothing.
+        "title: \"   \"",
+        "title: null",
+        "title:x",
+        "title: # note",
+        "title: |",
+        "title: []",
+        "title: false",
+        "title: 0x0",
+        "title: .nan",
+        "title: .0",
+        "config:\n  title: x",
+        "foo\nbar # c",
+        "- \"a\ntitle: x\nb\"",
+    ] {
         assert_eq!(
             mermaid(&format!("---\n{lines}\n---\nflowchart LR\n    A --> B\n")),
             A_TO_B,
@@ -5692,10 +5887,12 @@ fn mermaid_frontmatter_lines_that_give_no_title_draw_no_title_row() {
 
 #[test]
 fn mermaid_indented_frontmatter_fences_are_read_with_their_indent() {
-    assert_eq!(
-        mermaid("  ---\n  title: Hi\n  ---\nflowchart LR\n    A --> B\n"),
-        format!("      Hi\n\n{A_TO_B}")
-    );
+    for body in [
+        "  ---\n  title: Hi\n  ---\nflowchart LR\n    A --> B\n",
+        "  ---\n  title: |\n    Hi\n  ---\nflowchart LR\n    A --> B\n",
+    ] {
+        assert_eq!(mermaid(body), format!("      Hi\n\n{A_TO_B}"), "{body}");
+    }
 }
 
 #[test]

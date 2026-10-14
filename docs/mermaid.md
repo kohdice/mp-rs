@@ -64,7 +64,19 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   `id@{ view: collapsed }` after the subgraph's `end`
   draws it as one box.
 - **Frontmatter.** A `---` block on the first line; its `title` is drawn above the
-  diagram.
+  diagram, on one row with each run of blanks and line breaks drawn as one space, as a
+  browser draws it. The value may follow the key on its line or start on a later one,
+  comment lines before it passed over, and continue as a block scalar (`title: |`,
+  `title: >`), as indented lines, or, when quoted, up to its closing quote. A list is
+  drawn as its items joined by commas and a mapping as `[object Object]`, as Mermaid
+  draws what JavaScript writes for them. A block that is one JSON-like flow mapping
+  (`{ title: … }`) is read as that mapping. A top-level key written twice is a syntax
+  error, as in Mermaid. So, as in Mermaid, are text left after the title's value, a
+  line of the title indented where it does not fit, a line holding no key after a key
+  or before the first one (unless the whole block is one value, such as a quoted string
+  or a flow collection), a line indented with a tab, text left after a quoted item or
+  nested collection inside a flow collection, and a quote or bracket that nothing
+  closes in any key's value.
 - **Styling.** `style`, `classDef` (including `default` and `node`), `class`, `:::` and
   `linkStyle` (indexes, lists and `default`). A property list may hold only the
   characters of Mermaid's style tokens: letters, digits, blanks and
@@ -103,11 +115,14 @@ These are drawn differently:
 - FontAwesome tokens such as `fa:fa-car` are dropped from labels; a label made only of
   icons shows their names.
 - A subgraph title with line breaks is drawn on one row.
+- A frontmatter `title` that js-yaml reads as a number or a boolean, such as `1.0`,
+  `0x10` or `True`, is drawn as written; Mermaid draws what JavaScript writes for the
+  value: `1`, `16`, `true`.
 - Markdown strings are not wrapped automatically; they break only at written line
   breaks and `<br>`.
-- `@{ label: "…" }` values keep YAML escapes other than `\"` and `\\` as written; `\n`
-  still breaks the row, as a decoded line break does, except in a markdown string, where
-  it stays as written.
+- `@{ label: "…" }` values and the frontmatter's `title` keep YAML escapes other than
+  `\"` and `\\` as written. In a label, `\n` still breaks the row, as a decoded line
+  break does, except in a markdown string, where it stays as written.
 - An unknown entity code such as `#nosuch;` is shown as written.
 - A drawing too wide for the terminal first tightens its spacing, inside a subgraph laid
   out in a direction of its own as well as around it; a browser shrinks the picture
