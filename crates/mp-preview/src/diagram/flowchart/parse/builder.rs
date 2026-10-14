@@ -578,6 +578,11 @@ impl<'a> Builder<'a> {
                     // The closer found first ends the label.
                     .min_by_key(|(label, ..)| label.len())
                     .ok_or_else(|| syntax_error(line, "unclosed node label"))?;
+                // Upstream's `vertex` rules need a `text` of one token at least, and its
+                // string lexer makes no `STR` token of `""`.
+                if label.is_empty() || label == "\"\"" {
+                    return Err(syntax_error(line, "empty node label"));
+                }
                 match open {
                     "[/" | "[\\" => check_trap_label(line, label)?,
                     _ => check_label(line, label, &LABEL_TOKENS)?,

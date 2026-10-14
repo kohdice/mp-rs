@@ -531,6 +531,16 @@ fn mermaid_style_value_outside_the_style_tokens_is_a_syntax_error() {
 }
 
 #[test]
+fn mermaid_empty_node_label_is_a_syntax_error() {
+    for node in ["A[]", "A[\"\"]"] {
+        let body = format!("flowchart LR\n    {node} --> B\n");
+
+        assert_eq!(mermaid(&body), syntax_error_output(&body, 2, "empty node label"), "{body}");
+    }
+    drawn("flowchart LR\n    A[ ] --> B\n");
+}
+
+#[test]
 fn mermaid_style_or_class_def_without_a_property_list_is_a_syntax_error() {
     for (statement, message) in [
         ("style A", "style has no property list"),

@@ -27,7 +27,9 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   rounded box, a diamond and plain boxes. A label holding `( ) [ ] { } |` or `"` must be
   quoted (`A["f(x)"]`), as in Mermaid; an unquoted one is a syntax error. The labels of
   `[/ /]`, `[\ \]`, `[/ \]` and `[\ /]` may hold `|` and `"` unquoted, as in Mermaid,
-  but not a `"` right after a `/` or `\` (`A[/a/"b/]`), which is a syntax error. An id
+  but not a `"` right after a `/` or `\` (`A[/a/"b/]`), which is a syntax error. An
+  empty label (`A[]`, `A[""]`) is a syntax error too, as in Mermaid, while `A[ ]` is
+  blank. An id
   may hold `:` and `,` (`ns:a`, `A,B`), as in Mermaid, while `:::` after an id
   attaches a class.
 - **Labels.** Quoted strings, which may span lines, each line a row, and so may
