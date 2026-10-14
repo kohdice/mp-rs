@@ -531,6 +531,30 @@ fn mermaid_style_value_outside_the_style_tokens_is_a_syntax_error() {
 }
 
 #[test]
+fn mermaid_click_without_an_action_is_a_syntax_error() {
+    for click in ["click A", "click A B C", "click A call f", "click A  callback"] {
+        let body = format!("flowchart LR\n    A --> B\n    {click}\n");
+
+        assert_eq!(
+            mermaid(&body),
+            syntax_error_output(&body, 3, "click needs a callback, a link or a string"),
+            "{body}"
+        );
+    }
+    for click in [
+        "click A callback",
+        "click A f \"tip\"",
+        "click A call f()",
+        "click A href \"u\" \"tip\" _blank",
+        "click A \"u\"",
+    ] {
+        let body = format!("flowchart LR\n    A --> B\n    {click}\n");
+
+        assert_eq!(mermaid(&body), mermaid(LR_A_TO_B), "{body}");
+    }
+}
+
+#[test]
 fn mermaid_empty_node_label_is_a_syntax_error() {
     for node in ["A[]", "A[\"\"]"] {
         let body = format!("flowchart LR\n    {node} --> B\n");

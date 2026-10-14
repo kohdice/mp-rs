@@ -20,8 +20,8 @@ use super::{
 /// Mermaid's default `maxEdges`, a top-level configuration key like `maxTextSize`.
 const MAX_EDGES: usize = 500;
 
-/// Statements that only affect interaction, which a text drawing cannot show.
-const IGNORED_KEYWORDS: [&str; 1] = ["click"];
+/// The link targets upstream's `LINK_TARGET` token reads.
+const LINK_TARGETS: [&str; 4] = ["_self", "_blank", "_parent", "_top"];
 
 /// The classes upstream's `getData` compiles for every node before the node's own,
 /// so that `classDef default` and `classDef node` style every node, its own classes
@@ -71,7 +71,7 @@ pub(super) struct OpenSubgraph {
 
 impl<'a> Builder<'a> {
     /// Applies one statement, whose first word picks its form: `subgraph`, `end`, `style`,
-    /// `classDef`, `linkStyle`, `class`, `click` (ignored), `direction`, link data
+    /// `classDef`, `linkStyle`, `class`, `click` (checked, then dropped), `direction`, link data
     /// (`e1@{ … }`), or else a group of nodes optionally followed by links to further
     /// groups, where a link joins every node of the group before it to every node of the
     /// group after it. `line` is the statement's 1-based line number in the source, for
@@ -187,11 +187,14 @@ impl<'a> Builder<'a> {
             }
             return Ok(());
         }
-        if statement
-            .split_ascii_whitespace()
-            .next()
-            .is_some_and(|word| IGNORED_KEYWORDS.contains(&word))
+        // A `click` statement binds an interaction, which a text drawing cannot show, so
+        // it is checked and then dropped.
+        if let Some(click) = statement.strip_prefix("click")
+            && (click.is_empty() || click.starts_with(|c: char| c.is_ascii_whitespace()))
         {
+            if !is_click(click) {
+                return Err(syntax_error(line, "click needs a callback, a link or a string"));
+            }
             return Ok(());
         }
         // `direction` before a direction word sets the direction a subgraph's members are
@@ -634,6 +637,64 @@ impl<'a> Builder<'a> {
         // Untrimmed: `group` needs the blank before an `&` to tell `A & B` from `A &B`.
         Ok((index, rest))
     }
+}
+
+/// Whether `text`, a `click` statement after the keyword and the blank ending it, is
+/// one of upstream's `clickStatement` forms: a node id, one blank, and then a callback,
+/// `call name(args)` or a bare name, or a link, `href "url"` or `"url"`. A tooltip
+/// string may follow the callback; a tooltip string, a link target (`_self`, `_blank`,
+/// `_parent` or `_top`), or both, in that order, may follow the link.
+fn is_click(text: &str) -> bool {
+    // `"click"[\s]+` takes every blank before the node id, but `<click>[\s\n]` takes only
+    // one after it: a second would be a `SPACE` token, which no form allows there.
+    let Some((_, action)) = text.trim_start().split_once(char::is_whitespace) else {
+        return false;
+    };
+    if action.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let rest = if let Some(callback) =
+        action.strip_prefix("call").filter(|after| after.starts_with(char::is_whitespace))
+    {
+        // Upstream's `CALLBACKNAME` lexeme `[^(]*` runs on, across lines, to the next
+        // `(`, so a `call` with no argument list never parses there; this reader ends a
+        // statement at the line, so it rejects the form instead.
+        let Some((name, after_name)) = callback.split_once('(') else { return false };
+        match after_name.split_once(')') {
+            Some((_, after_args)) if !name.trim().is_empty() => after_blank(after_args, string),
+            _ => return false,
+        }
+    } else if let Some(url) = action
+        .strip_prefix("href")
+        // `"href"[\s]` takes exactly one blank.
+        .and_then(|after| after.strip_prefix(char::is_whitespace))
+        .or(action.starts_with('"').then_some(action))
+    {
+        let Some(after_url) = string(url) else { return false };
+        // A target left with text after it fails the check below, as upstream's
+        // `LINK_TARGET`, which jison ends at a word boundary, does.
+        after_blank(after_blank(after_url, string), |text| {
+            LINK_TARGETS.iter().find_map(|target| text.strip_prefix(target))
+        })
+    } else {
+        let name_end = action.find(char::is_whitespace).unwrap_or(action.len());
+        after_blank(action.get(name_end..).unwrap_or_default(), string)
+    };
+    rest.trim().is_empty()
+}
+
+/// `text` after the blanks starting it and what `part` reads after them, or `text` when
+/// it starts with no blank or `part` reads nothing there; upstream's `SPACE` is a run of
+/// blanks.
+fn after_blank<'t>(text: &'t str, part: impl Fn(&'t str) -> Option<&'t str>) -> &'t str {
+    text.strip_prefix(char::is_whitespace).map(str::trim_start).and_then(part).unwrap_or(text)
+}
+
+/// The text after a double-quoted string starting `text`, unless the string is empty,
+/// as upstream's string lexer makes no `STR` token of `""`.
+fn string(text: &str) -> Option<&str> {
+    let (content, after) = text.strip_prefix('"')?.split_once('"')?;
+    (!content.is_empty()).then_some(after)
 }
 
 /// The property `list` of a `style` or `classDef` statement without the `;` ending it,

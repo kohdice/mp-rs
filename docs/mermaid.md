@@ -88,7 +88,9 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   (`font-family:"Arial"`, `stroke-dasharray:5--5`), while `fill:violet` and `fill:a"b`
   are accepted, as in Mermaid.
 - **Other statements.** `%%` comment lines, `%%{init: …}%%` directives,
-  `accTitle` / `accDescr`, `click`.
+  `accTitle` / `accDescr`, `click` with a callback (`call f()`, bare `f`) or a link
+  (`href "url"`, `"url"`), as in Mermaid; a `click` with neither, or a `call` without
+  an argument list, is a syntax error, as in Mermaid.
 
 ### Differences from a browser
 
