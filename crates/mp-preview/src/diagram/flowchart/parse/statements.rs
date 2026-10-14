@@ -260,19 +260,49 @@ fn starts_comment(rest: &str) -> bool {
 /// over whole, ending the statement before it, where `after_header` tells whether the
 /// header has been read and `blank` whether `rest` starts a statement:
 ///
-/// - A directive, `%%{` and a keyword (`init: …`), up to and including its `}%%` or the
-///   end of the source; `%%{` without a keyword is neither a directive nor a comment, as
-///   `directiveRegex` in `packages/mermaid/src/diagram-api/regexes.ts` needs one.
+/// - A directive (see [`directive_end`]).
 /// - An accessibility statement (see [`accessibility_end`]) after the header, which draws
 ///   nothing; before the header it is text, as upstream's detector needs the source to
 ///   start with `flowchart` or `graph`.
 fn passed_over(rest: &str, after_header: bool, blank: bool) -> Option<usize> {
-    if let Some(after_open) = rest.strip_prefix("%%{") {
-        let keyword =
-            after_open.trim_start().starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
-        return keyword.then(|| rest.find("}%%").map_or(rest.len(), |at| at + "}%%".len()));
+    directive_end(rest)
+        .or_else(|| if after_header && blank { accessibility_end(rest) } else { None })
+}
+
+/// The byte length of the directive `text` starts with: `%%{` and a keyword
+/// (`init: …`), up to and including its `}%%` or the end of `text`. `None` when `text`
+/// starts with none; `%%{` without a keyword is neither a directive nor a comment, as
+/// `directiveRegex` in `packages/mermaid/src/diagram-api/regexes.ts` needs one.
+fn directive_end(text: &str) -> Option<usize> {
+    let after_open = text.strip_prefix("%%{")?;
+    let keyword =
+        after_open.trim_start().starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+    keyword.then(|| text.find("}%%").map_or(text.len(), |at| at + "}%%".len()))
+}
+
+/// The length of `source`, a diagram's source after its frontmatter, that upstream
+/// compares with `maxTextSize`: in UTF-16 units, without its directives, then without its
+/// comment lines (see [`without_comment_lines`]), then without the blanks it starts
+/// with, as `preprocessDiagram` in `packages/mermaid/src/preprocess.ts` builds the
+/// `code.cleaned` that `renderDiagram` measures.
+pub(in crate::diagram::flowchart) fn text_size(source: &str) -> usize {
+    let mut without_directives = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(at) = rest.find("%%{") {
+        let (before, from) = rest.split_at(at);
+        without_directives.push_str(before);
+        let end = match directive_end(from) {
+            Some(end) => end,
+            None => {
+                without_directives.push_str("%%{");
+                "%%{".len()
+            }
+        };
+        rest = from.get(end..).unwrap_or_default();
     }
-    if after_header && blank { accessibility_end(rest) } else { None }
+    without_directives.push_str(rest);
+    let (cleaned, _) = without_comment_lines(&without_directives);
+    cleaned.trim_start().encode_utf16().count()
 }
 
 /// The byte length of the accessibility statement `text` starts with, `flow.jison`'s

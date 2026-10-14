@@ -29,6 +29,18 @@ use self::route::Scene;
 /// can hold.
 const MAX_CELLS: usize = 1_000_000;
 
+/// Mermaid's default `maxTextSize`
+/// (<https://mermaid.js.org/config/schema-docs/config.html>), in UTF-16 units of the
+/// source without its frontmatter, directives and comment lines (see
+/// [`parse::text_size`]), as upstream counts it.
+const MAX_TEXT_SIZE: usize = 50_000;
+
+/// The source drawn instead of one longer than [`MAX_TEXT_SIZE`]: upstream's
+/// `MAX_TEXTLENGTH_EXCEEDED_MSG` in `packages/mermaid/src/mermaidAPI.ts`, which
+/// `renderDiagram` draws in its place, under the frontmatter's title.
+const TEXT_SIZE_EXCEEDED: &str =
+    "graph TB;a[Maximum text size in diagram exceeded];style a fill:#faa";
+
 /// `value` as a cell offset that may be negative; `None` past `isize::MAX`.
 fn signed(value: usize) -> Option<isize> {
     isize::try_from(value).ok()
@@ -39,10 +51,16 @@ fn signed(value: usize) -> Option<isize> {
 /// subgraph laid out in a direction of its own as one box (see [`unit::embed_units`])
 /// and the chart around them as [`render_chart`] does, under the frontmatter's title
 /// when it gives one, at the default spacing and then tighter ones until the drawing
-/// fits; unsupported when none does. A syntax error comes from parsing.
+/// fits; unsupported when none does. A source longer than [`MAX_TEXT_SIZE`] is drawn as
+/// [`TEXT_SIZE_EXCEEDED`]. A syntax error comes from parsing.
 pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
     let front = parse::front_matter(source)?;
-    let chart = parse::parse(front.body, front.first_line)?;
+    // A string has at least as many bytes as UTF-16 units, and `text_size` only removes
+    // text, so a body no longer in bytes than the limit is not measured.
+    let too_long = front.body.len() > MAX_TEXT_SIZE && parse::text_size(front.body) > MAX_TEXT_SIZE;
+    let (body, first_line) =
+        if too_long { (TEXT_SIZE_EXCEEDED, 1) } else { (front.body, front.first_line) };
+    let chart = parse::parse(body, first_line)?;
     let chart = collapse::collapse(chart).ok_or(Failure::Unsupported)?;
     let chart = own_frame::drop_own_frame_links(chart)?;
     // A unit's drawing tightens along with the chart around it, so each step draws the

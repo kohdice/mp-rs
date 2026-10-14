@@ -153,3 +153,9 @@ These render as the plain code block:
   link is not drawn, so the text has no line to ride, as with `~~~|text|`.
 - Charts whose subgraph frames keep changing size while links are fitted to their
   borders, which would otherwise make two links share a cell.
+
+A chart with more than 500 links is reported as a syntax error, as Mermaid reports it.
+A chart longer than Mermaid's `maxTextSize` of 50,000 characters is drawn as the one box
+"Maximum text size in diagram exceeded", as Mermaid draws it. The length is counted as
+Mermaid counts it: in UTF-16 units, so that a character such as `😀` counts twice,
+and without the frontmatter, the `%%{…}%%` directives and the `%%` comment lines.

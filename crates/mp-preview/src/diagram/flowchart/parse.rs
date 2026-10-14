@@ -21,6 +21,7 @@ use self::builder::Builder;
 use self::statements::{split_statements, without_comment_lines};
 
 pub(super) use self::front_matter::front_matter;
+pub(super) use self::statements::text_size;
 
 #[derive(Clone, Debug)]
 pub(super) struct Flowchart {

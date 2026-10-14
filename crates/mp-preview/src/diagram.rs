@@ -33,27 +33,17 @@ fn located(line: Option<usize>, message: &str) -> String {
     }
 }
 
-/// Mermaid's default `maxTextSize`
-/// (<https://mermaid.js.org/config/schema-docs/config.html>), in characters.
-const MAX_TEXT_SIZE: usize = 50_000;
-
 /// Draws the Mermaid `source` as lines without trailing spaces, in at most `width`
 /// columns when given.
 ///
-/// Returns [`Failure::Syntax`] when the source is not valid Mermaid, exceeds
-/// [`MAX_TEXT_SIZE`] characters, or has more edges than Mermaid allows, and
-/// [`Failure::Unsupported`] for valid input that has no text drawing: another diagram
-/// type, a feature that is not drawn, an empty chart, subgraph frames that would cover
-/// a box or frame outside them, long links passing through too many layers, or a
+/// A source longer than Mermaid's `maxTextSize` as Mermaid counts it is drawn as the
+/// one-box chart Mermaid draws in its place. Returns [`Failure::Syntax`] when the source
+/// is not valid Mermaid or has more edges than Mermaid allows, and
+/// [`Failure::Unsupported`] for valid input that has no text drawing: another
+/// diagram type, a feature that is not drawn, an empty chart, subgraph frames that would
+/// cover a box or frame outside them, long links passing through too many layers, or a
 /// drawing that fits neither `width` nor the cell limit at any spacing.
 pub(crate) fn render_mermaid(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
-    // A string has at least as many bytes as characters, so only a long one is counted.
-    if source.len() > MAX_TEXT_SIZE && source.chars().count() > MAX_TEXT_SIZE {
-        return Err(Failure::Syntax(SyntaxError {
-            line: None,
-            message: format!("diagram text exceeds {MAX_TEXT_SIZE} characters"),
-        }));
-    }
     flowchart::render(source, width)
 }
 

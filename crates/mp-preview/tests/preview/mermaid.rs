@@ -57,12 +57,6 @@ fn syntax_error_output(body: &str, line: usize, message: &str) -> String {
     format!("mermaid: line {line}: {message}\n```mermaid\n{body}```")
 }
 
-/// The drawing of `body` as a syntax error no line is to blame for: the reason line
-/// without a line number above the unchanged code block.
-fn syntax_error_output_without_a_line(body: &str, message: &str) -> String {
-    format!("mermaid: {message}\n```mermaid\n{body}```")
-}
-
 /// The row of the box whose label row is `│ label │`, with one blank or more on
 /// either side of the label in a box grown wider than it, and the display columns of
 /// its left and right borders.
@@ -3554,19 +3548,48 @@ fn mermaid_more_than_five_hundred_edges_is_an_error_like_mermaid() {
     assert_eq!(mermaid(&body), syntax_error_output(&body, 502, "too many edges (limit 500)"));
 }
 
+/// The source upstream's `renderDiagram` draws instead of a diagram longer than
+/// `maxTextSize`, its `MAX_TEXTLENGTH_EXCEEDED_MSG`.
+const TEXT_SIZE_EXCEEDED: &str =
+    "graph TB;a[Maximum text size in diagram exceeded];style a fill:#faa\n";
+
 #[test]
 fn mermaid_text_limit_is_fifty_thousand_characters_inclusive() {
-    // `flowchart LR\nA[` and `]\n` take 17 characters around the label. A label of
-    // three-byte characters puts both texts over the limit in bytes, so that only
-    // the count of characters decides.
+    // `flowchart LR\nA[` and `]\n` take 17 UTF-16 units around the label, and `あ` is one
+    // unit. A label of three-byte characters puts both texts over the limit in bytes, so
+    // that only the count of UTF-16 units decides.
     let at_limit = format!("flowchart LR\nA[{}]\n", "あ".repeat(50_000 - 17));
     let over_limit = format!("flowchart LR\nA[{}]\n", "あ".repeat(50_001 - 17));
 
     drawn(&at_limit);
+    assert_eq!(mermaid(&over_limit), mermaid(TEXT_SIZE_EXCEEDED));
+    // Apart from the bound: the frontmatter's title stays above the chart drawn instead.
     assert_eq!(
-        mermaid(&over_limit),
-        syntax_error_output_without_a_line(&over_limit, "diagram text exceeds 50000 characters")
+        mermaid(&format!("---\ntitle: Hi\n---\n{over_limit}")),
+        mermaid(&format!("---\ntitle: Hi\n---\n{TEXT_SIZE_EXCEEDED}"))
     );
+}
+
+#[test]
+fn mermaid_frontmatter_directives_and_comment_lines_do_not_count_toward_the_text_size_limit() {
+    // Each padding is over 50,000 characters, so that the raw source exceeds the limit.
+    let long = "a".repeat(60_000);
+    for padding in [
+        "%% note\n".repeat(7_500),
+        format!("%%{{init: {{\"note\": \"{long}\"}}}}%%\n"),
+        format!("---\nnote: {long}\n---\n"),
+    ] {
+        assert_eq!(mermaid(&format!("{padding}{LR_A_TO_B}")), A_TO_B);
+    }
+}
+
+#[test]
+fn mermaid_text_size_limit_counts_utf16_units() {
+    // 30,000 copies of a character outside the Basic Multilingual Plane are 60,000
+    // UTF-16 units, though only 30,017 characters with the text around them.
+    let body = format!("flowchart LR\nA[{}]\n", "😀".repeat(30_000));
+
+    assert_eq!(mermaid(&body), mermaid(TEXT_SIZE_EXCEEDED));
 }
 
 #[test]
