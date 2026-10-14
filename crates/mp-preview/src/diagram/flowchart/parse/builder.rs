@@ -319,6 +319,11 @@ impl<'a> Builder<'a> {
     /// it.
     fn open_subgraph(&mut self, line: usize, text: &'a str) -> Result<(), Failure> {
         let text = text.trim();
+        // Upstream's grammar accepts a bare `subgraph`, but its `addSubGraph` then reads
+        // the text of an id that is not there, so the diagram fails to render.
+        if text.is_empty() {
+            return Err(syntax_error(line, "subgraph has no id or title"));
+        }
         let quoted = text.strip_prefix('"').and_then(|rest| rest.split_once('"'));
         // Upstream reads a subgraph id as `textNoTags`, which, unlike a node's
         // `idString`, holds no `COMMA`.

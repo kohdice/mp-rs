@@ -65,6 +65,7 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   keep clear of its title, and its frame widens to make room for them;
   `id@{ view: collapsed }` after the subgraph's `end`
   draws it as one box.
+  A `subgraph` with neither id nor title is a syntax error; Mermaid fails to render it.
 - **Frontmatter.** A `---` block on the first line; its `title` is drawn above the
   diagram, on one row with each run of blanks and line breaks drawn as one space, as a
   browser draws it. The value may follow the key on its line or start on a later one,

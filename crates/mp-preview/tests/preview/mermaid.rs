@@ -555,6 +555,13 @@ fn mermaid_click_without_an_action_is_a_syntax_error() {
 }
 
 #[test]
+fn mermaid_subgraph_without_id_or_title_is_a_syntax_error() {
+    let body = "flowchart LR\n    subgraph\n    A\n    end\n";
+
+    assert_eq!(mermaid(body), syntax_error_output(body, 2, "subgraph has no id or title"));
+}
+
+#[test]
 fn mermaid_empty_node_label_is_a_syntax_error() {
     for node in ["A[]", "A[\"\"]"] {
         let body = format!("flowchart LR\n    {node} --> B\n");
@@ -6498,10 +6505,11 @@ fn mermaid_directed_subgraphs_nested_past_the_depth_limit_fall_back() {
     let body = nested_directed_subgraphs(33);
     assert_eq!(mermaid(&body), unsupported(&body));
 
-    // 1900 one-line nestings are 49 400 characters, under Mermaid's 50 000-character
-    // `maxTextSize`, so the depth guard rejects this rather than the size guard.
-    let deepest =
-        format!("flowchart LR;{}{}\n", "subgraph;direction LR;".repeat(1900), "end;".repeat(1900));
+    // 1600 one-line nestings with distinct ids are 48 504 characters, under Mermaid's
+    // 50 000-character `maxTextSize`, so the depth guard falls back on this rather than
+    // the size guard replacing it.
+    let opening: String = (0..1600).map(|id| format!("subgraph {id};direction LR;")).collect();
+    let deepest = format!("flowchart LR;{opening}{}\n", "end;".repeat(1600));
     assert_eq!(mermaid(&deepest), unsupported(&deepest));
 }
 
