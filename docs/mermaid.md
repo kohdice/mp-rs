@@ -138,6 +138,13 @@ These are drawn differently:
 - A drawing too wide for the terminal first tightens its spacing, inside a subgraph laid
   out in a direction of its own as well as around it; a browser shrinks the picture
   instead.
+- A link to or from a subgraph counts, when cycles are broken, as one link between each
+  pair of members and the other end, and only the pairs that close a cycle are laid out
+  reversed. When some pairs of a link are reversed and others are not, the link is
+  drawn in the direction of the pairs that are not, meeting the subgraph's frame on the
+  side facing its other end; for a link between two subgraphs, it meets whichever frame's
+  layers span the other end. A browser instead attaches such a link to one member of the
+  subgraph and reverses or keeps that one link.
 - A link between a subgraph and a node or subgraph inside it (`A --> s` where `A` is
   inside `s`, in either direction) is not drawn, as in a browser; a browser still keeps
   room in the subgraph for the hidden link, and here the subgraph is drawn as if the
@@ -158,8 +165,12 @@ These render as the plain code block:
   nested more than 32 deep.
 - `A -->|text| s` or `s -->|text| A`, where `A` is a node or subgraph inside `s`: the
   link is not drawn, so the text has no line to ride, as with `~~~|text|`.
-- Charts whose subgraph frames keep changing size while links are fitted to their
-  borders, which would otherwise make two links share a cell.
+- A link between two subgraphs whose member pairs disagree on their direction (see
+  above), when neither subgraph's layers span the link's other end: one line cannot
+  meet both frames.
+- Charts whose subgraph frames still change size after being measured again once per
+  subgraph while links are fitted to their borders, which would otherwise make two
+  links share a cell. This is a safety bound; no chart that reaches it is known.
 
 A chart with more than 500 links is reported as a syntax error, as Mermaid reports it.
 A chart longer than Mermaid's `maxTextSize` of 50,000 characters is drawn as the one box

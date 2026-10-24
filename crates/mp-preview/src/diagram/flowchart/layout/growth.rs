@@ -1,7 +1,7 @@
 //! The cells boxes and subgraph frames grow by across the flow so that the links meeting
 //! their borders take cells of their own.
 
-use super::layers::cycle_closing_edges;
+use super::layers::{cycle_closing_edges, reversed_links};
 use super::ports::{end_gaps, exit_gaps, symmetric_offsets};
 use super::reach::{Reach, entry_reach};
 use super::size::{TITLE_CORNER_OFFSET, box_height, box_width};
@@ -23,7 +23,7 @@ use crate::diagram::flowchart::parse::{Body, End, Flowchart, Node, Shape};
 /// itself or to one of its own members (see [`cycle_closing_edges`]).
 pub(in crate::diagram::flowchart) fn grow_boxes(chart: &Flowchart) -> Option<Growth> {
     let axis = chart.direction.axis();
-    let reversed = cycle_closing_edges(chart)?;
+    let reversed = reversed_links(&cycle_closing_edges(chart)?);
     let mut entering = vec![0; chart.nodes.len()];
     let mut leaving = vec![0; chart.nodes.len()];
     let mut loops: Vec<Vec<Option<&Label>>> = vec![Vec::new(); chart.nodes.len()];

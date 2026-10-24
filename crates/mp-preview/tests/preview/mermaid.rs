@@ -293,6 +293,50 @@ fn box_outside_frame(
     })
 }
 
+/// Whether the arrowhead `(row, col, glyph)`, as [`arrowheads`] gives it, points into the
+/// frame `(top, left, bottom, right)` from just outside a border across the flow: `▼`
+/// above the top border or `▲` below the bottom one in a horizontal layout, `►` left of
+/// the left border or `◄` right of the right one in a vertical one, within the frame's
+/// span along that border.
+fn marks_border_across(
+    (row, col, glyph): (usize, usize, char),
+    (top, left, bottom, right): (usize, usize, usize, usize),
+    vertical: bool,
+) -> bool {
+    if vertical {
+        top < row
+            && row < bottom
+            && ((glyph == '►' && col + 1 == left) || (glyph == '◄' && col == right + 1))
+    } else {
+        left < col
+            && col < right
+            && ((glyph == '▼' && row + 1 == top) || (glyph == '▲' && row == bottom + 1))
+    }
+}
+
+/// Asserts that `label`, in a vertical layout, lies beside the frame `(top, left, bottom,
+/// right)` on the side of the arrowhead `marker` pointing into it across the flow (see
+/// [`marks_border_across`]): after the right border for `◄`, before the left one for
+/// `►`, on a row between `source_bottom` and the marker's row.
+fn assert_label_beside_frame(
+    output: &str,
+    label: &str,
+    (_, left, _, right): (usize, usize, usize, usize),
+    (marker_row, _, glyph): (usize, usize, char),
+    source_bottom: usize,
+) {
+    let Some((row, col)) = position_of_word(output, label) else {
+        panic!("missing {label} in\n{output}");
+    };
+    let beside = match glyph {
+        '◄' => right < col,
+        '►' => col + label.width() <= left,
+        _ => false,
+    };
+    assert!(beside, "{label} beside {glyph} in\n{output}");
+    assert!(source_bottom < row && row < marker_row, "{label} in\n{output}");
+}
+
 /// Whether the box `(label row, left, right)`, as [`box_of`] gives it, lies strictly
 /// inside the frame `(top, left, bottom, right)`.
 fn box_inside_frame(
@@ -4182,6 +4226,183 @@ fn mermaid_cycle_through_a_subgraph_end_draws_the_later_link_backwards() {
 }
 
 #[test]
+fn mermaid_link_from_a_subgraph_closing_a_cycle_through_one_member_is_drawn() {
+    let output = drawn(
+        "flowchart LR\n    subgraph s1\n    A\n    B\n    end\n    A --> C\n    C --> B\n    s1 --> C\n",
+    );
+    let (Some(frame @ (top, left, bottom, right)), Some(a), Some(b), Some((_, c_left, _, _))) = (
+        intact_crossed_frame(&output, "s1"),
+        box_of(&output, "A"),
+        box_of(&output, "B"),
+        box_bounds(&output, "C"),
+    ) else {
+        panic!("missing frame or box in\n{output}");
+    };
+    let arrows = arrowheads(&output);
+
+    assert!(box_inside_frame(a, frame), "{output}");
+    assert!(box_inside_frame(b, frame), "{output}");
+    assert!(box_outside_frame(&output, "C", frame), "{output}");
+    assert_eq!(arrows.len(), 3, "{output}");
+    assert!(arrows.iter().all(|&(.., c)| c == '►'), "{output}");
+    // `A --> C` and `s1 --> C` both enter `C` on its left border.
+    assert_eq!(arrows.iter().filter(|&&(_, col, _)| col + 1 == c_left).count(), 2, "{output}");
+    // `s1 --> C` starts in the row just outside a border across the flow, next to a
+    // border cell that stays `─`.
+    let starts_outside = |row: Option<usize>, border: usize| {
+        row.is_some_and(|row| {
+            (left + 1..right).any(|col| {
+                glyph_at(&output, row, col) == Some('│')
+                    && glyph_at(&output, border, col) == Some('─')
+            })
+        })
+    };
+    assert!(
+        starts_outside(top.checked_sub(1), top) || starts_outside(Some(bottom + 1), bottom),
+        "{output}"
+    );
+    assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+}
+
+#[test]
+fn mermaid_link_into_a_subgraph_closing_a_cycle_through_one_member_is_drawn() {
+    for (direction, link, label) in [
+        ("LR", "C --> s1", None),
+        ("LR", "C -->|back| s1", Some("back")),
+        ("TB", "C -->|a rather long label| s1", Some("a rather long label")),
+    ] {
+        let output = drawn(&format!(
+            "flowchart {direction}\n    subgraph s1\n    A\n    B\n    end\n    A --> C\n    C --> B\n    {link}\n"
+        ));
+        let (Some(frame), Some(a), Some(b), Some((_, _, c_bottom, _))) = (
+            intact_crossed_frame(&output, "s1"),
+            box_of(&output, "A"),
+            box_of(&output, "B"),
+            box_bounds(&output, "C"),
+        ) else {
+            panic!("missing frame or box in\n{output}");
+        };
+        let vertical = direction == "TB";
+        let (along_glyph, across_glyphs) =
+            if vertical { ('▼', "◄►") } else { ('►', "▲▼") };
+        let arrows = arrowheads(&output);
+        let (across, along): (Vec<_>, Vec<_>) =
+            arrows.iter().partition(|&&(.., c)| across_glyphs.contains(c));
+
+        assert!(box_inside_frame(a, frame), "{output}");
+        assert!(box_inside_frame(b, frame), "{output}");
+        assert!(box_outside_frame(&output, "C", frame), "{output}");
+        assert_eq!(arrows.len(), 3, "{output}");
+        assert_eq!(along.iter().filter(|&&&(.., c)| c == along_glyph).count(), 2, "{output}");
+        assert_eq!(across.len(), 1, "{output}");
+        assert!(
+            across.iter().all(|&&arrow| marks_border_across(arrow, frame, vertical)),
+            "{output}"
+        );
+        match (label, across.first()) {
+            (Some(label), Some(&&marker)) if vertical => {
+                assert_label_beside_frame(&output, label, frame, marker, c_bottom);
+            }
+            (Some(label), _) => {
+                assert_label_on_line(&output, label);
+            }
+            (None, _) => {}
+        }
+        assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+    }
+}
+
+#[test]
+fn mermaid_link_between_subgraphs_closing_a_cycle_through_one_member_is_drawn() {
+    for (direction, body, members, link, label, arrow_count) in [
+        ("LR", "c\n    d", &["c", "d"][..], "S1 --> S2", None, 2),
+        (
+            "TB",
+            "c\n    d",
+            &["c", "d"][..],
+            "S1 -->|this is the long line| S2",
+            Some("this is the long line"),
+            2,
+        ),
+        (
+            "TB",
+            "c --> d --> e",
+            &["c", "d", "e"][..],
+            "S1 -->|this is my long strip| S2",
+            Some("this is my long strip"),
+            4,
+        ),
+    ] {
+        let output = drawn(&format!(
+            "flowchart {direction}\n    subgraph S2\n    {body}\n    end\n    subgraph S1\n    a\n    end\n    c --> a\n    {link}\n"
+        ));
+        let (Some(s1 @ (_, _, s1_bottom, _)), Some(s2)) =
+            (intact_crossed_frame(&output, "S1"), intact_crossed_frame(&output, "S2"))
+        else {
+            panic!("missing frame in\n{output}");
+        };
+        let inside =
+            |label: &str, frame| box_of(&output, label).is_some_and(|b| box_inside_frame(b, frame));
+        let vertical = direction == "TB";
+        let arrows = arrowheads(&output);
+        let marker = arrows.iter().find(|&&arrow| marks_border_across(arrow, s2, vertical));
+        let boxes: Vec<&str> = ["a"].into_iter().chain(members.iter().copied()).collect();
+
+        assert!(inside("a", s1), "{output}");
+        assert!(box_outside_frame(&output, "a", s2), "{output}");
+        assert!(members.iter().all(|&member| inside(member, s2)), "{output}");
+        assert!(boxes_intact(&output, &boxes), "{output}");
+        assert_eq!(arrows.len(), arrow_count, "{output}");
+        assert!(marker.is_some(), "{output}");
+        if let (Some(label), Some(&marker)) = (label, marker) {
+            assert_label_beside_frame(&output, label, s2, marker, s1_bottom);
+        }
+    }
+}
+
+#[test]
+fn mermaid_sibling_subgraphs_sharing_a_layer_are_both_drawn() {
+    let output = drawn(
+        "flowchart LR\n    R --> Y\n    R --> X\n    subgraph t\n    Y\n    X\n    end\n    subgraph s\n    P --> B\n    end\n    P --> X\n",
+    );
+    let (Some(t), Some(s)) =
+        (intact_crossed_frame(&output, "t"), intact_crossed_frame(&output, "s"))
+    else {
+        panic!("missing frame in\n{output}");
+    };
+    let inside =
+        |label: &str, frame| box_of(&output, label).is_some_and(|b| box_inside_frame(b, frame));
+
+    assert!(inside("Y", t) && inside("X", t), "{output}");
+    assert!(inside("P", s) && inside("B", s), "{output}");
+    for label in ["Y", "X"] {
+        assert!(box_outside_frame(&output, label, s), "{label} in\n{output}");
+    }
+    for label in ["P", "B"] {
+        assert!(box_outside_frame(&output, label, t), "{label} in\n{output}");
+    }
+    assert!(boxes_intact(&output, &["R", "Y", "X", "P", "B"]), "{output}");
+}
+
+#[test]
+fn mermaid_label_of_a_link_to_a_nested_subgraph_stays_inside_the_outer_frame() {
+    let output = drawn(
+        "flowchart TB\n    X --> Y\n    Y --> C\n    subgraph S\n    A --> B\n    B --> S1\n    A -->|a very very long label here| S1\n    subgraph S1\n    C\n    end\n    end\n",
+    );
+    let label = "a very very long label here";
+    let (Some((_, left, _, right)), Some(start)) = (
+        intact_crossed_frame(&output, "S"),
+        output
+            .lines()
+            .find_map(|line| line.find(label).and_then(|at| line.get(..at)).map(str::width)),
+    ) else {
+        panic!("missing frame or label in\n{output}");
+    };
+
+    assert!(left < start && start + label.width() <= right, "{output}");
+}
+
+#[test]
 fn mermaid_link_into_an_empty_subgraph_ends_at_its_frame() {
     let output = drawn("flowchart LR\n    A --> s\n    subgraph s\n    end\n");
     let (Some(frame @ (_, left, ..)), Some((_, _, a_right))) =
@@ -4917,32 +5138,26 @@ const UPSTREAM_SUBGRAPH_EDGES_EXAMPLE: &str = "flowchart TB\n    c1-->a2\n    su
 #[test]
 fn mermaid_upstream_subgraph_edges_example_renders_every_link() {
     let output = drawn(UPSTREAM_SUBGRAPH_EDGES_EXAMPLE);
-    let (Some(one), Some(two), Some(three), Some((_, c2_left, c2_bottom, c2_right))) = (
+    let (Some(one), Some(two), Some(three)) = (
         crossed_frame_of(&output, "one"),
         crossed_frame_of(&output, "two"),
         crossed_frame_of(&output, "three"),
-        box_bounds(&output, "c2"),
     ) else {
-        panic!("missing frame or box in\n{output}");
+        panic!("missing frame in\n{output}");
     };
     let arrows = arrowheads(&output);
-    let up: Vec<_> = arrows.iter().filter(|&&(.., c)| c == '▲').collect();
 
     for title in ["one", "two", "three"] {
         assert_eq!(box_of(&output, title), None, "{title} in\n{output}");
     }
     assert!(boxes_intact(&output, &["a1", "a2", "b1", "b2", "c1", "c2"]), "{output}");
     assert_eq!(arrows.len(), 7, "{output}");
-    assert_eq!(up.len(), 1, "{output}");
-    assert!(
-        up.iter().all(|&&(row, col, _)| row == c2_bottom + 1 && c2_left < col && col < c2_right),
-        "{output}"
-    );
+    assert!(arrows.iter().all(|&(.., c)| c != '▲'), "{output}");
     assert!(two.0 > three.0 && two.0 > one.0, "{output}");
 }
 
 #[test]
-fn mermaid_node_cycle_reverses_the_last_declared_link() {
+fn mermaid_node_cycle_reverses_the_link_closing_upstreams_depth_first_search() {
     let output = mermaid("flowchart LR\n    A --> B\n    C --> A\n    B --> C\n");
     let (Some(a), Some(b), Some(c)) =
         (box_of(&output, "A"), box_of(&output, "B"), box_of(&output, "C"))
@@ -4951,12 +5166,18 @@ fn mermaid_node_cycle_reverses_the_last_declared_link() {
     };
     let back: Vec<_> = arrowheads(&output).into_iter().filter(|&(.., g)| g == '◄').collect();
 
-    assert!(!is_lr_chain(&output, &["A", "B", "C"]), "{output}");
-    assert!(c.1 < a.1 && a.1 < b.1, "{output}");
+    assert!(a.1 < b.1 && b.1 < c.1, "{output}");
     assert_eq!(back.len(), 1, "{output}");
-    assert!(back.iter().all(|&(_, col, _)| col == c.2 + 1), "{output}");
+    assert!(back.iter().all(|&(_, col, _)| col == a.2 + 1), "{output}");
     assert_eq!(count_glyph(&output, '►'), 2, "{output}");
     assert!(boxes_intact(&output, &["A", "B", "C"]), "{output}");
+
+    let numbered = drawn("flowchart LR\n    2 --> 1\n    1 --> 2\n");
+    let (Some(one), Some(two)) = (box_of(&numbered, "1"), box_of(&numbered, "2")) else {
+        panic!("missing box in\n{numbered}");
+    };
+
+    assert!(one.2 < two.1, "{numbered}");
 }
 
 #[test]

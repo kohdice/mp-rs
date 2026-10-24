@@ -219,6 +219,7 @@ fn outer_chart(
                     body: Body::Drawing { lines, title_width },
                     spread: 0,
                     styling: Styling::default(),
+                    array_index: None,
                 });
             }
             Some(_) => {}

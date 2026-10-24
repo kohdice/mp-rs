@@ -9,17 +9,20 @@
 
 use std::collections::HashMap;
 
-use super::layers::{cycle_closing_edges, layering_constraints, longest_path_layers};
+use super::layers::{
+    cycle_closing_edges, layering_constraints, longest_path_layers, reversed_links,
+};
 use super::order::{FrameEnd, in_subgraph, stack_ranks};
 use super::ports::{
     Exits, exit_cells, frame_growth, frame_ports, port_cells, reach_in_order, scatter_by_order,
     self_loop_label_at,
 };
 use super::reach::{
-    Crossing, Footprint, LabelSpot, Reach, entry_reach, label_spot, labelled_slot_footprint,
+    Crossing, Footprint, LabelSpot, Reach, entry_reach, label_cross_reach, label_spot,
+    labelled_slot_footprint,
 };
 use super::size::{frame_width, title_offset};
-use super::{Axis, MAX_PASSING_SLOTS, laid_out_end};
+use super::{Axis, LaidOutEnd, MAX_PASSING_SLOTS, laid_out_end, on_run};
 use crate::diagram::flowchart::label::Label;
 use crate::diagram::flowchart::parse::{End, Flowchart};
 use crate::diagram::flowchart::signed;
@@ -92,6 +95,8 @@ pub(super) struct SlotGraph<'a> {
     axis: Axis,
     /// See [`Layered::reversed`](super::Layered::reversed).
     pub(super) reversed: Vec<bool>,
+    /// See [`Layered::beside`](super::Layered::beside).
+    pub(super) beside: Vec<Option<LaidOutEnd>>,
     /// The layer of each slot: the chart's nodes, indexed like [`Flowchart::nodes`],
     /// followed by the other slots (see [`Layered::slots`](super::Layered::slots)).
     pub(super) layer_of: Vec<usize>,
@@ -102,6 +107,11 @@ pub(super) struct SlotGraph<'a> {
     /// For each slot past the nodes that is the end of a link at a frame rather than a
     /// passing slot: the subgraph, and whether the link enters it.
     frame_end: HashMap<usize, (usize, bool)>,
+    /// The slots past the nodes where links meet a frame across the flow (see
+    /// [`Layered::beside`](super::Layered::beside)), each with its subgraph. They take no
+    /// room in their layer's stack, and are placed just outside the frame by
+    /// [`SlotGraph::place_beside_ends`] only once the frames are known.
+    pub(super) beside_ends: HashMap<usize, usize>,
     /// The ends of links at frames, each with its layer and its subgraph.
     pub(super) frame_end_slots: Vec<FrameEnd>,
     /// The ends of links at frames, by layer: they take no room in their layer's stack
@@ -122,9 +132,14 @@ pub(super) struct SlotGraph<'a> {
     pub(super) chain_of: Vec<Vec<usize>>,
     /// The labels of each node's drawn self loops, in the order of their edges.
     loop_labels: Vec<Vec<Option<&'a Label>>>,
-    /// The cells across the flow the labels of each node's self loops reach past its box,
-    /// before and after it.
+    /// The cells across the flow the labels of each node's self loops, and those on the
+    /// runs of the links leaving it (see [`on_run`]), reach past its box, before and after
+    /// it.
     overhang: Vec<(usize, usize)>,
+    /// The cells across the flow the labels on the runs of the links leaving each
+    /// subgraph's frame (see [`on_run`]) reach before and after the cell the link leaves
+    /// by, indexed like [`Flowchart::subgraphs`].
+    pub(super) run_reach: Vec<(usize, usize)>,
     /// The footprint of each passing slot that carries a label, keyed by slot index (see
     /// [`labelled_slot_footprint`]).
     pub(super) slot_footprints: HashMap<usize, Footprint>,
@@ -137,9 +152,10 @@ impl<'a> SlotGraph<'a> {
         chart: &'a Flowchart,
         axis: Axis,
     ) -> Option<(SlotGraph<'a>, Vec<Vec<usize>>)> {
-        let reversed = cycle_closing_edges(chart)?;
+        let closing = cycle_closing_edges(chart)?;
         let mut layer_of =
-            longest_path_layers(chart.nodes.len(), &layering_constraints(chart, &reversed)?)?;
+            longest_path_layers(chart.nodes.len(), &layering_constraints(chart, &closing)?)?;
+        let reversed = reversed_links(&closing);
         let node_count = chart.nodes.len();
         let member_layers = chart
             .subgraphs
@@ -151,23 +167,71 @@ impl<'a> SlotGraph<'a> {
             })
             .collect::<Option<Vec<_>>>()?;
         let mut frame_end: HashMap<usize, (usize, bool)> = HashMap::new();
+        let mut beside_ends: HashMap<usize, usize> = HashMap::new();
+        let mut beside = Vec::with_capacity(chart.edges.len());
         let mut paths = Vec::with_capacity(chart.edges.len());
         for (edge, &reversed) in chart.edges.iter().zip(&reversed) {
             // The routing ends a link laid out to an empty subgraph's hidden member at the
             // frame's border.
-            let mut slot_at = |end: End, entering: bool| -> Option<usize> {
-                match laid_out_end(chart, end) {
-                    End::Node(node) => Some(node),
-                    End::Subgraph(subgraph) => {
-                        let (first, last) = *member_layers.get(subgraph)?;
-                        frame_end.insert(layer_of.len(), (subgraph, entering));
-                        layer_of.push(if entering { first } else { last });
-                        Some(layer_of.len() - 1)
+            let (from, to) = if reversed { (edge.to, edge.from) } else { (edge.from, edge.to) };
+            let (from, to) = (laid_out_end(chart, from), laid_out_end(chart, to));
+            // A link whose pairs disagree has its other end within a frame's layers. It
+            // meets that frame across the flow, in the layer next to the other end.
+            let side = match (from, to) {
+                (End::Subgraph(source), End::Subgraph(target)) => {
+                    let &(source_first, source_last) = member_layers.get(source)?;
+                    let &(target_first, target_last) = member_layers.get(target)?;
+                    if target_first > source_last {
+                        None
+                    } else if target_first > source_first {
+                        // The target's first layer lies within the source's span: the link
+                        // leaves the source frame across the flow, in the layer before the
+                        // target.
+                        Some((LaidOutEnd::Source, target_first - 1))
+                    } else if target_last > source_last {
+                        // The source's last layer lies within the target's span: the link
+                        // enters the target frame across the flow, in the layer after the
+                        // source.
+                        Some((LaidOutEnd::Target, source_last + 1))
+                    } else {
+                        // Neither span holds the other's end; one line cannot meet both
+                        // frames.
+                        return None;
                     }
                 }
+                (End::Subgraph(subgraph), End::Node(node)) => {
+                    let target = *layer_of.get(node)?;
+                    (target <= member_layers.get(subgraph)?.1)
+                        .then(|| Some((LaidOutEnd::Source, target.checked_sub(1)?)))
+                        .flatten()
+                }
+                (End::Node(node), End::Subgraph(subgraph)) => {
+                    let source = *layer_of.get(node)?;
+                    (source >= member_layers.get(subgraph)?.0)
+                        .then_some((LaidOutEnd::Target, source + 1))
+                }
+                _ => None,
             };
-            let (from, to) = if reversed { (edge.to, edge.from) } else { (edge.from, edge.to) };
-            let (start, end) = (slot_at(from, false)?, slot_at(to, true)?);
+            beside.push(side.map(|(end, _)| end));
+            let mut slot_at = |end: End, at: LaidOutEnd| -> Option<usize> {
+                let End::Subgraph(subgraph) = end else { return end.node() };
+                let layer = match side {
+                    Some((side, layer)) if side == at => {
+                        beside_ends.insert(layer_of.len(), subgraph);
+                        layer
+                    }
+                    _ => {
+                        let entering = at == LaidOutEnd::Target;
+                        frame_end.insert(layer_of.len(), (subgraph, entering));
+                        let (first, last) = *member_layers.get(subgraph)?;
+                        if entering { first } else { last }
+                    }
+                };
+                layer_of.push(layer);
+                Some(layer_of.len() - 1)
+            };
+            let (start, end) =
+                (slot_at(from, LaidOutEnd::Source)?, slot_at(to, LaidOutEnd::Target)?);
             if start == end {
                 paths.push(vec![start]);
                 continue;
@@ -194,6 +258,9 @@ impl<'a> SlotGraph<'a> {
         let mut members = vec![Vec::new(); layer_count];
         let mut frame_ends = vec![Vec::new(); layer_count];
         for (slot, &layer) in layer_of.iter().enumerate() {
+            if beside_ends.contains_key(&slot) {
+                continue;
+            }
             let stack = if frame_end.contains_key(&slot) { &mut frame_ends } else { &mut members };
             stack.get_mut(layer)?.push(slot);
         }
@@ -231,21 +298,29 @@ impl<'a> SlotGraph<'a> {
             .iter()
             .map(|held| {
                 held.map_or_else(Vec::new, |(_, subgraph)| {
-                    let mut chain: Vec<usize> = chart.enclosing(subgraph).collect();
-                    chain.reverse();
+                    let mut chain = chart.enclosing_chain(subgraph);
                     chain.push(subgraph);
                     chain
                 })
             })
             .collect();
+        // An end at a frame lies in the subgraphs enclosing that frame, not in the frame's
+        // own subgraph: the frame's border runs through it.
+        for (&slot, &subgraph) in
+            frame_end.iter().map(|(slot, (subgraph, _))| (slot, subgraph)).chain(&beside_ends)
+        {
+            *chain_of.get_mut(slot)? = chart.enclosing_chain(subgraph);
+        }
         // A link's passing slots lie in the subgraphs both its ends lie in, as Mermaid puts
         // the dummy nodes of a link between two members of a cluster in that cluster: the
-        // frame runs around them, and the slots of other nodes stay outside it. An end at a
-        // frame lies in no subgraph, so neither do the passing slots of its link. Upstream
-        // assigns an edge's dummy nodes to the clusters on its path by rank
-        // (`parentDummyChains`), so the label of a link entering a cluster may fall inside
-        // it; here a link to a frame ends at the frame's border, so its label stays in the
-        // gap before the frame, outside it.
+        // frame runs around them, and the slots of other nodes stay outside it. A link
+        // between a member of `S` and a subgraph nested in `S` thus passes inside `S`, as
+        // upstream's `parentDummyChains` puts the dummy nodes of such an edge in the
+        // cluster, while a link from outside `S` to that nested subgraph passes outside
+        // it. Upstream assigns an edge's dummy nodes to the clusters on its path by rank,
+        // so the label of a link entering a cluster may fall inside it; here a link to a
+        // frame ends at the frame's border, so its label stays in the gap before the frame,
+        // outside it.
         for path in &paths {
             let (Some(&first), Some(&last)) = (path.first(), path.last()) else { continue };
             let (from, to) = (chain_of.get(first)?, chain_of.get(last)?);
@@ -255,12 +330,14 @@ impl<'a> SlotGraph<'a> {
                 *chain_of.get_mut(slot)? = common.clone();
             }
         }
-        let frame_end_slots = frame_end
+        let mut frame_end_slots = frame_end
             .iter()
-            .map(|(&slot, &(subgraph, _))| {
-                Some(FrameEnd { slot, layer: *layer_of.get(slot)?, subgraph })
-            })
+            .map(|(&slot, &(subgraph, _))| (slot, subgraph))
+            .chain(beside_ends.iter().map(|(&slot, &subgraph)| (slot, subgraph)))
+            .map(|(slot, subgraph)| Some(FrameEnd { slot, layer: *layer_of.get(slot)?, subgraph }))
             .collect::<Option<Vec<_>>>()?;
+        // A map's order varies from run to run; slot order keeps the layout the same.
+        frame_end_slots.sort_unstable_by_key(|end| end.slot);
         let mut loop_labels: Vec<Vec<Option<&Label>>> = vec![Vec::new(); node_count];
         for edge in chart.edges.iter().filter(|edge| edge.stroke.is_visible()) {
             if let Some((from, to)) = edge.nodes()
@@ -269,16 +346,27 @@ impl<'a> SlotGraph<'a> {
                 loop_labels.get_mut(from)?.push(edge.label.as_ref());
             }
         }
+        // The labels on the runs of the drawn links leaving each slot, which lie across the
+        // flow about the cell the link leaves by (see `label_cross_reach`).
+        let mut run_labels: Vec<Vec<&Label>> = vec![Vec::new(); layer_of.len()];
+        for (index, (edge, path)) in chart.edges.iter().zip(&paths).enumerate() {
+            if let Some(label) = &edge.label
+                && edge.stroke.is_visible()
+                && on_run(&beside, index)
+            {
+                run_labels.get_mut(*path.first()?)?.push(label);
+            }
+        }
         // The loops' legs come after the node's other exits whatever their order, so only
         // how many drawn links leave the node matters here, not where their targets lie.
         let mut overhang = vec![(0, 0); node_count];
-        for (node, labels) in loop_labels.iter().enumerate() {
+        for (node, (labels, runs)) in loop_labels.iter().zip(&run_labels).enumerate() {
             let Some(node_data) = chart.nodes.get(node) else { continue };
-            if labels.iter().all(Option::is_none) {
+            if labels.iter().all(Option::is_none) && runs.is_empty() {
                 continue;
             }
             let targets = drawn.get(node)?.iter().filter(|&&drawn| drawn).count();
-            let Exits { legs, .. } = exit_cells(
+            let Exits { targets: cells, legs } = exit_cells(
                 axis,
                 targets,
                 labels,
@@ -286,13 +374,35 @@ impl<'a> SlotGraph<'a> {
                 axis.port_offset(node_data),
             )?;
             let size = signed(axis.box_cross_size(node_data))?;
+            let (before, after) = overhang.get_mut(node)?;
             for (&leg, label) in legs.iter().zip(labels) {
                 let Some(label) = label else { continue };
                 let (_, first) = self_loop_label_at(axis, leg, label)?;
                 let end = first + signed(axis.label_size(label).1)?;
-                let (before, after) = overhang.get_mut(node)?;
                 *before = (*before).max(usize::try_from(-first).unwrap_or(0));
                 *after = (*after).max(usize::try_from(end - size).unwrap_or(0));
+            }
+            // Which of the cells a run leaves by depends on where its end beside the frame
+            // ranks among the node's targets, which the layers' order settles only later, so
+            // the label reaches as far as it would from the outermost cell on either side.
+            let (Some(&first), Some(&last)) = (cells.iter().min(), cells.iter().max()) else {
+                continue;
+            };
+            for &label in runs {
+                let (reach_before, reach_after) = label_cross_reach(axis, label);
+                let end = signed(last + reach_after + 1)?;
+                *before = (*before).max(reach_before.saturating_sub(first));
+                *after = (*after).max(usize::try_from(end - size).unwrap_or(0));
+            }
+        }
+        let mut run_reach = vec![(0, 0); chart.subgraphs.len()];
+        for (slot, labels) in run_labels.iter().enumerate() {
+            let Some(&(subgraph, _)) = frame_end.get(&slot) else { continue };
+            let (before, after) = run_reach.get_mut(subgraph)?;
+            for &label in labels {
+                let (reach_before, reach_after) = label_cross_reach(axis, label);
+                *before = (*before).max(reach_before);
+                *after = (*after).max(reach_after);
             }
         }
         // Only a label on a passing slot (`LabelSpot::Slot`) sizes a slot; a label in a gap
@@ -310,10 +420,12 @@ impl<'a> SlotGraph<'a> {
             chart,
             axis,
             reversed,
+            beside,
             layer_of,
             node_count,
             member_layers,
             frame_end,
+            beside_ends,
             frame_end_slots,
             frame_ends,
             paths,
@@ -325,6 +437,7 @@ impl<'a> SlotGraph<'a> {
             chain_of,
             loop_labels,
             overhang,
+            run_reach,
             slot_footprints,
         };
         Some((graph, members))
@@ -422,6 +535,7 @@ impl<'a> SlotGraph<'a> {
     ) -> Option<Placement> {
         let Self { chart, axis, node_count, .. } = *self;
         let Self { layer_of, member_layers, frame_end, frame_ends, children, drawn, .. } = self;
+        let Self { beside_ends, .. } = self;
         let Self { parents, link_of, arrival_reach, chain_of, loop_labels, .. } = self;
         let gap = signed(sibling_gap)?;
         let position = self.positions(members)?;
@@ -534,7 +648,16 @@ impl<'a> SlotGraph<'a> {
                     let title_end =
                         frame_start + self.title_cells(current, &crossings, frame_start)?;
                     let pad = self.pads(&[current])?;
-                    next_free = next_free.map(|end: isize| (end + pad).max(title_end));
+                    // The labels on the runs of links leaving the frame lie in the gap
+                    // after its last layer, reaching past the cell they leave by, which
+                    // lies no further out than the cells the frame grew by; counting their
+                    // reach from the border instead leaves the frame's margin as slack.
+                    let run_after = if member_layers.get(current)?.1 == layer_index {
+                        signed(self.run_reach.get(current).map_or(0, |&(_, after)| after))?
+                    } else {
+                        0
+                    };
+                    next_free = next_free.map(|end: isize| (end + pad + run_after).max(title_end));
                     // A frame that spans the layer before has its border on the label rows;
                     // one whose members start in this layer has its top border below them,
                     // so it takes nothing there.
@@ -654,6 +777,16 @@ impl<'a> SlotGraph<'a> {
                     .iter()
                     .map(|arrival| Some(start + signed(arrival.cell)?))
                     .collect::<Option<_>>()?;
+            }
+            // Until `place_beside_ends` puts them by their frames, the ends of links meeting
+            // a frame across the flow lie after the layer's slots.
+            for &end in beside_ends.keys() {
+                if layer_of.get(end) == Some(&layer_index) {
+                    let at = next_free.unwrap_or(0);
+                    *starts.get_mut(end)? = at;
+                    *ports.get_mut(end)? = at;
+                    *exits.get_mut(end)? = vec![at; children.get(end)?.len()];
+                }
             }
             // The links meeting one border of a frame in this layer take cells of their own
             // across the span of its members here and the cells the frame grew by around
@@ -783,6 +916,25 @@ impl<'a> SlotGraph<'a> {
             }
         }
         Some(Placement { starts, ports, needs, entered, exits })
+    }
+
+    /// Puts the end of each link meeting a frame across the flow in the cell just outside
+    /// the frame on the side of the link's other end, given each frame's first and last
+    /// cells across the flow, its borders included, in `bands`.
+    pub(super) fn place_beside_ends(
+        &self,
+        placement: &mut Placement,
+        bands: &[Option<(isize, isize)>],
+    ) -> Option<()> {
+        for (&end, &subgraph) in &self.beside_ends {
+            let (low, high) = (*bands.get(subgraph)?)?;
+            let (children, parents) = (self.children.get(end)?, self.parents.get(end)?);
+            let &other = children.first().or(parents.first())?;
+            let at = if *placement.starts.get(other)? > high { high + 1 } else { low - 1 };
+            *placement.starts.get_mut(end)? = at;
+            *placement.ports.get_mut(end)? = at;
+        }
+        Some(())
     }
 
     /// The cells where drawn links meet the top border of subgraph `index`'s frame on

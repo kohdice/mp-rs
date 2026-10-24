@@ -201,6 +201,17 @@ pub(super) struct Layered {
     /// Whether each edge runs against the flow, from its source in a later layer back
     /// to its target, indexed like [`Flowchart::edges`].
     pub reversed: Vec<bool>,
+    /// The end of each edge, if any, that meets a subgraph's frame through the border
+    /// across the flow facing the edge's other end, indexed like [`Flowchart::edges`]. A
+    /// link whose member pairs disagree on their direction (see
+    /// [`cycle_closing_edges`](layers::cycle_closing_edges)) has its other end within the
+    /// layers of the frame it meets so, beside that frame, in the layer next to the other
+    /// end: the source's frame when the link is laid out from a subgraph whose layers span
+    /// the target's first layer, the target's frame when it is laid out to a subgraph
+    /// whose layers span the source's last layer. A link between two subgraphs where
+    /// neither's layers span the other's end is not laid out (see
+    /// [`lay_out`]).
+    pub beside: Vec<Option<LaidOutEnd>>,
     /// The fewest cells each subgraph's frame must grow by on either side of its members
     /// for the links meeting it in this layout to fit its borders (see `frame_ports`),
     /// indexed like [`Flowchart::subgraphs`]; 0 for a frame no drawn link meets.
@@ -208,6 +219,28 @@ pub(super) struct Layered {
     /// The first and last layers holding members of each subgraph, indexed like
     /// [`Flowchart::subgraphs`].
     pub member_layers: Vec<(usize, usize)>,
+}
+
+/// One end of a link as it is laid out, which for a reversed link is not the end it is
+/// written with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LaidOutEnd {
+    /// The end the link is laid out from.
+    Source,
+    /// The end the link is laid out to.
+    Target,
+}
+
+/// Whether the label of edge `index`, given each edge's [`Layered::beside`], goes on the
+/// run from its source to its track rather than after the tracks: the edge is laid out
+/// into a frame it meets across the flow, so the routing ends its line on the track. Such
+/// an edge spans one gap, the one after its source, since its end beside the frame lies
+/// in the layer after its source. It is never laid out from its written target: a link
+/// that meets a frame across the flow has member pairs that disagree, and
+/// [`reversed_links`](layers::reversed_links) reverses a link only when every pair is
+/// reversed.
+pub(super) fn on_run(beside: &[Option<LaidOutEnd>], index: usize) -> bool {
+    beside.get(index) == Some(&Some(LaidOutEnd::Target))
 }
 
 /// Bounds the slots added beyond the nodes: the cells long links pass through and the
@@ -219,14 +252,18 @@ const MAX_PASSING_SLOTS: usize = 10_000;
 
 /// Places every node in the first layer that is, for each parent, at least the link's
 /// `length` layers after that parent: the layer after its furthest parent when every
-/// link has length one. Edges closing a cycle are laid out reversed. Then orders each
+/// link has length one. The pairs of nodes closing a cycle are laid out reversed (see
+/// [`cycle_closing_edges`](layers::cycle_closing_edges)). Then orders each
 /// layer to reduce crossings with the layer before, keeps each subgraph's slots
 /// together, and places every slot across the flow, `sibling_gap` cells or more apart,
-/// moving a node out of a frame it does not belong to until no frame covers such a stray
-/// or more rounds than there are nodes have run. `None` when a link
+/// moving a node out of a frame it does not belong to, together with the frame it lies
+/// in when it has one, until no frame covers such a stray or more rounds than there are
+/// nodes have run. `None` when a link
 /// joins a subgraph to itself or to one of its own members (see
-/// [`cycle_closing_edges`](layers::cycle_closing_edges)), or when the slots added beyond
-/// the nodes would number more than [`MAX_PASSING_SLOTS`].
+/// [`cycle_closing_edges`](layers::cycle_closing_edges)), when a link between two
+/// subgraphs whose member pairs disagree on their direction has neither's layers span
+/// the other's end (see [`Layered::beside`]), or when the slots added beyond the nodes would
+/// number more than [`MAX_PASSING_SLOTS`].
 pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Option<Layered> {
     let (graph, members) = SlotGraph::new(chart, axis)?;
     let layer_count = members.len();
@@ -246,11 +283,12 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
     // A frame keeps the cells across the flow it covers clear of non-members in every
     // layer it spans. A stray is a node placed inside a frame it does not belong to, or
     // whose own frames would meet that frame: each round places the strays again after
-    // the frame, and the frame's members no further out than the frame reached, until no
-    // frame covers a stray. Every round moves at least one stray outwards, so more rounds
+    // the frame, or that frame after the strays' own, and the members of the frame that
+    // stays no further out than it reached, until no frame covers a stray. Every round
+    // moves at least one stray or frame outwards, so more rounds
     // than nodes means the places are not settling; the routing gives up on a drawing
     // where a frame still covers a stray.
-    let Placement { starts, ports, needs: frame_needs, .. } = loop {
+    let (mut placement, bands) = loop {
         let placement = graph.place(&members, &floor, &ceiling, sibling_gap)?;
         let starts = &placement.starts;
         rounds += 1;
@@ -261,12 +299,17 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
             Some((start - signed(before)?, start + signed(graph.extent(slot).0 + after)? - 1))
         };
         // Each frame's first and last cells across the flow, around its members' boxes,
-        // the passing slots of the links between its members and its inner frames.
+        // the passing slots of the links between its members, the ends of links at its
+        // inner frames and those frames themselves. An end beside an inner frame lies just
+        // outside that frame once it is placed there, inside this one's margin, so the
+        // ends beside frames are left out here: `place_beside_ends` places them only once
+        // the bands are known.
         let mut bands: Vec<Option<(isize, isize)>> = vec![None; chart.subgraphs.len()];
         for &index in &innermost_first {
             let subgraph = chart.subgraphs.get(index)?;
-            let passing = (graph.node_count..graph.layer_of.len())
-                .filter(|&slot| graph.in_subgraph(slot, index));
+            let passing = (graph.node_count..graph.layer_of.len()).filter(|&slot| {
+                graph.in_subgraph(slot, index) && !graph.beside_ends.contains_key(&slot)
+            });
             let boxes = subgraph.members.iter().copied().chain(passing).map(span);
             let inner = chart
                 .subgraphs
@@ -304,25 +347,99 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     && slot_low <= high
                     && low <= slot_high
                 {
-                    strays.push((slot, index, high, lead));
+                    strays.push((slot, index, own_frames.first().copied()));
                 }
             }
         }
         if strays.is_empty() || rounds > graph.node_count {
-            break placement;
+            break (placement, bands);
         }
-        for (stray, subgraph, high, lead) in strays {
-            // The labels of the stray's self loops move out of the frame with it.
-            let after = high + 1 + gap + lead + signed(graph.overhang(stray).0)?;
-            floor
-                .entry(stray)
-                .and_modify(|floor: &mut isize| *floor = (*floor).max(after))
-                .or_insert(after);
-            for &member in &chart.subgraphs.get(subgraph)?.members {
+        for (stray, subgraph, own) in strays {
+            // A stray lying in a frame of its own moves with that frame's other members:
+            // moving it alone would stretch its frame over the one it left. Of the two
+            // frames, the one the stray's layer stacks first stays and the other moves
+            // after it; the frame on the frame's side is the outermost one around it that
+            // does not hold the stray's frame.
+            let (kept, moved) = match own {
+                None => (subgraph, vec![stray]),
+                Some(own) => {
+                    let mut around = chart.enclosing_chain(subgraph);
+                    around.push(subgraph);
+                    let sibling = around.into_iter().find(|&outer| !chart.encloses(outer, own))?;
+                    let layer = members.get(*graph.layer_of.get(stray)?)?;
+                    let at = layer.iter().position(|&slot| slot == stray)?;
+                    let sibling_at =
+                        layer.iter().position(|&slot| graph.in_subgraph(slot, sibling));
+                    let (kept, moving) = if sibling_at.is_some_and(|sibling_at| at < sibling_at) {
+                        (own, sibling)
+                    } else {
+                        (sibling, own)
+                    };
+                    // The frame's band spans the passing slots of the links inside it and
+                    // the ends at its inner frames too, so they move with its members.
+                    let moved = (0..graph.layer_of.len())
+                        .filter(|&slot| graph.in_subgraph(slot, moving))
+                        .collect();
+                    (kept, moved)
+                }
+            };
+            let (_, high) = (*bands.get(kept)?)?;
+            // The kept frame and the frames around it whose run labels reach past their
+            // band. Those labels hang toward the moved slots, so a moved slot's frames
+            // start past the larger of the gap and the reach of those kept frames. The cell
+            // such a link leaves by lies inside the band's margin, so counting the reach
+            // from the band's last cell keeps a blank cell or more between the label and
+            // those frames.
+            let kept_reaches: Vec<(usize, usize)> = chart
+                .enclosing_chain(kept)
+                .into_iter()
+                .chain([kept])
+                .filter_map(|frame| {
+                    let &(_, after) = graph.run_reach.get(frame)?;
+                    (after > 0).then_some((frame, after))
+                })
+                .collect();
+            let mut is_moved = vec![false; graph.layer_of.len()];
+            for &slot in &moved {
+                *is_moved.get_mut(slot)? = true;
+                // The reach of the kept side's run labels, less the frames that hold this
+                // slot (see `kept_reaches`).
+                let kept_after = kept_reaches
+                    .iter()
+                    .filter(|&&(frame, _)| !graph.in_subgraph(slot, frame))
+                    .map(|&(_, after)| after)
+                    .max()
+                    .unwrap_or(0);
+                // The slot's frames that do not hold the kept frame move out with it, and
+                // the labels of its self loops and runs too. The label on the run of a link
+                // leaving one of those frames reaches before the cell the link leaves by,
+                // which lies somewhere on the frame's border; counting its reach from the
+                // frame's first cell instead leaves a cell or two of slack.
+                let around: Vec<usize> = graph
+                    .chain_of
+                    .get(slot)?
+                    .iter()
+                    .copied()
+                    .filter(|&outer| !chart.encloses(outer, kept))
+                    .collect();
+                let run_before = around
+                    .iter()
+                    .filter_map(|&frame| graph.run_reach.get(frame).map(|&(before, _)| before))
+                    .max()
+                    .unwrap_or(0);
+                let overhang = graph.overhang(slot).0 + run_before;
+                let clear = gap.max(signed(kept_after)?);
+                let after = high + 1 + clear + graph.pads(&around)? + signed(overhang)?;
+                floor
+                    .entry(slot)
+                    .and_modify(|floor: &mut isize| *floor = (*floor).max(after))
+                    .or_insert(after);
+            }
+            for &member in &chart.subgraphs.get(kept)?.members {
                 // A member lies the margin and growth of the frame it sits in, and of each
                 // frame nested between, further in.
                 let chain = graph.chain_of.get(member)?;
-                let depth = chain.iter().position(|&outer| outer == subgraph)?;
+                let depth = chain.iter().position(|&outer| outer == kept)?;
                 let size = graph.extent(member).0 + graph.overhang(member).1;
                 let inside = high - graph.pads(chain.get(depth..)?)? - signed(size)? + 1;
                 ceiling
@@ -330,20 +447,23 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
                     .and_modify(|ceiling: &mut isize| *ceiling = (*ceiling).min(inside))
                     .or_insert(inside);
             }
-            // In a layer holding members of the frame or passing slots inside it, the stray
-            // moves after them, so that its place in the stack agrees with the floor that
-            // puts it after the frame.
-            let layer = members.get_mut(*graph.layer_of.get(stray)?)?;
-            let last_member = layer.iter().rposition(|&slot| graph.in_subgraph(slot, subgraph));
-            if let (Some(at), Some(last_member)) =
-                (layer.iter().position(|&slot| slot == stray), last_member)
-                && at < last_member
-            {
-                let stray = layer.remove(at);
-                layer.insert(last_member, stray);
+            // In each layer holding slots of the kept frame, the moved slots go after them,
+            // so that their places in the stack agree with the floors that put them after
+            // the frame. Every slot of the kept frame lies in its members' layers.
+            let &(first, last) = graph.member_layers.get(kept)?;
+            for layer in members.get_mut(first..=last)? {
+                let Some(last_kept) = layer.iter().rposition(|&slot| graph.in_subgraph(slot, kept))
+                else {
+                    continue;
+                };
+                let (before, after): (Vec<usize>, Vec<usize>) =
+                    layer.drain(..=last_kept).partition(|&slot| is_moved.get(slot) != Some(&true));
+                layer.splice(0..0, before.into_iter().chain(after));
             }
         }
     };
+    graph.place_beside_ends(&mut placement, &bands)?;
+    let Placement { starts, ports, needs: frame_needs, .. } = placement;
 
     let origin = starts.iter().copied().min().unwrap_or(0);
     let orders = graph.positions(&members)?;
@@ -371,6 +491,7 @@ pub(super) fn lay_out(chart: &Flowchart, axis: Axis, sibling_gap: usize) -> Opti
         layer_count,
         paths: graph.paths,
         reversed: graph.reversed,
+        beside: graph.beside,
         frame_needs,
         member_layers: graph.member_layers,
     })

@@ -53,6 +53,11 @@ pub(super) struct Node {
     /// id in the order they were attached, and then the `style` statements naming it
     /// set, each over the ones before.
     pub styling: Styling,
+    /// The node's id when it is a canonical array index such as `0` or `42` (not `01`),
+    /// which upstream's graph lists before every other id, in ascending order, as
+    /// JavaScript's `Object.keys` does; `None` for any other id and for a node that
+    /// stands for a subgraph.
+    pub array_index: Option<u32>,
 }
 
 /// What a node is drawn as.
@@ -331,6 +336,13 @@ impl Flowchart {
         // Parsing leaves no cycle of parents; the bound keeps a walk finite regardless.
         std::iter::successors(self.parent_of(subgraph), move |&parent| self.parent_of(parent))
             .take(self.subgraphs.len())
+    }
+
+    /// The subgraphs `subgraph` is nested in, outermost first, without `subgraph` itself.
+    pub(super) fn enclosing_chain(&self, subgraph: usize) -> Vec<usize> {
+        let mut chain: Vec<usize> = self.enclosing(subgraph).collect();
+        chain.reverse();
+        chain
     }
 
     /// How many subgraphs `subgraph` is nested in.

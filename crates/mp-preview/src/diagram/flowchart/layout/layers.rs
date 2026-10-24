@@ -1,43 +1,77 @@
-//! The layer of each node along the flow, dagre's `rank`: the links closing a cycle are
-//! reversed, then each node goes in the first layer its incoming links allow.
+//! The layer of each node along the flow, dagre's `rank`: the pairs of nodes closing a
+//! cycle are reversed, then each node goes in the first layer its incoming links allow.
 
 use crate::diagram::flowchart::parse::{Edge, End, Flowchart};
 
-/// Marks the links that would close a cycle with the links declared before them, each
-/// link standing for the order it imposes on the nodes (see [`link_order`]); a marked
-/// link is laid out reversed, which leaves no cycle. Earlier links keep their
-/// direction, so a cycle is broken at its last declared link. Upstream's dagre picks the
-/// links by a depth-first search over its own internal graph, whose node order a text
-/// renderer cannot reproduce exactly; declaration order reverses the same links in the
-/// cyclic examples of Mermaid's flowchart documentation
-/// (<https://mermaid.js.org/syntax/flowchart.html>). `None` when a link joins a subgraph
+/// Marks the pairs of nodes (see [`link_order`]) to lay out reversed so that no cycle
+/// is left, indexed like [`Flowchart::edges`] and then like the link's pairs, as dagre's
+/// `dfsFAS` picks them: a depth-first search from each node in turn follows the pairs
+/// leaving a node in the order of their links, and reverses a pair whose target is
+/// still on the search's path. Only such back pairs are reversed, so no new cycle forms.
+/// A self loop orders nothing and is never reversed. `None` when a link joins a subgraph
 /// to itself or to one of its own members.
-pub(super) fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<bool>> {
-    let mut children = vec![Vec::new(); chart.nodes.len()];
-    let mut closing = Vec::with_capacity(chart.edges.len());
-    for edge in &chart.edges {
-        // A self loop orders nothing.
-        let pairs: Vec<(usize, usize)> =
-            link_order(chart, edge)?.into_iter().filter(|(from, to)| from != to).collect();
-        // Every source of the link precedes every target, so the link closes a cycle
-        // when any source can already be reached from any target.
-        let mut reached = vec![false; chart.nodes.len()];
-        let mut stack: Vec<usize> = pairs.iter().map(|&(_, to)| to).collect();
-        while let Some(node) = stack.pop() {
-            let seen = reached.get_mut(node)?;
-            if !*seen {
-                *seen = true;
-                stack.extend(children.get(node)?);
+///
+/// Upstream reroutes a link to or from a subgraph to one anchor member and reverses that
+/// single edge; here the link stands in the search for every member pair, and a link
+/// whose pairs disagree is drawn in the direction of its unreversed pairs (see
+/// [`reversed_links`]), as one line cannot run both ways.
+pub(super) fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<Vec<bool>>> {
+    let pairs =
+        chart.edges.iter().map(|edge| link_order(chart, edge)).collect::<Option<Vec<_>>>()?;
+    // The pairs leaving each node, as (link, pair, target).
+    let mut leaving = vec![Vec::new(); chart.nodes.len()];
+    for (link, pairs) in pairs.iter().enumerate() {
+        for (pair, &(from, to)) in pairs.iter().enumerate() {
+            if from != to {
+                leaving.get_mut(from)?.push((link, pair, to));
             }
         }
-        let closes = pairs.iter().any(|&(from, _)| reached.get(from) == Some(&true));
-        for (from, to) in pairs {
-            let (from, to) = if closes { (to, from) } else { (from, to) };
-            children.get_mut(from)?.push(to);
+    }
+    let mut closing: Vec<Vec<bool>> = pairs.iter().map(|pairs| vec![false; pairs.len()]).collect();
+    // Upstream's graph lists the nodes in the order they first appear, those with an
+    // array-index id first.
+    let mut roots: Vec<usize> = (0..chart.nodes.len()).collect();
+    roots.sort_by_key(|&node| {
+        let index = chart.nodes.get(node).and_then(|node| node.array_index);
+        (index.is_none(), index)
+    });
+    let mut visited = vec![false; chart.nodes.len()];
+    let mut on_path = vec![false; chart.nodes.len()];
+    for root in roots {
+        if *visited.get(root)? {
+            continue;
         }
-        closing.push(closes);
+        // Each node on the search's path, with the next of its pairs to follow.
+        let mut path = vec![(root, 0)];
+        *visited.get_mut(root)? = true;
+        *on_path.get_mut(root)? = true;
+        while let Some((node, next)) = path.last_mut() {
+            let node = *node;
+            let Some(&(link, pair, to)) = leaving.get(node)?.get(*next) else {
+                *on_path.get_mut(node)? = false;
+                path.pop();
+                continue;
+            };
+            *next += 1;
+            if *on_path.get(to)? {
+                *closing.get_mut(link)?.get_mut(pair)? = true;
+            } else if !*visited.get(to)? {
+                *visited.get_mut(to)? = true;
+                *on_path.get_mut(to)? = true;
+                path.push((to, 0));
+            }
+        }
     }
     Some(closing)
+}
+
+/// Whether each link is laid out from its target, given its reversed pairs as
+/// [`cycle_closing_edges`] marks them: only when every pair of the link is reversed.
+pub(super) fn reversed_links(closing: &[Vec<bool>]) -> Vec<bool> {
+    closing
+        .iter()
+        .map(|pairs| !pairs.is_empty() && pairs.iter().all(|&reversed| reversed))
+        .collect()
 }
 
 /// The pairs of nodes `(from, to)` whose order along the flow `edge` imposes, in its
@@ -79,16 +113,16 @@ pub(super) struct Constraint {
     pub length: usize,
 }
 
-/// The pairs of nodes whose layers the links impose (see [`link_order`]), each link in
-/// layout order, `reversed` closing a cycle. `None` when a link joins a subgraph to
-/// itself or to one of its own members.
+/// The pairs of nodes whose layers the links impose (see [`link_order`]), each pair in
+/// layout order, those marked in `reversed` (see [`cycle_closing_edges`]) turned round.
+/// `None` when a link joins a subgraph to itself or to one of its own members.
 pub(super) fn layering_constraints(
     chart: &Flowchart,
-    reversed: &[bool],
+    reversed: &[Vec<bool>],
 ) -> Option<Vec<Constraint>> {
     let mut constraints = Vec::new();
-    for (edge, &reversed) in chart.edges.iter().zip(reversed) {
-        for (from, to) in link_order(chart, edge)? {
+    for (edge, reversed) in chart.edges.iter().zip(reversed) {
+        for ((from, to), &reversed) in link_order(chart, edge)?.into_iter().zip(reversed) {
             let (from, to) = if reversed { (to, from) } else { (from, to) };
             constraints.push(Constraint { from, to, length: edge.length });
         }

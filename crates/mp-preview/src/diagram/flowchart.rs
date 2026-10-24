@@ -19,7 +19,6 @@ use crate::diagram::Failure;
 use crate::style::Line;
 
 use self::layout::Axis;
-use self::route::Scene;
 
 /// Cells a drawing may span, width times height. Without a bound, a long label in front
 /// of a tall layer stretches every row to the label's width, and drawing, label
@@ -133,15 +132,14 @@ fn render_chart(
     } else {
         layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?
     };
-    let (scene, routed) =
+    let routed =
         route::route(&chart, &layered, axis, spacing.layer_gap).ok_or(Failure::Unsupported)?;
     // Labels only add cells, so a scene already too large is not worth placing them on.
-    if !fits(&scene, axis, width, title_width) {
+    if !fits(routed.extent_without_labels(axis), axis, width, title_width) {
         return Ok(None);
     }
-    let (labels, cross_shift) = route::place_labels(&routed);
-    let scene = route::Scene { labels, ..route::shift_scene(scene, 0, cross_shift) };
-    if !fits(&scene, axis, width, title_width) {
+    let scene = route::place_labels(routed).ok_or(Failure::Unsupported)?;
+    if !fits(scene.extent(axis), axis, width, title_width) {
         return Ok(None);
     }
     let drawing = draw::draw(&scene, chart.direction);
@@ -151,11 +149,15 @@ fn render_chart(
     }))
 }
 
-/// Whether the scene, under a title row `title_width` columns wide and a blank row when
-/// there is a title, is at most `width` columns wide on screen and spans at most
-/// [`MAX_CELLS`].
-fn fits(scene: &Scene<'_>, axis: Axis, width: Option<usize>, title_width: Option<usize>) -> bool {
-    let (main, cross) = scene.extent(axis);
+/// Whether a scene spanning `(main, cross)` cells along and across the flow, under a
+/// title row `title_width` columns wide and a blank row when there is a title, is at most
+/// `width` columns wide on screen and spans at most [`MAX_CELLS`].
+fn fits(
+    (main, cross): (usize, usize),
+    axis: Axis,
+    width: Option<usize>,
+    title_width: Option<usize>,
+) -> bool {
     let (rows, columns) = match axis {
         Axis::Horizontal => (cross, main),
         Axis::Vertical => (main, cross),

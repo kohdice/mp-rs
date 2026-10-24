@@ -156,6 +156,7 @@ impl<'a> Builder<'a> {
                     body: Body::Hidden,
                     spread: 0,
                     styling: Styling::default(),
+                    array_index: None,
                 });
                 let holders: Vec<usize> =
                     std::iter::once(subgraph).chain(chart.enclosing(subgraph)).collect();
@@ -617,6 +618,7 @@ impl<'a> Builder<'a> {
                 body: Body::Box { label: Label::plain(id), shape: Shape::Rectangle },
                 spread: 0,
                 styling: Styling::default(),
+                array_index: array_index(id),
             });
             self.chart.nodes.len() - 1
         })
@@ -818,6 +820,14 @@ fn is_click(text: &str) -> bool {
         after_blank(action.get(name_end..).unwrap_or_default(), string)
     };
     rest.trim().is_empty()
+}
+
+/// `id` as a canonical array index (see [`Node::array_index`]): decimal digits with no
+/// leading zero but `0` itself, below `u32::MAX`.
+fn array_index(id: &str) -> Option<u32> {
+    let canonical =
+        id.bytes().all(|byte| byte.is_ascii_digit()) && (id == "0" || !id.starts_with('0'));
+    id.parse().ok().filter(|&index| canonical && index != u32::MAX)
 }
 
 /// `text` after the blanks starting it and what `part` reads after them, or `text` when

@@ -1,7 +1,7 @@
 //! The cells each subgraph frame takes, around its members, the links between them and
 //! its nested frames, and whether a frame covers a box or frame outside its subgraph.
 
-use super::{RoutedLabel, Scene, unsigned};
+use super::{Routed, RoutedLabel, unsigned};
 use crate::diagram::flowchart::label::Label;
 use crate::diagram::flowchart::layout::{Axis, TITLE_CORNER_OFFSET, frame_width, title_offset};
 use crate::diagram::flowchart::parse::{Direction, End, Flowchart, Subgraph};
@@ -27,50 +27,56 @@ fn cell_span(start: usize, size: usize) -> Option<(isize, isize)> {
 }
 
 /// The frame around `subgraph`'s content: its boxes, the lines of the links between its
-/// members (its members' self loops among them), the `routed` labels of those links and
-/// the frames `inner` of the subgraphs nested in it, each given by its first and last
+/// members and the subgraphs nested in it (its members' self loops among them), the
+/// `routed` labels of those links and the frames `inner` of the subgraphs nested in it
+/// directly, each given by its first and last
 /// cells along and across the flow with whether a link's marker lies just before and just
 /// after it along the flow. The frame margins away from the content, further where a link
 /// marker next to a member box or just outside a nested frame would otherwise fall on the
 /// border, further across the flow by the cells the subgraph grew by, and long enough to
 /// the right on screen to fit `┌─ title ─┐`, with the title clear of the links crossing
 /// the top border when `clear_links` holds. `outer` lists the subgraphs this one is
-/// nested in, and `is_member` is indexed by node. `None` when the subgraph has nothing to
-/// enclose or a cell does not fit an `isize`.
+/// nested in, `is_nested` tells, by subgraph, those nested in it at any depth, and
+/// `is_member` is indexed by node. `None` when the subgraph has nothing to enclose or a
+/// cell does not fit an `isize`.
 pub(super) fn frame_bounds<'a>(
-    (subgraph, outer): (&'a Subgraph, &[usize]),
+    (subgraph, outer, is_nested): (&'a Subgraph, &[usize], &[bool]),
     is_member: &[bool],
     inner: &[(Rectangle, (bool, bool))],
-    scene: &Scene<'_>,
-    routed: &[RoutedLabel<'_>],
+    routed: &Routed<'_>,
     direction: Direction,
     clear_links: bool,
 ) -> Option<FrameBounds<'a>> {
     let axis = direction.axis();
     let is_member = |end: End| end.node().is_some_and(|node| is_member.get(node) == Some(&true));
+    let inside = |end: End| match end {
+        End::Node(_) => is_member(end),
+        End::Subgraph(other) => is_nested.get(other) == Some(&true),
+    };
     let boxes =
-        subgraph.members.iter().filter_map(|&member| scene.boxes.get(member)).map(|placed| {
+        subgraph.members.iter().filter_map(|&member| routed.boxes.get(member)).map(|placed| {
             Some((
                 cell_span(placed.main, axis.box_main_size(placed.node))?,
                 cell_span(placed.cross, axis.box_cross_size(placed.node))?,
             ))
         });
-    // A link between members runs inside the frame, as Mermaid puts its dummy nodes in
-    // the cluster.
-    let lines = scene
+    // A link between members, or between a member and a nested subgraph, runs inside the
+    // frame, as Mermaid puts its dummy nodes in the cluster.
+    let lines = routed
         .links
         .iter()
-        .filter(|link| is_member(link.edge.from) && is_member(link.edge.to))
+        .filter(|link| inside(link.edge.from) && inside(link.edge.to))
         .flat_map(|link| &link.points)
         .map(|&(main, cross)| Some((cell_span(main, 1)?, cell_span(cross, 1)?)));
-    // The labels on links between members lie inside the frame like their boxes.
-    let labels = routed.iter().filter_map(|&RoutedLabel { link, label, at: (main, cross) }| {
-        let edge = scene.links.get(link)?.edge;
-        (is_member(edge.from) && is_member(edge.to)).then_some(())?;
-        let (main_size, cross_size) = axis.label_size(label);
-        let (main_size, cross_size) = (signed(main_size)?, signed(cross_size)?);
-        Some(Some(((main, main + main_size - 1), (cross, cross + cross_size - 1))))
-    });
+    // The labels on those links lie inside the frame like their boxes.
+    let labels =
+        routed.labels.iter().filter_map(|&RoutedLabel { link, label, at: (main, cross) }| {
+            let edge = routed.links.get(link)?.edge;
+            (inside(edge.from) && inside(edge.to)).then_some(())?;
+            let (main_size, cross_size) = axis.label_size(label);
+            let (main_size, cross_size) = (signed(main_size)?, signed(cross_size)?);
+            Some(Some(((main, main + main_size - 1), (cross, cross + cross_size - 1))))
+        });
     let ((main_low, main_high), (cross_low, cross_high)) = boxes
         .chain(lines)
         .chain(labels)
@@ -85,7 +91,7 @@ pub(super) fn frame_bounds<'a>(
                 )
             },
         )?;
-    let markers = scene.links.iter().flat_map(|link| {
+    let markers = routed.links.iter().flat_map(|link| {
         let head = link.edge.head.filter(|_| is_member(link.edge.to)).and(link.points.last());
         let tail = link.edge.tail.filter(|_| is_member(link.edge.from)).and(link.points.first());
         head.into_iter().chain(tail)
@@ -130,7 +136,7 @@ pub(super) fn frame_bounds<'a>(
     };
     let title_width = subgraph.title.width();
     let offset = if clear_links {
-        title_offset(top_border_crossings(scene, outer, axis, top, *along, from_high), title_width)
+        title_offset(top_border_crossings(routed, outer, axis, top, *along, from_high), title_width)
     } else {
         TITLE_CORNER_OFFSET
     };
@@ -152,7 +158,7 @@ pub(super) fn frame_bounds<'a>(
 /// the cell just outside that subgraph's frame afterwards, so it never reaches a frame
 /// nested inside.
 fn top_border_crossings(
-    scene: &Scene<'_>,
+    routed: &Routed<'_>,
     outer: &[usize],
     axis: Axis,
     top: isize,
@@ -162,7 +168,7 @@ fn top_border_crossings(
     let other_frame =
         |end: End| matches!(end, End::Subgraph(subgraph) if outer.contains(&subgraph));
     let mut crossings = Vec::new();
-    let segments = scene.links.iter().flat_map(|link| {
+    let segments = routed.links.iter().flat_map(|link| {
         let last = link.points.len().saturating_sub(2);
         link.points.windows(2).enumerate().filter_map(move |(segment, pair)| {
             let cut = (segment == 0 && other_frame(link.edge.from))
@@ -198,7 +204,7 @@ fn top_border_crossings(
 pub(super) fn frames_overlap(
     chart: &Flowchart,
     framed: &[(usize, &[bool], FrameBounds<'_>)],
-    scene: &Scene<'_>,
+    routed: &Routed<'_>,
     axis: Axis,
 ) -> bool {
     let nested = |a: usize, b: usize| chart.encloses(a, b) || chart.encloses(b, a);
@@ -209,7 +215,7 @@ pub(super) fn frames_overlap(
         meet(frame.main, main) && meet(frame.cross, cross)
     };
     framed.iter().enumerate().any(|(index, (subgraph, is_member, frame))| {
-        let covers_a_stray = scene.boxes.iter().enumerate().any(|(node, placed)| {
+        let covers_a_stray = routed.boxes.iter().enumerate().any(|(node, placed)| {
             is_member.get(node) != Some(&true)
                 && cell_span(placed.main, axis.box_main_size(placed.node))
                     .zip(cell_span(placed.cross, axis.box_cross_size(placed.node)))
