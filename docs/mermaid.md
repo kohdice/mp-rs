@@ -145,6 +145,14 @@ These are drawn differently:
   side facing its other end; for a link between two subgraphs, it meets whichever frame's
   layers span the other end. A browser instead attaches such a link to one member of the
   subgraph and reverses or keeps that one link.
+- In a chart with subgraphs, nodes are put in layers by the same rule as without them:
+  the links together span the fewest layers, a link to or from a subgraph counting as
+  one link per member. A browser also ranks the hidden nodes and links it adds to
+  border each subgraph, so the layers of nodes inside and around a subgraph may differ.
+- The search for the layers that the links together span the fewest of stops after
+  10,000 changes of its spanning tree, where a browser searches on, so such a chart may
+  span more layers than in a browser. This is a safety bound; no chart that reaches it
+  is known.
 - A link between a subgraph and a node or subgraph inside it (`A --> s` where `A` is
   inside `s`, in either direction) is not drawn, as in a browser; a browser still keeps
   room in the subgraph for the hidden link, and here the subgraph is drawn as if the

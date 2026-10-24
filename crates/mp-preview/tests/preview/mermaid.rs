@@ -5181,6 +5181,42 @@ fn mermaid_node_cycle_reverses_the_link_closing_upstreams_depth_first_search() {
 }
 
 #[test]
+fn mermaid_node_without_parents_sits_in_the_layer_before_its_child() {
+    let output = drawn("flowchart LR\n    A --> C\n    B --> X --> C\n");
+    let (Some(a), Some(b), Some(x), Some(c)) =
+        (box_of(&output, "A"), box_of(&output, "B"), box_of(&output, "X"), box_of(&output, "C"))
+    else {
+        panic!("missing box in\n{output}");
+    };
+
+    // `A` shares the column band of `X`, the layer just before `C`, so `A --> C` spans
+    // one layer.
+    assert!(a.1 <= x.2 && x.1 <= a.2, "{output}");
+    assert!(b.2 < a.1 && a.2 < c.1, "{output}");
+    assert!(boxes_intact(&output, &["A", "B", "X", "C"]), "{output}");
+}
+
+#[test]
+fn mermaid_node_with_parents_sits_where_its_links_together_span_the_fewest_layers() {
+    let output = drawn(
+        "flowchart LR\n    A --> M\n    M --> X\n    M --> Y\n    A --> P --> Q --> X\n    Q --> Y\n",
+    );
+    let (Some(m), Some(q), Some(x), Some(y)) =
+        (box_of(&output, "M"), box_of(&output, "Q"), box_of(&output, "X"), box_of(&output, "Y"))
+    else {
+        panic!("missing box in\n{output}");
+    };
+
+    // `M` has a parent, `A`, but two children, `X` and `Y`: stretching `A --> M` by one
+    // layer costs less than stretching both `M --> X` and `M --> Y`, so `M` shares the
+    // column band of `Q`, the layer just before `X` and `Y`. A ranker that only moves
+    // nodes without parents leaves `M` a layer earlier.
+    assert!(m.1 <= q.2 && q.1 <= m.2, "{output}");
+    assert!(m.2 < x.1 && m.2 < y.1, "{output}");
+    assert!(boxes_intact(&output, &["M", "Q", "X", "Y"]), "{output}");
+}
+
+#[test]
 fn mermaid_reversed_link_out_of_a_subgraph_starts_at_the_frame_border_facing_its_target() {
     let output = mermaid(&kept_in_enclosing_layout(
         "flowchart TD\n    A --> s\n    subgraph s\n    B --> C\n    end\n    s --> A\n",

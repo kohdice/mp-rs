@@ -9,9 +9,7 @@
 
 use std::collections::HashMap;
 
-use super::layers::{
-    cycle_closing_edges, layering_constraints, longest_path_layers, reversed_links,
-};
+use super::layers::{cycle_closing_edges, layering_constraints, layers, reversed_links};
 use super::order::{FrameEnd, in_subgraph, stack_ranks};
 use super::ports::{
     Exits, exit_cells, frame_growth, frame_ports, port_cells, reach_in_order, scatter_by_order,
@@ -153,8 +151,7 @@ impl<'a> SlotGraph<'a> {
         axis: Axis,
     ) -> Option<(SlotGraph<'a>, Vec<Vec<usize>>)> {
         let closing = cycle_closing_edges(chart)?;
-        let mut layer_of =
-            longest_path_layers(chart.nodes.len(), &layering_constraints(chart, &closing)?)?;
+        let mut layer_of = layers(chart, &layering_constraints(chart, &closing)?)?;
         let reversed = reversed_links(&closing);
         let node_count = chart.nodes.len();
         let member_layers = chart

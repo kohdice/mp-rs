@@ -1,6 +1,8 @@
 //! The layer of each node along the flow, dagre's `rank`: the pairs of nodes closing a
-//! cycle are reversed, then each node goes in the first layer its incoming links allow.
+//! cycle are reversed, then network simplex (see [`network_simplex_layers`]) puts each node
+//! where the links together span the fewest layers.
 
+use super::simplex::{Constraint, network_simplex_layers};
 use crate::diagram::flowchart::parse::{Edge, End, Flowchart};
 
 /// Marks the pairs of nodes (see [`link_order`]) to lay out reversed so that no cycle
@@ -8,14 +10,16 @@ use crate::diagram::flowchart::parse::{Edge, End, Flowchart};
 /// `dfsFAS` picks them: a depth-first search from each node in turn follows the pairs
 /// leaving a node in the order of their links, and reverses a pair whose target is
 /// still on the search's path. Only such back pairs are reversed, so no new cycle forms.
-/// A self loop orders nothing and is never reversed. `None` when a link joins a subgraph
-/// to itself or to one of its own members.
+/// A reversed pair holds its position among the reversed pairs, in the order the search
+/// reverses them; a kept pair holds `None`. A self loop orders nothing and is never
+/// reversed. The result is `None` when a link joins a subgraph to itself or to one of
+/// its own members.
 ///
 /// Upstream reroutes a link to or from a subgraph to one anchor member and reverses that
 /// single edge; here the link stands in the search for every member pair, and a link
 /// whose pairs disagree is drawn in the direction of its unreversed pairs (see
 /// [`reversed_links`]), as one line cannot run both ways.
-pub(super) fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<Vec<bool>>> {
+pub(super) fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<Vec<Option<usize>>>> {
     let pairs =
         chart.edges.iter().map(|edge| link_order(chart, edge)).collect::<Option<Vec<_>>>()?;
     // The pairs leaving each node, as (link, pair, target).
@@ -27,7 +31,9 @@ pub(super) fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<Vec<bool>>> {
             }
         }
     }
-    let mut closing: Vec<Vec<bool>> = pairs.iter().map(|pairs| vec![false; pairs.len()]).collect();
+    let mut closing: Vec<Vec<Option<usize>>> =
+        pairs.iter().map(|pairs| vec![None; pairs.len()]).collect();
+    let mut reversed = 0;
     // Upstream's graph lists the nodes in the order they first appear, those with an
     // array-index id first.
     let mut roots: Vec<usize> = (0..chart.nodes.len()).collect();
@@ -54,7 +60,8 @@ pub(super) fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<Vec<bool>>> {
             };
             *next += 1;
             if *on_path.get(to)? {
-                *closing.get_mut(link)?.get_mut(pair)? = true;
+                *closing.get_mut(link)?.get_mut(pair)? = Some(reversed);
+                reversed += 1;
             } else if !*visited.get(to)? {
                 *visited.get_mut(to)? = true;
                 *on_path.get_mut(to)? = true;
@@ -67,11 +74,8 @@ pub(super) fn cycle_closing_edges(chart: &Flowchart) -> Option<Vec<Vec<bool>>> {
 
 /// Whether each link is laid out from its target, given its reversed pairs as
 /// [`cycle_closing_edges`] marks them: only when every pair of the link is reversed.
-pub(super) fn reversed_links(closing: &[Vec<bool>]) -> Vec<bool> {
-    closing
-        .iter()
-        .map(|pairs| !pairs.is_empty() && pairs.iter().all(|&reversed| reversed))
-        .collect()
+pub(super) fn reversed_links(closing: &[Vec<Option<usize>>]) -> Vec<bool> {
+    closing.iter().map(|pairs| !pairs.is_empty() && pairs.iter().all(Option::is_some)).collect()
 }
 
 /// The pairs of nodes `(from, to)` whose order along the flow `edge` imposes, in its
@@ -102,61 +106,44 @@ fn link_order(chart: &Flowchart, edge: &Edge) -> Option<Vec<(usize, usize)>> {
     Some(pairs)
 }
 
-/// The order a link imposes on the layers of two nodes.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct Constraint {
-    /// The node the link leaves.
-    pub from: usize,
-    /// The node the link enters, at least `length` layers after `from`.
-    pub to: usize,
-    /// The link's length in layers.
-    pub length: usize,
-}
-
 /// The pairs of nodes whose layers the links impose (see [`link_order`]), each pair in
 /// layout order, those marked in `reversed` (see [`cycle_closing_edges`]) turned round.
+/// The pairs come in the order dagre's graph holds its edges, which breaks ties when it
+/// ranks them: those kept in the order of their links, then those reversed in the order
+/// they were reversed, as `acyclic.run` removes each reversed edge and adds it back last.
 /// `None` when a link joins a subgraph to itself or to one of its own members.
 pub(super) fn layering_constraints(
     chart: &Flowchart,
-    reversed: &[Vec<bool>],
+    reversed: &[Vec<Option<usize>>],
 ) -> Option<Vec<Constraint>> {
-    let mut constraints = Vec::new();
+    let mut kept = Vec::new();
+    let mut turned = Vec::new();
     for (edge, reversed) in chart.edges.iter().zip(reversed) {
         for ((from, to), &reversed) in link_order(chart, edge)?.into_iter().zip(reversed) {
-            let (from, to) = if reversed { (to, from) } else { (from, to) };
-            constraints.push(Constraint { from, to, length: edge.length });
-        }
-    }
-    Some(constraints)
-}
-
-/// The layer of each of `count` nodes: a node with no incoming constraint takes layer 0,
-/// every other node the largest `parent layer + length` over its constraints. A
-/// constraint from a node to itself is ignored. `None` when the constraints form a cycle
-/// or name a node outside `0..count`.
-pub(super) fn longest_path_layers(count: usize, constraints: &[Constraint]) -> Option<Vec<usize>> {
-    let mut unplaced_parents = vec![0_usize; count];
-    let mut children = vec![Vec::new(); count];
-    for constraint in constraints.iter().filter(|c| c.from != c.to) {
-        children.get_mut(constraint.from)?.push((constraint.to, constraint.length));
-        *unplaced_parents.get_mut(constraint.to)? += 1;
-    }
-    let mut layer_of = vec![0_usize; count];
-    let mut ready: Vec<usize> =
-        (0..count).filter(|&node| unplaced_parents.get(node) == Some(&0)).collect();
-    let mut placed = 0;
-    while let Some(node) = ready.pop() {
-        placed += 1;
-        let layer = *layer_of.get(node)?;
-        for &(child, length) in children.get(node)? {
-            let child_layer = layer_of.get_mut(child)?;
-            *child_layer = (*child_layer).max(layer.saturating_add(length));
-            let unplaced = unplaced_parents.get_mut(child)?;
-            *unplaced -= 1;
-            if *unplaced == 0 {
-                ready.push(child);
+            match reversed {
+                Some(order) => {
+                    turned.push((order, Constraint { from: to, to: from, length: edge.length }));
+                }
+                None => kept.push(Constraint { from, to, length: edge.length }),
             }
         }
     }
-    (placed == count).then_some(layer_of)
+    turned.sort_by_key(|&(order, _)| order);
+    kept.extend(turned.into_iter().map(|(_, constraint)| constraint));
+    Some(kept)
+}
+
+/// The layer of each node of `chart` given the `constraints` its links impose, in the
+/// order [`layering_constraints`] returns them, as dagre's network simplex ranks them
+/// (see [`network_simplex_layers`]). `None` when the constraints form a cycle or name a
+/// node outside the chart.
+///
+/// With subgraphs, upstream's `nestingGraph.run` also ranks a top and a bottom border
+/// node for each subgraph, linked to its members by heavy edges that keep it compact.
+/// The frames here are drawn around their members' layers rather than laid out as nodes,
+/// so only the member pairs are ranked, and the layers in and around a subgraph may
+/// differ from upstream's.
+pub(super) fn layers(chart: &Flowchart, constraints: &[Constraint]) -> Option<Vec<usize>> {
+    let array_index: Vec<Option<u32>> = chart.nodes.iter().map(|node| node.array_index).collect();
+    network_simplex_layers(&array_index, constraints)
 }

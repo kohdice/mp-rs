@@ -6,6 +6,7 @@ mod order;
 mod place;
 mod ports;
 mod reach;
+mod simplex;
 mod size;
 
 use std::collections::HashMap;
@@ -250,9 +251,10 @@ pub(super) fn on_run(beside: &[Option<LaidOutEnd>], index: usize) -> bool {
 /// its memory and time even when no width limits it.
 const MAX_PASSING_SLOTS: usize = 10_000;
 
-/// Places every node in the first layer that is, for each parent, at least the link's
-/// `length` layers after that parent: the layer after its furthest parent when every
-/// link has length one. The pairs of nodes closing a cycle are laid out reversed (see
+/// Places every node at least each link's `length` layers after the link's other end,
+/// with the links together spanning the fewest layers, as dagre's network simplex ranks
+/// them (see [`layers`](layers::layers)): a node without parents lies near its children,
+/// not in the first layer. The pairs of nodes closing a cycle are laid out reversed (see
 /// [`cycle_closing_edges`](layers::cycle_closing_edges)). Then orders each
 /// layer to reduce crossings with the layer before, keeps each subgraph's slots
 /// together, and places every slot across the flow, `sibling_gap` cells or more apart,
