@@ -2780,6 +2780,21 @@ fn mermaid_nested_isolated_subgraphs_alternate_direction() {
 }
 
 #[test]
+fn mermaid_isolated_subgraph_inside_a_direction_td_subgraph_is_laid_out_top_to_bottom() {
+    let output = drawn(
+        "flowchart LR\n    subgraph o\n    direction TD\n    subgraph i\n    a --> b\n    end\n    end\n",
+    );
+    let (Some(inner), Some(a), Some(b)) =
+        (intact_frame(&output, "i"), box_of(&output, "a"), box_of(&output, "b"))
+    else {
+        panic!("missing frame or box in\n{output}");
+    };
+
+    assert!(a.0 < b.0 && a.1 == b.1, "{output}");
+    assert!(box_inside_frame(a, inner) && box_inside_frame(b, inner), "{output}");
+}
+
+#[test]
 fn mermaid_td_is_read_like_tb_inside_a_subgraph() {
     assert_eq!(
         mermaid("flowchart LR\n    subgraph s\n    direction TD\n    A --> B\n    end\n"),

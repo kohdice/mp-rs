@@ -244,6 +244,11 @@ pub(super) struct Subgraph {
     /// several in that block, the last wins. Those in later blocks with the same id are
     /// ignored, as upstream's `addSubGraph` adds only nodes to an existing subgraph.
     pub direction: Option<Direction>,
+    /// Whether that `direction` statement spells top-down `TD` rather than `TB`. Upstream
+    /// normalizes `TD` to `TB` for the chart only (`setDirection` in `flowDb.ts`) and
+    /// hands a subgraph's direction to the layout as written, where only `TB` counts as
+    /// top-down (see `crosswise` in the `unit` module).
+    pub spelled_td: bool,
     /// Cells the frame is grown by across the flow on each side of its members, so that
     /// every link end on one of its borders has a cell of its own; measured by
     /// [`grow_frames`](super::layout::grow_frames).

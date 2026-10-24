@@ -75,6 +75,8 @@ struct Block<'a> {
     title: Label,
     /// The direction of its last `direction` statement, if any.
     direction: Option<Direction>,
+    /// Whether that statement spells `TD` (see [`Subgraph::spelled_td`]).
+    spelled_td: bool,
     /// The ids it lists, in order: those of the nodes its own statements reference and
     /// those of the subgraphs whose blocks end inside it, as upstream's grammar hands a
     /// block's `document` to `addSubGraph`. Once the block is registered, only the ids
@@ -298,10 +300,12 @@ impl<'a> Builder<'a> {
         // upstream lexes it as a direction only before a direction word.
         let mut words = statement.split_ascii_whitespace();
         if words.next() == Some("direction")
-            && let Some(direction) = words.next().and_then(direction_word)
+            && let Some(word) = words.next()
+            && let Some(direction) = direction_word(word)
         {
             if let Some(open) = self.open.last().and_then(|&open| self.blocks.get_mut(open)) {
                 open.direction = Some(direction);
+                open.spelled_td = word == "TD";
             }
             return Ok(());
         }
@@ -452,6 +456,7 @@ impl<'a> Builder<'a> {
             id,
             title: title.joined(),
             direction: None,
+            spelled_td: false,
             listed: Vec::new(),
         });
         Ok(())
@@ -496,6 +501,7 @@ impl<'a> Builder<'a> {
                 members: Vec::new(),
                 parent: None,
                 direction: block.direction,
+                spelled_td: block.spelled_td,
                 spread: 0,
                 collapsed: false,
                 styling: Styling::default(),

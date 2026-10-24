@@ -42,12 +42,15 @@ pub(super) fn embed_units(
     frame: Option<usize>,
     level: usize,
 ) -> Result<Flowchart, Failure> {
+    // The chart is laid out in its frame's own direction, as that frame spells it.
+    let spelled_td =
+        frame.and_then(|frame| chart.subgraphs.get(frame)).is_some_and(|frame| frame.spelled_td);
     let own: Vec<Option<Direction>> = (0..chart.subgraphs.len())
         .map(|subgraph| {
             if frame == Some(subgraph) {
                 None
             } else {
-                own_direction(&chart, subgraph, chart.direction)
+                own_direction(&chart, subgraph, (chart.direction, spelled_td))
             }
         })
         .collect();
@@ -258,16 +261,21 @@ fn outer_chart(
 }
 
 /// The direction `subgraph` is laid out in as a diagram of its own: its `direction`
-/// statement's, else the one crosswise to `enclosing`, and `None` — the subgraph stays in
-/// the enclosing layout — when it is empty or a link joins something inside it to
-/// something outside it. Upstream states the last rule as "If any of a subgraph's nodes
+/// statement's, else the one crosswise to `enclosing`, and `None` — the subgraph stays
+/// in the enclosing layout — when it is empty or a link joins something inside it to
+/// something outside it. `enclosing` is the enclosing direction paired with whether it
+/// is spelled `TD` (see [`crosswise`]). Upstream states the last rule as "If any of a subgraph's nodes
 /// are linked to the outside, subgraph direction will be ignored" (`extractor` in
 /// `mermaid-graphlib.js`). A link touching the subgraph's own frame is left out of the
 /// check: upstream keeps the direction then ("Link *to* subgraph1: subgraph1 direction is
 /// maintained" in the same section), as its `isDescendant` does not count a cluster among
 /// its own descendants; a link between the frame and something inside it is not drawn at
 /// all (see [`drop_own_frame_links`](super::own_frame::drop_own_frame_links)).
-fn own_direction(chart: &Flowchart, subgraph: usize, enclosing: Direction) -> Option<Direction> {
+fn own_direction(
+    chart: &Flowchart,
+    subgraph: usize,
+    enclosing: (Direction, bool),
+) -> Option<Direction> {
     let frame = chart.subgraphs.get(subgraph)?;
     // An empty subgraph's only member is the hidden node its frame is drawn around.
     let hidden =
@@ -290,10 +298,13 @@ fn own_direction(chart: &Flowchart, subgraph: usize, enclosing: Direction) -> Op
 }
 
 /// The direction upstream lays an isolated subgraph out in when it has no `direction`
-/// statement (`rankdir === 'TB' ? 'LR' : 'TB'`).
-fn crosswise(enclosing: Direction) -> Direction {
+/// statement, given the enclosing direction and whether it is spelled `TD`: left to
+/// right inside a top-down layout spelled `TB`, and top to bottom inside any other
+/// (`rankdir === 'TB' ? 'LR' : 'TB'` in `extractor`). The chart's own `TD` counts as
+/// `TB`, as upstream normalizes it, but a subgraph's `direction TD` does not.
+fn crosswise((enclosing, spelled_td): (Direction, bool)) -> Direction {
     match enclosing {
-        Direction::TopDown => Direction::LeftToRight,
-        Direction::LeftToRight | Direction::RightToLeft | Direction::BottomUp => Direction::TopDown,
+        Direction::TopDown if !spelled_td => Direction::LeftToRight,
+        _ => Direction::TopDown,
     }
 }

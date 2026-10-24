@@ -59,8 +59,10 @@ The syntax follows the [Mermaid flowchart documentation](https://mermaid.js.org/
   links to and from a subgraph's frame; `direction` inside a subgraph, ignored when a
   link joins something inside the subgraph to something outside it, as in Mermaid; a
   subgraph without
-  `direction` and without links to the outside is laid out `LR` inside a `TB` chart and
-  `TB` inside any other, as Mermaid does by default (`rankdir === 'TB' ? 'LR' : 'TB'`,
+  `direction` and without links to the outside is laid out `LR` inside a `TB` or `TD`
+  chart or a subgraph laid out `TB`, by default or by `direction TB`, and `TB` inside
+  any other, a `direction TD` subgraph included, as Mermaid does by default
+  (`rankdir === 'TB' ? 'LR' : 'TB'`,
   `flowchart.inheritDir: false`); links entering a subgraph drawn in its own direction
   keep clear of its title, and its frame widens to make room for them;
   `id@{ view: collapsed }` after the subgraph's `end`
@@ -136,10 +138,6 @@ These are drawn differently:
 - A drawing too wide for the terminal first tightens its spacing, inside a subgraph laid
   out in a direction of its own as well as around it; a browser shrinks the picture
   instead.
-- Inside a subgraph with `direction TD`, a nested subgraph without `direction` and
-  without links to the outside is laid out left to right, as inside `direction TB`. A
-  browser lays it out top to bottom there, because Mermaid compares the subgraph's
-  direction with `TB` as written and does not read `TD` as `TB` inside subgraphs.
 - A link between a subgraph and a node or subgraph inside it (`A --> s` where `A` is
   inside `s`, in either direction) is not drawn, as in a browser; a browser still keeps
   room in the subgraph for the hidden link, and here the subgraph is drawn as if the
