@@ -2795,6 +2795,22 @@ fn mermaid_isolated_subgraph_inside_a_direction_td_subgraph_is_laid_out_top_to_b
 }
 
 #[test]
+fn mermaid_unit_too_large_at_the_default_spacing_is_drawn_at_a_tighter_one() {
+    // One layer of 1,550 boxes five columns wide, one of them 98 rows tall, in a frame
+    // with two columns and one row of margin on each side: 100 rows. A vertical layout
+    // leaves two columns between siblings at the default spacing, 10,852 columns in all
+    // and past 1,000,000 cells, and one column at the next step, 9,303 columns in all.
+    let tall = vec!["x"; 96].join("<br>");
+    let boxes: String = (1..1_550).map(|index| format!("    n{index}[x]\n")).collect();
+    let body = format!(
+        "flowchart LR\n    subgraph s\n    direction TB\n    t[\"{tall}\"]\n{boxes}    end\n"
+    );
+    let output = drawn(&body);
+
+    assert_eq!(output.matches("┌───┐").count(), 1_550);
+}
+
+#[test]
 fn mermaid_td_is_read_like_tb_inside_a_subgraph() {
     assert_eq!(
         mermaid("flowchart LR\n    subgraph s\n    direction TD\n    A --> B\n    end\n"),

@@ -34,14 +34,14 @@ const MAX_UNIT_DEPTH: usize = 32;
 /// subgraphs to anything outside it, since that link has no cell to end at in the
 /// drawing. It is also unsupported when a subgraph with a direction of its own lies more
 /// than [`MAX_UNIT_DEPTH`] deep, counting itself and the `depth` of them `chart` lies
-/// inside of, or when its drawing spans more than [`MAX_CELLS`](super::MAX_CELLS) at
-/// step `level`.
+/// inside of. `Ok(None)` when a drawing spans more than [`MAX_CELLS`](super::MAX_CELLS)
+/// at step `level`, which a tighter step may still fit.
 pub(super) fn embed_units(
     chart: Flowchart,
     depth: usize,
     frame: Option<usize>,
     level: usize,
-) -> Result<Flowchart, Failure> {
+) -> Result<Option<Flowchart>, Failure> {
     // The chart is laid out in its frame's own direction, as that frame spells it.
     let spelled_td =
         frame.and_then(|frame| chart.subgraphs.get(frame)).is_some_and(|frame| frame.spelled_td);
@@ -59,7 +59,7 @@ pub(super) fn embed_units(
         .filter(|&subgraph| is_own(subgraph) && !chart.enclosing(subgraph).any(is_own))
         .collect();
     if roots.is_empty() {
-        return Ok(chart);
+        return Ok(Some(chart));
     }
     let depth = depth + 1;
     if depth > MAX_UNIT_DEPTH {
@@ -86,7 +86,10 @@ pub(super) fn embed_units(
             draw_unit(&chart, &units, unit, direction, depth, level)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    outer_chart(chart, &units, drawings)
+    let Some(drawings) = drawings.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    outer_chart(chart, &units, drawings).map(Some)
 }
 
 /// The outermost subgraphs laid out in a direction of their own, numbered as units, and
@@ -119,7 +122,8 @@ impl Units {
 /// Draws `unit` of `chart` as a chart of its own: its nodes, the subgraphs lying in it
 /// with its own frame outermost, and the links with both ends inside it, laid out in
 /// `direction` at the spacing of tightening step `level`. `depth` is how many subgraphs
-/// with a direction of their own the unit's chart lies inside of.
+/// with a direction of their own the unit's chart lies inside of. `Ok(None)` when the
+/// drawing, or one nested in it, spans more than [`MAX_CELLS`](super::MAX_CELLS).
 fn draw_unit(
     chart: &Flowchart,
     units: &Units,
@@ -127,7 +131,7 @@ fn draw_unit(
     direction: Direction,
     depth: usize,
     level: usize,
-) -> Result<Vec<Line>, Failure> {
+) -> Result<Option<Vec<Line>>, Failure> {
     let root = *units.roots.get(unit).ok_or(Failure::Unsupported)?;
     // The unit's nodes and subgraphs, numbered within it in their order.
     let mut node_index = vec![None; chart.nodes.len()];
@@ -179,9 +183,11 @@ fn draw_unit(
         edges.push(edge);
     }
     let frame = renumber(&subgraph_index, root)?;
-    let chart =
-        embed_units(Flowchart { direction, nodes, edges, subgraphs }, depth, Some(frame), level)?;
-    super::render_chart(chart, None, None, level)?.ok_or(Failure::Unsupported)
+    let chart = Flowchart { direction, nodes, edges, subgraphs };
+    let Some(chart) = embed_units(chart, depth, Some(frame), level)? else {
+        return Ok(None);
+    };
+    super::render_chart(chart, None, None, level)
 }
 
 /// `chart` with each unit replaced by one node holding its drawing from `drawings`,

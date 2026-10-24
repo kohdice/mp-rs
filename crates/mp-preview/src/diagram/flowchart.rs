@@ -66,7 +66,9 @@ pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Fa
     // A unit's drawing tightens along with the chart around it, so each step draws the
     // units again rather than embedding drawings made at the default spacing.
     for level in 0..layout::LEVELS {
-        let embedded = unit::embed_units(chart.clone(), 0, None, level)?;
+        let Some(embedded) = unit::embed_units(chart.clone(), 0, None, level)? else {
+            continue;
+        };
         if let Some(drawing) = render_chart(embedded, width, front.title.as_deref(), level)? {
             return Ok(drawing);
         }
