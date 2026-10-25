@@ -2164,6 +2164,56 @@ fn mermaid_label_of_a_back_edge_spanning_several_layers_rides_the_passing_line()
 }
 
 #[test]
+fn mermaid_legs_of_links_from_different_sources_do_not_share_cells() {
+    for direction in ["TB", "LR"] {
+        let output = drawn(&format!(
+            "flowchart {direction}\n    Q --> X\n    Q --> Y\n    M --> X\n    M --> Y\n"
+        ));
+        let [Some(q), Some(x)] = ["Q", "X"].map(|label| box_bounds(&output, label)) else {
+            panic!("missing box in\n{output}");
+        };
+        let (rows, cols) = match direction {
+            "TB" => (q.2 + 1..x.0, 0..widest(&output)),
+            _ => (0..output.lines().count(), q.3 + 1..x.1),
+        };
+        // Lines meet between the layers only where they cross.
+        for row in rows {
+            for col in cols.clone() {
+                let glyph = glyph_at(&output, row, col);
+                assert!(!matches!(glyph, Some('┤' | '├' | '┬' | '┴')), "{row}, {col}\n{output}");
+            }
+        }
+        assert_eq!(arrowheads(&output).len(), 4, "{output}");
+    }
+}
+
+#[test]
+fn mermaid_source_waiting_on_a_ring_of_sources_takes_its_tracks_after_the_ring() {
+    // Q and R each enter a target by the cell the other leaves by, a ring that forces one
+    // junction; P waits on Q, so it takes its tracks after the ring and its link into Y
+    // shares no cell with a link leaving Q.
+    let output = drawn(
+        "flowchart LR\n    P --> Y\n    Q --> X\n    Q --> Z\n    R --> X\n    R --> Y\n    R --> Z\n",
+    );
+    let [Some(p), Some(y)] = ["P", "Y"].map(|label| box_bounds(&output, label)) else {
+        panic!("missing box in\n{output}");
+    };
+    let Some(row) = arrowheads(&output)
+        .iter()
+        .filter(|&&(row, col, _)| col + 1 == y.1 && (y.0..=y.2).contains(&row))
+        .map(|&(row, ..)| row)
+        .min()
+    else {
+        panic!("missing arrowhead into Y in\n{output}");
+    };
+
+    for col in p.3 + 1..y.1 {
+        let glyph = glyph_at(&output, row, col);
+        assert!(!matches!(glyph, Some('┬' | '┴')), "{row}, {col}\n{output}");
+    }
+}
+
+#[test]
 fn mermaid_reordering_a_layer_removes_a_crossing() {
     let output = mermaid("flowchart LR\n    A ---> B\n    A --> C --> D\n");
     let [Some(b), Some(d)] = ["B", "D"].map(|label| box_of(&output, label)) else {

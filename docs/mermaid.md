@@ -145,6 +145,11 @@ These are drawn differently:
   side facing its other end; for a link between two subgraphs, it meets whichever frame's
   layers span the other end. A browser instead attaches such a link to one member of the
   subgraph and reverses or keeps that one link.
+- Two links share a cell only where they cross, drawn as `┼`, as a browser's curves
+  cross without merging. When two sources' links swap cells, each entering its target
+  by the cell the other leaves its source by, their lines share the cells between their
+  turns and are drawn joined, as `┤` and `├` (`┴` and `┬` in a horizontal layout): a
+  character grid cannot draw one line through another without a junction.
 - In a chart with subgraphs, nodes are put in layers by the same rule as without them:
   the links together span the fewest layers, a link to or from a subgraph counting as
   one link per member. A browser also ranks the hidden nodes and links it adds to

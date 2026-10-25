@@ -807,11 +807,22 @@ struct Run {
     rightward: bool,
 }
 
+impl Run {
+    /// The cell across the flow the segment enters.
+    fn entry(&self) -> usize {
+        if self.rightward { *self.cells.end() } else { *self.cells.start() }
+    }
+}
+
 /// Gives each of `runs` a track in the gap after its source's layer. Each source has
 /// tracks of its own, two runs share a track only when they have no cell in common, and
 /// a run of a source on a track nearer the layer never crosses the line of one of the
-/// same source on a further track. Returns each segment's track, indexed like
-/// `entries`, and the number of tracks in each gap.
+/// same source on a further track. The sources take their tracks in [`leg_order`], so
+/// the legs of two sources' links meet only where they cross, as upstream's curves
+/// cross but never merge, except where two links swap cells, each entering its target
+/// by the cell the other leaves its source by: whichever takes the nearer track, its
+/// leaving leg runs through the other's entering leg. Returns each segment's track,
+/// indexed like `entries`, and the number of tracks in each gap.
 fn assign_tracks(
     layered: &Layered,
     entries: &[Vec<usize>],
@@ -830,7 +841,7 @@ fn assign_tracks(
     for sources in &mut sources {
         sources.sort_by_key(|&index| slots.get(index).map(|slot| slot.port));
         let mut first_track = 0;
-        for &source in sources.iter() {
+        for source in leg_order(sources, runs, &layered.beside)? {
             // The cells taken on each of this source's tracks.
             let mut tracks: Vec<Vec<&RangeInclusive<usize>>> = Vec::new();
             let mut ordered: Vec<&Run> = runs.iter().filter(|run| run.source == source).collect();
@@ -858,6 +869,67 @@ fn assign_tracks(
         track_counts.push(first_track);
     }
     Some((track_of, track_counts))
+}
+
+/// `sources`, in port order, reordered so that each takes its tracks before every other
+/// source with a run entering the cell one of its runs leaves by. Later sources get
+/// tracks further from the layer, so the entering leg, from its track on to the next
+/// layer, then starts past the end of the leaving leg, which runs from the layer to its
+/// track; the other way round the two would share the cells between the tracks. The run
+/// of a link laid out into a frame it meets across the flow (see [`on_run`]) makes its
+/// source wait on none: its line ends on its track, so it has no entering leg. When
+/// every source left waits on another, the first in port order of a ring they wait on
+/// goes first (see [`first_in_ring`]): a source outside the ring would only add a shared
+/// leg to the one the ring forces.
+fn leg_order(sources: &[usize], runs: &[Run], beside: &[Option<LaidOutEnd>]) -> Option<Vec<usize>> {
+    let gap_runs: Vec<&Run> = runs.iter().filter(|run| sources.contains(&run.source)).collect();
+    let mut waiting: Vec<(usize, Vec<usize>)> = sources
+        .iter()
+        .map(|&source| {
+            let entered: Vec<usize> = gap_runs
+                .iter()
+                .filter(|run| run.source == source && !on_run(beside, run.edge))
+                .map(|run| run.entry())
+                .collect();
+            let leaving = gap_runs
+                .iter()
+                .filter(|run| run.source != source && entered.contains(&run.leave))
+                .map(|run| run.source)
+                .collect();
+            (source, leaving)
+        })
+        .collect();
+    let mut ordered = Vec::with_capacity(sources.len());
+    while !waiting.is_empty() {
+        let ready = waiting
+            .iter()
+            .position(|(_, after)| after.iter().all(|source| ordered.contains(source)));
+        let next = match ready {
+            Some(next) => next,
+            None => first_in_ring(&waiting, &ordered)?,
+        };
+        ordered.push(waiting.remove(next).0);
+    }
+    Some(ordered)
+}
+
+/// The index in `waiting`, which lists each source not yet `ordered` in port order with
+/// the sources it waits on, of the first source of a ring among them: following from
+/// the first source the first source each waits on that is not yet ordered, until one
+/// comes round again. `None` when a source on the way waits on none left; [`leg_order`]
+/// calls it only once every source left waits on another.
+fn first_in_ring(waiting: &[(usize, Vec<usize>)], ordered: &[usize]) -> Option<usize> {
+    let mut path = vec![0];
+    for _ in 0..waiting.len() {
+        let (_, after) = waiting.get(*path.last()?)?;
+        let next = after.iter().find(|source| !ordered.contains(source))?;
+        let next = waiting.iter().position(|(source, _)| source == next)?;
+        if let Some(start) = path.iter().position(|&seen| seen == next) {
+            return path.get(start..)?.iter().min().copied();
+        }
+        path.push(next);
+    }
+    None
 }
 
 /// The index and path of each edge that is drawn: an invisible link takes no cell at

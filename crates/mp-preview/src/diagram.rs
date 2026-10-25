@@ -487,16 +487,17 @@ mod tests {
 
         assert_eq!(
             mermaid(body),
-            "┌───┐\n│   │──┐\n│ A │  │   ┌───┐\n│   │─┐└──►│   │\n└───┘ │    │ C │\n      │ ┌─►│   │\n┌───┐ │ │  └───┘\n│   │─┼─┘\n│ B │ │    ┌───┐\n│   │─┴─┬─►│   │\n└───┘   │  │ D │\n        └─►│   │\n           └───┘"
+            "┌───┐\n│   │───┐\n│ A │   │  ┌───┐\n│   │──┐└─►│   │\n└───┘  │   │ C │\n      ┌┼──►│   │\n┌───┐ ││   └───┘\n│   │─┘│\n│ B │  │   ┌───┐\n│   │─┐└──►│   │\n└───┘ │    │ D │\n      └───►│   │\n           └───┘"
         );
-        // B→C turns up column 8 from B's row 7 into the `►` on row 5; A→C ends on row 3
+        // B→C turns up column 6 from B's row 7 into the `►` on row 5; A→C ends on row 3
         // and the two links into D end on rows 9 and 11.
         let (red, muted): (Vec<_>, Vec<_>) =
             arrowhead_cells(&lines).into_iter().partition(|&(row, ..)| row == 5);
         assert!(all_fg(&red.iter().map(|&(.., style)| style).collect::<Vec<_>>(), RED));
         assert_eq!(muted.len(), 3, "{muted:?}");
         assert!(muted.iter().all(|(.., style)| style.fg == Some(DARK_PALETTE.muted)), "{muted:?}");
-        assert!(all_fg(&glyph_styles(&lines, 5..8, 8..11), RED), "{lines:?}");
+        assert!(all_fg(&glyph_styles(&lines, 5..8, 6..7), RED), "{lines:?}");
+        assert!(all_fg(&glyph_styles(&lines, 5..6, 8..11), RED), "{lines:?}");
         assert!(all_fg(&glyph_styles(&lines, 1..2, 5..8), DARK_PALETTE.muted), "{lines:?}");
     }
 
