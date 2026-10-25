@@ -6,33 +6,68 @@ use comrak::{Arena, Node, Options, parse_document};
 use crate::control::visualize_control;
 use crate::model::{AlertKind, Align, Block, Inline, ListItem};
 
+/// The deepest nesting of containers the model holds, counted together: block quotes,
+/// alerts, and lists, then emphasis, strong, strikethrough, links, and images inside
+/// them. Every later stage, and dropping the model, recurses once per level, so an
+/// unbounded depth would overflow the stack. comrak bounds none of them across lines.
+const MAX_NESTING_DEPTH: usize = 128;
+
 /// Parses a whole document into blocks; empty or whitespace-only input gives no blocks,
 /// and parsing never fails. The comrak arena is dropped before returning, so callers
-/// never hold a comrak type.
+/// never hold a comrak type. Containers nested deeper than [`MAX_NESTING_DEPTH`] are
+/// flattened into the deepest allowed one.
 pub(crate) fn parse(markdown: &str) -> Vec<Block> {
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &comrak_options());
-    convert_blocks(root)
+    convert_blocks(root, 0)
 }
 
-fn convert_blocks(parent: Node<'_>) -> Vec<Block> {
-    parent.children().filter_map(convert_block).collect()
+/// Converts the children of a container `depth` containers deep.
+fn convert_blocks(parent: Node<'_>, depth: usize) -> Vec<Block> {
+    parent.children().filter_map(|child| convert_block(child, depth)).collect()
 }
 
-fn convert_block(node: Node<'_>) -> Option<Block> {
+/// Converts the children of a container that is itself at `depth`. At the bound, the
+/// leaf blocks of every container below it become its children, in document order;
+/// `descendants` walks the tree without recursion.
+fn convert_contents(container: Node<'_>, depth: usize) -> Vec<Block> {
+    if depth < MAX_NESTING_DEPTH {
+        return convert_blocks(container, depth);
+    }
+    container
+        .descendants()
+        .skip(1)
+        .filter(|node| !is_container(node))
+        .filter_map(|node| convert_block(node, depth))
+        .collect()
+}
+
+fn is_container(node: Node<'_>) -> bool {
+    matches!(
+        node.data().value,
+        NodeValue::BlockQuote
+            | NodeValue::Alert(_)
+            | NodeValue::List(_)
+            | NodeValue::Item(_)
+            | NodeValue::TaskItem(_)
+    )
+}
+
+fn convert_block(node: Node<'_>, depth: usize) -> Option<Block> {
     match &node.data().value {
-        NodeValue::Paragraph => Some(Block::Paragraph(convert_inlines(node))),
-        NodeValue::Heading(heading) => {
-            Some(Block::Heading { level: heading.level, inlines: convert_inlines(node) })
-        }
-        NodeValue::BlockQuote => Some(Block::BlockQuote(convert_blocks(node))),
+        NodeValue::Paragraph => Some(Block::Paragraph(convert_inline_contents(node, depth))),
+        NodeValue::Heading(heading) => Some(Block::Heading {
+            level: heading.level,
+            inlines: convert_inline_contents(node, depth),
+        }),
+        NodeValue::BlockQuote => Some(Block::BlockQuote(convert_contents(node, depth + 1))),
         NodeValue::Alert(alert) => {
             let kind = convert_alert_kind(alert.alert_type);
             let title = match &alert.title {
                 Some(title) => sanitize_inline(title),
                 None => kind.label().to_owned(),
             };
-            Some(Block::Alert { kind, title, blocks: convert_blocks(node) })
+            Some(Block::Alert { kind, title, blocks: convert_contents(node, depth + 1) })
         }
         NodeValue::CodeBlock(code) => Some(Block::CodeBlock {
             info: sanitize_inline(&code.info),
@@ -46,16 +81,18 @@ fn convert_block(node: Node<'_>) -> Option<Block> {
                 ListType::Bullet => None,
             },
             tight: list.tight,
-            items: node.children().map(convert_item).collect(),
+            items: node.children().map(|item| convert_item(item, depth + 1)).collect(),
         }),
-        NodeValue::Table(table) => Some(convert_table(node, &table.alignments)),
+        NodeValue::Table(table) => Some(convert_table(node, &table.alignments, depth)),
         _ => None,
     }
 }
 
-fn convert_table(node: Node<'_>, alignments: &[TableAlignment]) -> Block {
+fn convert_table(node: Node<'_>, alignments: &[TableAlignment], depth: usize) -> Block {
     // A GFM table always starts with its header row.
-    let mut rows = node.children().map(|row| row.children().map(convert_inlines).collect());
+    let mut rows = node
+        .children()
+        .map(|row| row.children().map(|cell| convert_inline_contents(cell, depth)).collect());
     let header = rows.next().unwrap_or_default();
     Block::Table {
         align: alignments.iter().copied().map(convert_align).collect(),
@@ -83,30 +120,58 @@ fn convert_alert_kind(alert_type: AlertType) -> AlertKind {
     }
 }
 
-fn convert_item(node: Node<'_>) -> ListItem {
+fn convert_item(node: Node<'_>, depth: usize) -> ListItem {
     let task = match &node.data().value {
         NodeValue::TaskItem(task) => Some(task.symbol.is_some()),
         _ => None,
     };
-    ListItem { task, blocks: convert_blocks(node) }
+    ListItem { task, blocks: convert_contents(node, depth) }
 }
 
-fn convert_inlines(parent: Node<'_>) -> Vec<Inline> {
-    parent.children().filter_map(convert_inline).collect()
+fn convert_inlines(parent: Node<'_>, depth: usize) -> Vec<Inline> {
+    parent.children().filter_map(|child| convert_inline(child, depth)).collect()
 }
 
-fn convert_inline(node: Node<'_>) -> Option<Inline> {
+/// Converts the inlines of a block or inline container that is itself at `depth`, the
+/// way [`convert_contents`] converts blocks: at the bound, the leaf inlines below it
+/// become its children, in document order.
+fn convert_inline_contents(container: Node<'_>, depth: usize) -> Vec<Inline> {
+    if depth < MAX_NESTING_DEPTH {
+        return convert_inlines(container, depth);
+    }
+    container
+        .descendants()
+        .skip(1)
+        .filter(|node| !is_inline_container(node))
+        .filter_map(|node| convert_inline(node, depth))
+        .collect()
+}
+
+fn is_inline_container(node: Node<'_>) -> bool {
+    matches!(
+        node.data().value,
+        NodeValue::Emph
+            | NodeValue::Strong
+            | NodeValue::Strikethrough
+            | NodeValue::Link(_)
+            | NodeValue::Image(_)
+    )
+}
+
+fn convert_inline(node: Node<'_>, depth: usize) -> Option<Inline> {
     match &node.data().value {
         NodeValue::Text(text) => Some(Inline::Text(sanitize_inline(text))),
         NodeValue::HtmlInline(html) => Some(Inline::Text(sanitize_inline(html))),
         NodeValue::Code(code) => Some(Inline::Code(sanitize_inline(&code.literal))),
-        NodeValue::Emph => Some(Inline::Emphasis(convert_inlines(node))),
-        NodeValue::Strong => Some(Inline::Strong(convert_inlines(node))),
-        NodeValue::Strikethrough => Some(Inline::Strikethrough(convert_inlines(node))),
+        NodeValue::Emph => Some(Inline::Emphasis(convert_inline_contents(node, depth + 1))),
+        NodeValue::Strong => Some(Inline::Strong(convert_inline_contents(node, depth + 1))),
+        NodeValue::Strikethrough => {
+            Some(Inline::Strikethrough(convert_inline_contents(node, depth + 1)))
+        }
         NodeValue::SoftBreak => Some(Inline::SoftBreak),
         NodeValue::LineBreak => Some(Inline::HardBreak),
         NodeValue::Link(link) => {
-            let children = convert_inlines(node);
+            let children = convert_inline_contents(node, depth + 1);
             let url = sanitize_inline(&link.url);
             Some(Inline::Link {
                 show_url: shows_url(&children, &url),
@@ -118,7 +183,7 @@ fn convert_inline(node: Node<'_>) -> Option<Inline> {
         NodeValue::Image(image) => Some(Inline::Image {
             url: sanitize_inline(&image.url),
             title: convert_title(&image.title),
-            alt: convert_inlines(node),
+            alt: convert_inline_contents(node, depth + 1),
         }),
         _ => None,
     }

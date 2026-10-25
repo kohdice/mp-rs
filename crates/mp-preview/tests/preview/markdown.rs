@@ -226,6 +226,33 @@ fn nested_quotes_repeat_the_bar() {
 }
 
 #[test]
+fn deeply_nested_block_quotes_render_their_text() {
+    let output = plain(&("> ".repeat(100_000) + "a\n"), None);
+
+    assert!(output.trim_end().ends_with('a'), "expected the text last, got {output:?}");
+}
+
+#[test]
+fn deeply_nested_lists_render_their_text() {
+    let markdown: String = (0..3_000)
+        .map(|level| "  ".repeat(level) + if level == 2_999 { "- z\n" } else { "- a\n" })
+        .collect();
+
+    let output = plain(&markdown, None);
+
+    assert!(output.trim_end().ends_with('z'), "expected the deepest text last, got {output:?}");
+}
+
+#[test]
+fn deeply_nested_emphasis_renders_its_text() {
+    let markdown = "*a ".repeat(100_000) + "z" + &" b*".repeat(100_000) + "\n";
+
+    let output = plain(&markdown, None);
+
+    assert!(output.contains('z'), "expected the innermost text, got {output:?}");
+}
+
+#[test]
 fn loose_list_inside_a_quote_keeps_the_bar_on_blank_lines() {
     assert_eq!(plain("> - a\n>\n> - b\n", None), "│ • a\n│\n│ • b\n");
 }

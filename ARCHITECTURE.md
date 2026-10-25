@@ -64,6 +64,17 @@ These are guarantees the code relies on; changing one requires updating its cons
   error context.
 - **Parsing is infallible.** comrak always produces a well-formed tree, so `preview` has no
   parse error path; its only error is the first one reported by the writer.
+- **Nesting depth is bounded.** The model nests containers at most 128 deep
+  (`MAX_NESTING_DEPTH` in `markdown`), with one count shared by block quotes, alerts,
+  and lists and by the emphasis, strong, strikethrough, links, and images inside them.
+  A container at that depth holds the leaf blocks or leaf inlines of everything nested
+  below it, in document order: the text stays, while the quote bars, list markers, task
+  check boxes, alert titles and kinds, inline styling, link destinations and titles, and
+  image markers below the bound are dropped. Layout and dropping the model recurse once
+  per level, and this bound is what keeps them off the end of the stack. comrak does not
+  provide one: its `MAX_LIST_DEPTH` of 100 stops only list items opened on a single
+  line, so a list nested one level per line has no limit, block quotes and alerts have
+  none at all, and inline nesting has none either.
 - **Parse whole, write per block.** `markdown::parse` converts the entire document into
   `Vec<Block>` up front, then `preview` lays out and writes one top-level block at a time.
   Memory is bounded by the model plus the largest block's lines, and blocks written before
