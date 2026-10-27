@@ -382,7 +382,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["`**太字** と *斜体* を
+    A["`**太字** と _斜体_ を
     2 行で`"] --> B["1 行目<br>2 行目"]
     B --> C["引用符 #quot;ここ#quot; と #35;"] --> D["fa:fa-car 運転"]
 ```
@@ -523,7 +523,6 @@ stateDiagram-v2
     state "支払い待ち" as Pending
     state "支払い確認済み" as Confirmed
     state "配送中" as Shipped
-    state "配達済み" as Delivered
 
     [*] --> Pending
     Pending --> Confirmed : 入金
@@ -536,15 +535,12 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    state "待機" as Idle
-    state "稼働中" as Active {
-        state "待ち" as Waiting
-        state "処理中" as Working
+    [*] --> Idle
+    state Active {
         [*] --> Waiting
         Waiting --> Working : 要求
         Working --> Waiting : 完了
     }
-    [*] --> Idle
     Idle --> Active : 開始
     Active --> Idle : 停止
     Idle --> [*]
@@ -554,9 +550,9 @@ stateDiagram-v2
 
 ```mermaid
 erDiagram
-    authors ||--o{ books : "執筆する"
-    categories ||--o{ book_categories : "分類する"
-    books ||--o{ book_categories : "分類される"
+    authors ||--o{ books : 執筆する
+    categories ||--o{ book_categories : 分類する
+    books ||--o{ book_categories : 分類される
 
     authors {
         INT id PK
