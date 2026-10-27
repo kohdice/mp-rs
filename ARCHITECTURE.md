@@ -9,8 +9,10 @@ for that.
 ## Bird's-eye view
 
 `mp` reads a Markdown file, hands the text to `mp-preview`, and writes the rendered result
-to stdout. File-system access, terminal detection, and the color policy live in the binary;
-parsing, layout, and ANSI encoding are library code that never touch the file system.
+to stdout. File-system access, terminal detection, the render policy, and the color policy
+live in the binary; when not rendering, the binary writes the file unchanged and
+`mp-preview` is not involved. Parsing, layout, and ANSI encoding are library code that
+never touch the file system.
 
 Inside `mp-preview` the text flows through four stages. Each stage is a pure function from
 its input to its output, and only the last step writes anything:
@@ -24,7 +26,18 @@ Markdown text ──> markdown ──> model ──> layout ──> ansi ──>
 1. `markdown` parses the whole document with comrak and converts it into an owned
    `Vec<Block>`; the comrak arena is dropped before returning.
 2. `layout` turns one `Block` into lines of styled spans, applying the width limit, list
-   markers, quote bars, table borders, and syntax highlighting.
+   markers, quote bars, table borders, and syntax highlighting. A fenced block whose info
+   string's first word, cut before its first `,`, is `mermaid` (compared
+   case-sensitively, so `Mermaid` stays a code block; GitHub's documentation shows only
+   the lowercase identifier and says nothing about case) is first handed from
+   `layout/code.rs` to `diagram` (`crates/mp-preview/src/diagram.rs`), a crate-level
+   module of pure calculations: parse the source into the chart data model
+   (`diagram/flowchart/chart.rs`) that the later stages read, then layer, route, and
+   draw onto a character canvas. A subgraph laid out in a direction of its own is drawn
+   as a diagram of its own and embedded as one box (`diagram/flowchart/unit.rs`); the
+   function that draws it is passed in by `diagram/flowchart.rs`, so `unit` depends on
+   the data model only, never on the module that calls it. When the diagram cannot be
+   drawn, the block is laid out as an ordinary code block.
 3. `ansi` encodes those lines as text, emitting escape sequences only in `ColorMode::Ansi`.
 4. `preview` writes each encoded block to the caller's writer before laying out the next one.
 
@@ -32,10 +45,10 @@ Markdown text ──> markdown ──> model ──> layout ──> ansi ──>
 
 The project is a Cargo workspace whose members live under `crates/*`.
 
-| Crate               | Responsibility                                                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, file reading, error-to-exit-code mapping. |
-| `crates/mp-preview` | Library: Markdown parsing, terminal layout, and ANSI encoding behind the single `preview` function.        |
+| Crate               | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/mp`         | CLI binary: argument parsing, `NO_COLOR` and terminal detection, render policy (pass-through on piped stdout), file reading, error-to-exit-code mapping. A thin `main.rs` wires the process streams into `lib.rs`, which exposes `run`, `Cli`, and `Env`, plus `no_color_requested` and `usable_width`, the calculations `main.rs` builds `Env` with, and `Output` and `resolve_output`, the render and color policy `run` applies, public so that the policy is testable without a process; `run` takes the streams and environment facts as parameters, so the policies are testable without a process or a terminal; `run` itself still reads the input file. |
+| `crates/mp-preview` | Library: Markdown parsing, terminal layout, Mermaid flowchart drawing, and ANSI encoding behind the single `preview` function.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ## Dependency graph
 
@@ -58,6 +71,17 @@ These are guarantees the code relies on; changing one requires updating its cons
   error context.
 - **Parsing is infallible.** comrak always produces a well-formed tree, so `preview` has no
   parse error path; its only error is the first one reported by the writer.
+- **Nesting depth is bounded.** The model nests containers at most 128 deep
+  (`MAX_NESTING_DEPTH` in `markdown`), with one count shared by block quotes, alerts,
+  and lists and by the emphasis, strong, strikethrough, links, and images inside them.
+  A container at that depth holds the leaf blocks or leaf inlines of everything nested
+  below it, in document order: the text stays, while the quote bars, list markers, task
+  check boxes, alert titles and kinds, inline styling, link destinations and titles, and
+  image markers below the bound are dropped. Layout and dropping the model recurse once
+  per level, and this bound is what keeps them off the end of the stack. comrak does not
+  provide one: its `MAX_LIST_DEPTH` of 100 stops only list items opened on a single
+  line, so a list nested one level per line has no limit, block quotes and alerts have
+  none at all, and inline nesting has none either.
 - **Parse whole, write per block.** `markdown::parse` converts the entire document into
   `Vec<Block>` up front, then `preview` lays out and writes one top-level block at a time.
   Memory is bounded by the model plus the largest block's lines, and blocks written before
@@ -68,17 +92,31 @@ These are guarantees the code relies on; changing one requires updating its cons
   list is loose. Blank-line counts in the source are never reproduced.
 - **Styles are data.** `layout` produces lines of spans carrying a `Style`; `ansi` is the
   only place that emits escape sequences, and nothing reads ANSI bytes back. Styles never
-  carry across lines.
-- **External libraries stay at the edges.** Only `markdown` names a comrak type and only
-  `highlight` names a syntect type. The comrak arena never escapes `markdown::parse`.
+  carry across lines. `ColorMode` lives beside `Style` in `style`, so `layout` decides
+  whether to highlight code without depending on `ansi`.
+- **Third-party runtime types and data stay at the edges.** Only `markdown` names a comrak
+  type, only `highlight` names a syntect type, and only the flowchart `label` module reads
+  the `entities` table of HTML named character references. The comrak arena never escapes
+  `markdown::parse`. Derive macros that only generate impls (`thiserror`) are not covered,
+  since they leave no type in any signature.
 - **Text is safe once it leaves `markdown`.** Inline text, inline code, URLs, titles, alert
   titles, and code-fence info strings contain no line breaks or tabs: LF, CR, and HT become
   one space. Code and HTML block bodies keep LF and HT, with CR and CRLF normalized to LF.
   Everywhere, the remaining C0 control characters and DEL are replaced with Unicode control
   pictures and C1 control characters with U+FFFD, including characters decoded from
-  references, so later stages can print text verbatim.
-- **Non-empty output ends with exactly one trailing newline.** `preview` appends the newline
-  to every encoded block, and empty input writes nothing.
+  references, so later stages can print text verbatim. `diagram` decodes Mermaid entity
+  codes (`#27;`) in labels and runs the result through the same replacement
+  (`control::visualize_control`), so a drawing is as safe as the text it came from.
+- **Non-empty rendering ends with exactly one trailing newline.** `preview` appends the
+  newline to every encoded block, and empty input writes nothing. This holds for the
+  rendering only: pass-through writes the file byte for byte (it reads raw bytes, so a
+  file that is not valid UTF-8 passes through unchanged; only rendering reads the file
+  as text and reports invalid UTF-8 as a read error).
 - **Width handling is the library's job.** The binary only detects whether stdout is a
   terminal and how wide it is; every wrapping and table-shrinking decision is made in
   `layout` from the `Options` it receives.
+- **Mermaid diagrams follow upstream Mermaid.** `diagram` accepts the syntax Mermaid
+  accepts, rejects what Mermaid rejects, and applies Mermaid's limits, so a block that
+  renders in a browser renders here and vice versa. It deviates only where character
+  output cannot reproduce Mermaid's result (shapes, curves, label placement), and every
+  such deviation is stated in `docs/mermaid.md` under the diagram type it affects.

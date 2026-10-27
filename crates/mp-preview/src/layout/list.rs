@@ -2,9 +2,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::ansi::ColorMode;
 use crate::model::ListItem;
-use crate::style::{Line, Span, Style};
+use crate::style::{ColorMode, Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
 
 /// A loose list separates items, and the direct child blocks of each item, with one
@@ -34,13 +33,15 @@ pub(super) fn lay_out_list(
         );
         let mut head = item_head(marker, item.task);
         if item_lines.is_empty() {
+            // An item without content ends with its marker (or box), not with the
+            // separating space.
             head.pop();
             lines.push(head);
             continue;
         }
         for (line_index, mut line) in item_lines.into_iter().enumerate() {
             if line_index == 0 {
-                line.splice(0..0, head.iter().cloned());
+                line.splice(..0, std::mem::take(&mut head));
             } else if !line.is_empty() {
                 line.insert(0, Span { text: indent.clone(), style: Style::default() });
             }

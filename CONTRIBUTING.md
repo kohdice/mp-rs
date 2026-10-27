@@ -51,7 +51,19 @@ just check                   # Format and lint
 just test                    # Run all unit and integration tests
 ```
 
-CI runs `just check-ci` and `just test` for pushes to `main` and for non-draft pull requests.
+`mp-preview` is tested through its public `preview` function, in the integration tests
+under `crates/mp-preview/tests/preview/`. A unit test under `src` exists only for
+behavior that `preview`'s output cannot show, such as the style a span carries before
+ANSI encoding or a helper's bounds.
+
+Mermaid tests in `crates/mp-preview/tests/preview/mermaid.rs` assert the exact drawing when a chart
+has at most four nodes and a dozen rows: a small drawing is stable and the strongest check.
+Larger charts use the structural helpers in that file instead, since a layout change may
+legitimately move their coordinates.
+
+CI runs `just check-ci` and `just test` for pushes to `main` and for non-draft pull requests
+that touch code, build, or CI files (the `paths` filters in `.github/workflows/ci.yml`);
+documentation-only changes do not start it.
 Make sure `just check` and `just test` pass locally before pushing.
 
 ### Benchmarking

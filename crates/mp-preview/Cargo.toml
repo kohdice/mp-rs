@@ -9,7 +9,9 @@ repository.workspace = true
 
 [dependencies]
 comrak.workspace = true
+entities.workspace = true
 syntect.workspace = true
+thiserror.workspace = true
 two-face.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true

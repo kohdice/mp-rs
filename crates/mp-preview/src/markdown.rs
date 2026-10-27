@@ -3,36 +3,71 @@
 use comrak::nodes::{AlertType, ListType, NodeValue, TableAlignment};
 use comrak::{Arena, Node, Options, parse_document};
 
-use crate::model::{Align, Block, Inline, ListItem};
+use crate::control::visualize_control;
+use crate::model::{AlertKind, Align, Block, Inline, ListItem};
 
-/// Parses a whole document. The comrak arena is dropped before returning, so callers
-/// never hold a comrak type.
+/// The deepest nesting of containers the model holds, counted together: block quotes,
+/// alerts, and lists, then emphasis, strong, strikethrough, links, and images inside
+/// them. Every later stage, and dropping the model, recurses once per level, so an
+/// unbounded depth would overflow the stack. comrak bounds none of them across lines.
+const MAX_NESTING_DEPTH: usize = 128;
+
+/// Parses a whole document into blocks; empty or whitespace-only input gives no blocks,
+/// and parsing never fails. The comrak arena is dropped before returning, so callers
+/// never hold a comrak type. Containers nested deeper than [`MAX_NESTING_DEPTH`] are
+/// flattened into the deepest allowed one.
 pub(crate) fn parse(markdown: &str) -> Vec<Block> {
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &comrak_options());
-    convert_blocks(root)
+    convert_blocks(root, 0)
 }
 
-fn convert_blocks(parent: Node<'_>) -> Vec<Block> {
-    parent.children().filter_map(convert_block).collect()
+/// Converts the children of a container `depth` containers deep.
+fn convert_blocks(parent: Node<'_>, depth: usize) -> Vec<Block> {
+    parent.children().filter_map(|child| convert_block(child, depth)).collect()
 }
 
-fn convert_block(node: Node<'_>) -> Option<Block> {
+/// Converts the children of a container that is itself at `depth`. At the bound, the
+/// leaf blocks of every container below it become its children, in document order;
+/// `descendants` walks the tree without recursion.
+fn convert_contents(container: Node<'_>, depth: usize) -> Vec<Block> {
+    if depth < MAX_NESTING_DEPTH {
+        return convert_blocks(container, depth);
+    }
+    container
+        .descendants()
+        .skip(1)
+        .filter(|node| !is_container(node))
+        .filter_map(|node| convert_block(node, depth))
+        .collect()
+}
+
+fn is_container(node: Node<'_>) -> bool {
+    matches!(
+        node.data().value,
+        NodeValue::BlockQuote
+            | NodeValue::Alert(_)
+            | NodeValue::List(_)
+            | NodeValue::Item(_)
+            | NodeValue::TaskItem(_)
+    )
+}
+
+fn convert_block(node: Node<'_>, depth: usize) -> Option<Block> {
     match &node.data().value {
-        NodeValue::Paragraph => Some(Block::Paragraph(convert_inlines(node))),
-        NodeValue::Heading(heading) => {
-            Some(Block::Heading { level: heading.level, inlines: convert_inlines(node) })
-        }
-        NodeValue::BlockQuote => Some(Block::BlockQuote(convert_blocks(node))),
+        NodeValue::Paragraph => Some(Block::Paragraph(convert_inline_contents(node, depth))),
+        NodeValue::Heading(heading) => Some(Block::Heading {
+            level: heading.level,
+            inlines: convert_inline_contents(node, depth),
+        }),
+        NodeValue::BlockQuote => Some(Block::BlockQuote(convert_contents(node, depth + 1))),
         NodeValue::Alert(alert) => {
+            let kind = convert_alert_kind(alert.alert_type);
             let title = match &alert.title {
                 Some(title) => sanitize_inline(title),
-                None => alert_label(alert.alert_type).to_owned(),
+                None => kind.label().to_owned(),
             };
-            let label = Block::Paragraph(vec![Inline::Strong(vec![Inline::Text(title)])]);
-            Some(Block::BlockQuote(
-                std::iter::once(label).chain(node.children().filter_map(convert_block)).collect(),
-            ))
+            Some(Block::Alert { kind, title, blocks: convert_contents(node, depth + 1) })
         }
         NodeValue::CodeBlock(code) => Some(Block::CodeBlock {
             info: sanitize_inline(&code.info),
@@ -42,29 +77,31 @@ fn convert_block(node: Node<'_>) -> Option<Block> {
         NodeValue::ThematicBreak => Some(Block::ThematicBreak),
         NodeValue::List(list) => Some(Block::List {
             start: match list.list_type {
-                ListType::Ordered => Some(list.start as u64),
+                ListType::Ordered => Some(u64::try_from(list.start).unwrap_or(u64::MAX)),
                 ListType::Bullet => None,
             },
             tight: list.tight,
-            items: node.children().map(convert_item).collect(),
+            items: node.children().map(|item| convert_item(item, depth + 1)).collect(),
         }),
-        NodeValue::Table(table) => Some(convert_table(node, &table.alignments)),
+        NodeValue::Table(table) => Some(convert_table(node, &table.alignments, depth)),
         _ => None,
     }
 }
 
-fn convert_table(node: Node<'_>, alignments: &[TableAlignment]) -> Block {
+fn convert_table(node: Node<'_>, alignments: &[TableAlignment], depth: usize) -> Block {
     // A GFM table always starts with its header row.
-    let mut rows = node.children().map(|row| row.children().map(convert_inlines).collect());
+    let mut rows = node
+        .children()
+        .map(|row| row.children().map(|cell| convert_inline_contents(cell, depth)).collect());
     let header = rows.next().unwrap_or_default();
     Block::Table {
-        align: alignments.iter().map(convert_align).collect(),
+        align: alignments.iter().copied().map(convert_align).collect(),
         header,
         rows: rows.collect(),
     }
 }
 
-fn convert_align(alignment: &TableAlignment) -> Align {
+fn convert_align(alignment: TableAlignment) -> Align {
     match alignment {
         TableAlignment::None => Align::None,
         TableAlignment::Left => Align::Left,
@@ -73,40 +110,68 @@ fn convert_align(alignment: &TableAlignment) -> Align {
     }
 }
 
-fn alert_label(alert_type: AlertType) -> &'static str {
+fn convert_alert_kind(alert_type: AlertType) -> AlertKind {
     match alert_type {
-        AlertType::Note => "NOTE",
-        AlertType::Tip => "TIP",
-        AlertType::Important => "IMPORTANT",
-        AlertType::Warning => "WARNING",
-        AlertType::Caution => "CAUTION",
+        AlertType::Note => AlertKind::Note,
+        AlertType::Tip => AlertKind::Tip,
+        AlertType::Important => AlertKind::Important,
+        AlertType::Warning => AlertKind::Warning,
+        AlertType::Caution => AlertKind::Caution,
     }
 }
 
-fn convert_item(node: Node<'_>) -> ListItem {
+fn convert_item(node: Node<'_>, depth: usize) -> ListItem {
     let task = match &node.data().value {
         NodeValue::TaskItem(task) => Some(task.symbol.is_some()),
         _ => None,
     };
-    ListItem { task, blocks: convert_blocks(node) }
+    ListItem { task, blocks: convert_contents(node, depth) }
 }
 
-fn convert_inlines(parent: Node<'_>) -> Vec<Inline> {
-    parent.children().filter_map(convert_inline).collect()
+fn convert_inlines(parent: Node<'_>, depth: usize) -> Vec<Inline> {
+    parent.children().filter_map(|child| convert_inline(child, depth)).collect()
 }
 
-fn convert_inline(node: Node<'_>) -> Option<Inline> {
+/// Converts the inlines of a block or inline container that is itself at `depth`, the
+/// way [`convert_contents`] converts blocks: at the bound, the leaf inlines below it
+/// become its children, in document order.
+fn convert_inline_contents(container: Node<'_>, depth: usize) -> Vec<Inline> {
+    if depth < MAX_NESTING_DEPTH {
+        return convert_inlines(container, depth);
+    }
+    container
+        .descendants()
+        .skip(1)
+        .filter(|node| !is_inline_container(node))
+        .filter_map(|node| convert_inline(node, depth))
+        .collect()
+}
+
+fn is_inline_container(node: Node<'_>) -> bool {
+    matches!(
+        node.data().value,
+        NodeValue::Emph
+            | NodeValue::Strong
+            | NodeValue::Strikethrough
+            | NodeValue::Link(_)
+            | NodeValue::Image(_)
+    )
+}
+
+fn convert_inline(node: Node<'_>, depth: usize) -> Option<Inline> {
     match &node.data().value {
         NodeValue::Text(text) => Some(Inline::Text(sanitize_inline(text))),
         NodeValue::HtmlInline(html) => Some(Inline::Text(sanitize_inline(html))),
         NodeValue::Code(code) => Some(Inline::Code(sanitize_inline(&code.literal))),
-        NodeValue::Emph => Some(Inline::Emphasis(convert_inlines(node))),
-        NodeValue::Strong => Some(Inline::Strong(convert_inlines(node))),
-        NodeValue::Strikethrough => Some(Inline::Strikethrough(convert_inlines(node))),
+        NodeValue::Emph => Some(Inline::Emphasis(convert_inline_contents(node, depth + 1))),
+        NodeValue::Strong => Some(Inline::Strong(convert_inline_contents(node, depth + 1))),
+        NodeValue::Strikethrough => {
+            Some(Inline::Strikethrough(convert_inline_contents(node, depth + 1)))
+        }
         NodeValue::SoftBreak => Some(Inline::SoftBreak),
         NodeValue::LineBreak => Some(Inline::HardBreak),
         NodeValue::Link(link) => {
-            let children = convert_inlines(node);
+            let children = convert_inline_contents(node, depth + 1);
             let url = sanitize_inline(&link.url);
             Some(Inline::Link {
                 show_url: shows_url(&children, &url),
@@ -118,7 +183,7 @@ fn convert_inline(node: Node<'_>) -> Option<Inline> {
         NodeValue::Image(image) => Some(Inline::Image {
             url: sanitize_inline(&image.url),
             title: convert_title(&image.title),
-            alt: convert_inlines(node),
+            alt: convert_inline_contents(node, depth + 1),
         }),
         _ => None,
     }
@@ -141,8 +206,7 @@ fn shows_url(children: &[Inline], url: &str) -> bool {
 /// `&#10;` or `&#9;` would escape both. Every other control is replaced as
 /// [`visualize_control`] describes.
 fn sanitize_inline(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .chars()
+    fold_crlf(text)
         .map(|character| match character {
             '\n' | '\r' | '\t' => ' ',
             _ => visualize_control(character),
@@ -155,26 +219,24 @@ fn sanitize_inline(text: &str) -> String {
 /// is replaced as [`visualize_control`] describes. comrak keeps the source line endings
 /// in these literals, so a CR left in would show as a control picture on every line.
 fn sanitize_block_body(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .chars()
+    fold_crlf(text)
         .map(|character| match character {
+            '\r' => '\n',
             '\n' | '\t' => character,
             _ => visualize_control(character),
         })
         .collect()
 }
 
-/// Replaces a C0 control or DEL with its Unicode Control Picture and a C1 control with
-/// U+FFFD, which stands in for the C1 pictures Unicode lacks, so decoded input cannot
-/// drive the terminal. Any other character is returned unchanged.
-fn visualize_control(character: char) -> char {
-    match character {
-        '\0'..='\x1f' => char::from_u32(0x2400 + u32::from(character)).unwrap_or(character),
-        '\x7f' => '\u{2421}',
-        '\u{80}'..='\u{9f}' => char::REPLACEMENT_CHARACTER,
-        _ => character,
-    }
+/// Yields the characters of `text` with each CRLF pair folded into one LF, so the pair
+/// counts as one line break like a lone LF or CR.
+fn fold_crlf(text: &str) -> impl Iterator<Item = char> {
+    let mut characters = text.chars().peekable();
+    std::iter::from_fn(move || {
+        let character = characters.next()?;
+        let crlf = character == '\r' && characters.next_if_eq(&'\n').is_some();
+        Some(if crlf { '\n' } else { character })
+    })
 }
 
 fn comrak_options() -> Options<'static> {
@@ -191,34 +253,8 @@ fn comrak_options() -> Options<'static> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_returns_no_blocks_for_empty_input() {
-        assert_eq!(parse(""), Vec::new());
-        assert_eq!(parse("\n\n"), Vec::new());
-    }
-
     fn text(value: &str) -> Inline {
         Inline::Text(value.to_owned())
-    }
-
-    #[test]
-    fn parse_converts_a_single_paragraph() {
-        assert_eq!(parse("Hello\n"), vec![Block::Paragraph(vec![text("Hello")])]);
-    }
-
-    #[test]
-    fn parse_nests_emphasis_strong_strikethrough_and_code() {
-        assert_eq!(
-            parse("*a **b** ~~c~~ `d`*\n"),
-            vec![Block::Paragraph(vec![Inline::Emphasis(vec![
-                text("a "),
-                Inline::Strong(vec![text("b")]),
-                text(" "),
-                Inline::Strikethrough(vec![text("c")]),
-                text(" "),
-                Inline::Code("d".to_owned()),
-            ])])]
-        );
     }
 
     /// Parses a single paragraph made only of text inlines and joins them: inline HTML
@@ -239,6 +275,10 @@ mod tests {
         joined
     }
 
+    fn paragraph(value: &str) -> Block {
+        Block::Paragraph(vec![text(value)])
+    }
+
     #[test]
     fn parse_keeps_inline_html_as_text() {
         assert_eq!(paragraph_text("a <b>x</b> c"), "a <b>x</b> c");
@@ -250,195 +290,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_records_heading_levels() {
-        assert_eq!(parse("## a\n"), vec![Block::Heading { level: 2, inlines: vec![text("a")] }]);
-    }
-
-    #[test]
-    fn parse_converts_hard_breaks() {
-        assert_eq!(
-            parse("a  \nb\n"),
-            vec![Block::Paragraph(vec![text("a"), Inline::HardBreak, text("b")])]
-        );
-    }
-
-    fn paragraph(value: &str) -> Block {
-        Block::Paragraph(vec![text(value)])
-    }
-
-    fn item(blocks: Vec<Block>) -> ListItem {
-        ListItem { task: None, blocks }
-    }
-
-    fn bullet_list(tight: bool, items: Vec<ListItem>) -> Block {
-        Block::List { start: None, tight, items }
-    }
-
-    #[test]
-    fn parse_marks_simple_lists_tight_and_blank_separated_lists_loose() {
-        let items = || vec![item(vec![paragraph("a")]), item(vec![paragraph("b")])];
-
-        assert_eq!(parse("- a\n- b\n"), vec![bullet_list(true, items())]);
-        assert_eq!(parse("- a\n\n- b\n"), vec![bullet_list(false, items())]);
-    }
-
-    #[test]
-    fn parse_records_ordered_list_start_and_unordered_as_none() {
-        assert_eq!(
-            parse("3. a\n4. b\n"),
-            vec![Block::List {
-                start: Some(3),
-                tight: true,
-                items: vec![item(vec![paragraph("a")]), item(vec![paragraph("b")])],
-            }]
-        );
-        assert_eq!(parse("- a\n"), vec![bullet_list(true, vec![item(vec![paragraph("a")])])]);
-    }
-
-    #[test]
-    fn parse_records_task_list_states() {
-        let task = |state, value| ListItem { task: state, blocks: vec![paragraph(value)] };
-
-        assert_eq!(
-            parse("- [ ] a\n- [x] b\n- c\n"),
-            vec![bullet_list(
-                true,
-                vec![task(Some(false), "a"), task(Some(true), "b"), task(None, "c")]
-            )]
-        );
-    }
-
-    #[test]
-    fn parse_keeps_code_block_info_code_and_tabs() {
-        let code_block = |info: &str, code: &str| Block::CodeBlock {
-            info: info.to_owned(),
-            code: code.to_owned(),
-        };
-
-        assert_eq!(parse("```rust\n\tx\n```\n"), vec![code_block("rust", "\tx\n")]);
-        assert_eq!(parse("    x\n"), vec![code_block("", "x\n")]);
-    }
-
-    #[test]
-    fn parse_keeps_html_blocks_and_thematic_breaks() {
-        assert_eq!(
-            parse("<div>\n\n---\n"),
-            vec![Block::Html("<div>\n".to_owned()), Block::ThematicBreak]
-        );
-    }
-
-    #[test]
-    fn parse_converts_tables_with_alignment() {
-        let cells = |values: &[&str]| values.iter().map(|value| vec![text(value)]).collect();
-
-        assert_eq!(
-            parse("| a | b | c |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n"),
-            vec![Block::Table {
-                align: vec![Align::Left, Align::Center, Align::Right],
-                header: cells(&["a", "b", "c"]),
-                rows: vec![cells(&["1", "2", "3"]), cells(&["4", "5", "6"])],
-            }]
-        );
-        assert_eq!(
-            parse("| a |\n| --- |\n"),
-            vec![Block::Table { align: vec![Align::None], header: cells(&["a"]), rows: vec![] }]
-        );
-    }
-
-    #[test]
-    fn parse_shows_url_for_inline_links_with_distinct_text() {
-        assert_eq!(
-            parse("[text](https://x.test \"T\")\n"),
-            vec![Block::Paragraph(vec![Inline::Link {
-                url: "https://x.test".to_owned(),
-                title: Some("T".to_owned()),
-                children: vec![text("text")],
-                show_url: true,
-            }])]
-        );
-    }
-
-    fn untitled_link(url: &str, visible: &str, show_url: bool) -> Block {
-        Block::Paragraph(vec![Inline::Link {
-            url: url.to_owned(),
-            title: None,
-            children: vec![text(visible)],
-            show_url,
-        }])
-    }
-
-    #[test]
-    fn parse_hides_url_when_link_text_equals_destination() {
-        let expected = vec![untitled_link("https://x.test", "https://x.test", false)];
-
-        assert_eq!(parse("<https://x.test>\n"), expected);
-        assert_eq!(parse("https://x.test\n"), expected);
-        assert_eq!(parse("[https://x.test][r]\n\n[r]: https://x.test\n"), expected);
-    }
-
-    #[test]
-    fn parse_hides_mailto_prefix_for_email_autolinks() {
-        let expected = vec![untitled_link("mailto:a@b.test", "a@b.test", false)];
-
-        assert_eq!(parse("<a@b.test>\n"), expected);
-        assert_eq!(parse("a@b.test\n"), expected);
-    }
-
-    #[test]
-    fn parse_shows_generated_destination_for_www_autolinks() {
-        assert_eq!(
-            parse("www.example.com\n"),
-            vec![untitled_link("http://www.example.com", "www.example.com", true)]
-        );
-    }
-
-    #[test]
-    fn parse_converts_images_with_alt_and_title() {
-        assert_eq!(
-            parse("![alt *x*](i.png \"t\")\n"),
-            vec![Block::Paragraph(vec![Inline::Image {
-                url: "i.png".to_owned(),
-                title: Some("t".to_owned()),
-                alt: vec![text("alt "), Inline::Emphasis(vec![text("x")])],
-            }])]
-        );
-    }
-
-    #[test]
-    fn parse_visualizes_control_characters_in_image_urls() {
-        assert_eq!(
-            parse("![a](i&#1;.png)"),
-            vec![Block::Paragraph(vec![Inline::Image {
-                url: "i␁.png".to_owned(),
-                title: None,
-                alt: vec![text("a")],
-            }])]
-        );
-    }
-
-    #[test]
-    fn parse_converts_alerts_to_quotes_with_bold_labels() {
-        for kind in ["NOTE", "TIP", "IMPORTANT", "WARNING", "CAUTION"] {
-            assert_eq!(
-                parse(&format!("> [!{kind}]\n> body\n")),
-                vec![Block::BlockQuote(vec![
-                    Block::Paragraph(vec![Inline::Strong(vec![text(kind)])]),
-                    paragraph("body"),
-                ])],
-                "alert kind {kind}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_uses_custom_alert_titles_in_place_of_the_label() {
-        assert_eq!(
-            parse("> [!NOTE] Custom &#27;title\n> body\n"),
-            vec![Block::BlockQuote(vec![
-                Block::Paragraph(vec![Inline::Strong(vec![text("Custom ␛title")])]),
-                paragraph("body"),
-            ])]
-        );
+    fn shows_url_is_false_only_when_the_single_text_child_spells_the_url() {
+        assert!(!shows_url(&[text("https://x.test")], "https://x.test"));
+        assert!(!shows_url(&[text("a@b.test")], "mailto:a@b.test"));
+        assert!(shows_url(&[text("www.example.com")], "http://www.example.com"));
+        assert!(shows_url(&[text("https://"), text("x.test")], "https://x.test"));
     }
 
     #[test]
@@ -447,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_visualizes_control_characters_in_code_html_urls_and_titles() {
+    fn parse_visualizes_control_characters_in_code_html_destinations_and_titles() {
         assert_eq!(
             parse("`a\u{1b}b`\n"),
             vec![Block::Paragraph(vec![Inline::Code("a␛b".to_owned())])]
@@ -466,6 +322,22 @@ mod tests {
                 show_url: true,
             }])]
         );
+        assert_eq!(
+            parse("![a](i&#1;.png \"c&#27;d\")\n"),
+            vec![Block::Paragraph(vec![Inline::Image {
+                url: "i␁.png".to_owned(),
+                title: Some("c␛d".to_owned()),
+                alt: vec![text("a")],
+            }])]
+        );
+        assert_eq!(
+            parse("> [!NOTE] Custom &#27;title\n> body\n"),
+            vec![Block::Alert {
+                kind: AlertKind::Note,
+                title: "Custom ␛title".to_owned(),
+                blocks: vec![paragraph("body")],
+            }]
+        );
     }
 
     #[test]
@@ -477,7 +349,6 @@ mod tests {
             parse("<div>\r\nx\r\n</div>\r\n"),
             vec![Block::Html("<div>\nx\n</div>\n".to_owned())]
         );
-        assert_eq!(parse("a&#13;b\n"), vec![Block::Paragraph(vec![text("a b")])]);
     }
 
     #[test]

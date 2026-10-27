@@ -13,17 +13,27 @@ const TITLE_SEPARATOR: &str = " — ";
 const IMAGE_OPEN: &str = "[img: ";
 const IMAGE_CLOSE: &str = "]";
 
-/// Lays out inlines in `width` columns, or unwrapped when `width` is `None`. No inlines
-/// lay out to no lines, so an empty heading or paragraph contributes nothing.
-pub(crate) fn lay_out_inlines(inlines: &[Inline], style: Style, width: Option<usize>) -> Vec<Line> {
-    if inlines.is_empty() {
-        return Vec::new();
-    }
-    let segments = flatten(inlines, style, width.is_none());
-    match width {
+/// Lays out inlines in `width` columns, or unwrapped when `width` is `None`; without a
+/// width a soft break starts a new line, with one it becomes a space.
+///
+/// Spacing comes from structure, not from the text: the empty lines that hard breaks
+/// leave before the first text are dropped, and inlines whose lines hold nothing but
+/// spaces lay out to no lines, so an empty heading or paragraph contributes nothing.
+pub(super) fn lay_out_inlines(inlines: &[Inline], style: Style, width: Option<usize>) -> Vec<Line> {
+    let soft_break = if width.is_none() { SoftBreak::Newline } else { SoftBreak::Space };
+    let segments = flatten(inlines, style, soft_break);
+    let mut lines = match width {
         Some(width) => wrap(&segments, width),
         None => segments,
+    };
+    let is_blank = |line: &Line| line.iter().all(|span| span.text.trim_matches(' ').is_empty());
+    if lines.iter().all(is_blank) {
+        return Vec::new();
     }
+    let leading = lines.iter().take_while(|line| line.iter().all(|span| span.text.is_empty()));
+    let leading = leading.count();
+    lines.drain(..leading);
+    lines
 }
 
 /// Wraps each flattened line to `width` columns.
@@ -38,10 +48,19 @@ pub(super) fn wrap(segments: &[Line], width: usize) -> Vec<Line> {
     wrapper.lines
 }
 
-/// Returns the lines separated by hard breaks (and by soft breaks when
-/// `soft_break_is_newline`); otherwise a soft break becomes a space.
-pub(super) fn flatten(inlines: &[Inline], style: Style, soft_break_is_newline: bool) -> Vec<Line> {
-    let mut flattener = Flattener { lines: Vec::new(), line: Line::new(), soft_break_is_newline };
+/// What [`flatten`] turns a soft break into.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SoftBreak {
+    /// One space, keeping the line.
+    Space,
+    /// A new line, like a hard break.
+    Newline,
+}
+
+/// Returns the lines separated by hard breaks, and by soft breaks when `soft_break` is
+/// [`SoftBreak::Newline`].
+pub(super) fn flatten(inlines: &[Inline], style: Style, soft_break: SoftBreak) -> Vec<Line> {
+    let mut flattener = Flattener { lines: Vec::new(), line: Line::new(), soft_break };
     flattener.push_inlines(inlines, style);
     flattener.lines.push(flattener.line);
     flattener.lines
@@ -50,7 +69,7 @@ pub(super) fn flatten(inlines: &[Inline], style: Style, soft_break_is_newline: b
 struct Flattener {
     lines: Vec<Line>,
     line: Line,
-    soft_break_is_newline: bool,
+    soft_break: SoftBreak,
 }
 
 impl Flattener {
@@ -77,17 +96,19 @@ impl Flattener {
                     let link = Style { fg: Some(DARK_PALETTE.link), underline: true, ..style };
                     self.push_inlines(children, link);
                     if *show_url {
-                        self.push_destination(url, title.as_deref());
+                        self.push_url(url);
                     }
+                    self.push_title(title.as_deref());
                 }
                 Inline::Image { url, title, alt } => {
                     let alt_style = Style { fg: Some(DARK_PALETTE.muted), italic: true, ..style };
                     push_span(&mut self.line, IMAGE_OPEN, alt_style);
                     self.push_inlines(alt, alt_style);
                     push_span(&mut self.line, IMAGE_CLOSE, alt_style);
-                    self.push_destination(url, title.as_deref());
+                    self.push_url(url);
+                    self.push_title(title.as_deref());
                 }
-                Inline::SoftBreak if !self.soft_break_is_newline => {
+                Inline::SoftBreak if self.soft_break == SoftBreak::Space => {
                     push_span(&mut self.line, " ", style);
                 }
                 Inline::SoftBreak | Inline::HardBreak => {
@@ -97,17 +118,25 @@ impl Flattener {
         }
     }
 
-    fn push_destination(&mut self, url: &str, title: Option<&str>) {
-        let url_style = Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() };
+    fn push_url(&mut self, url: &str) {
+        let url_style = destination_style();
         push_span(&mut self.line, URL_OPEN, url_style);
         push_span(&mut self.line, url, url_style);
         push_span(&mut self.line, URL_CLOSE, url_style);
+    }
+
+    fn push_title(&mut self, title: Option<&str>) {
         if let Some(title) = title {
-            let title_style = Style { italic: true, ..url_style };
+            let title_style = Style { italic: true, ..destination_style() };
             push_span(&mut self.line, TITLE_SEPARATOR, title_style);
             push_span(&mut self.line, title, title_style);
         }
     }
+}
+
+/// The base style of a link or image URL and its title, which is the URL style in italics.
+fn destination_style() -> Style {
+    Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() }
 }
 
 /// Greedy word wrapper. Each word is measured once, as a whole string, when it is
@@ -143,14 +172,14 @@ impl Wrapper {
 
     fn push_text(&mut self, text: &str, style: Style) {
         let mut rest = text;
-        while let Some(index) = rest.find(' ') {
-            self.push_word_part(&rest[..index], style);
+        while let Some((word, after)) = rest.split_once(' ') {
+            self.push_word_part(word, style);
             self.place_word();
             if self.gap == 0 {
                 self.gap_style = style;
             }
             self.gap += 1;
-            rest = &rest[index + 1..];
+            rest = after;
         }
         self.push_word_part(rest, style);
     }

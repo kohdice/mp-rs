@@ -22,19 +22,32 @@ pub(crate) struct Palette {
     pub link: Rgb,
     /// Indexed by heading level minus one (`H1` first).
     pub heading_colors: [Rgb; 6],
+    pub alert: AlertColors,
+}
+
+/// Bar and title color of each GitHub alert type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AlertColors {
+    pub note: Rgb,
+    pub tip: Rgb,
+    pub important: Rgb,
+    pub warning: Rgb,
+    pub caution: Rgb,
 }
 
 pub(crate) mod solarized {
-    use super::{Palette, Rgb};
+    use super::{AlertColors, Palette, Rgb};
 
     pub(crate) const BASE01: Rgb = Rgb { r: 0x58, g: 0x6e, b: 0x75 };
     pub(crate) const BASE0: Rgb = Rgb { r: 0x83, g: 0x94, b: 0x96 };
     pub(crate) const YELLOW: Rgb = Rgb { r: 0xb5, g: 0x89, b: 0x00 };
     pub(crate) const ORANGE: Rgb = Rgb { r: 0xcb, g: 0x4b, b: 0x16 };
+    pub(crate) const RED: Rgb = Rgb { r: 0xdc, g: 0x32, b: 0x2f };
     pub(crate) const VIOLET: Rgb = Rgb { r: 0x6c, g: 0x71, b: 0xc4 };
     pub(crate) const MAGENTA: Rgb = Rgb { r: 0xd3, g: 0x36, b: 0x82 };
     pub(crate) const BLUE: Rgb = Rgb { r: 0x26, g: 0x8b, b: 0xd2 };
     pub(crate) const CYAN: Rgb = Rgb { r: 0x2a, g: 0xa1, b: 0x98 };
+    pub(crate) const GREEN: Rgb = Rgb { r: 0x85, g: 0x99, b: 0x00 };
 
     pub(crate) const DARK_PALETTE: Palette = Palette {
         body: BASE0,
@@ -46,5 +59,14 @@ pub(crate) mod solarized {
         // Heading colors step from warm/bright to cool/muted so perceived salience
         // decreases with depth; VIOLET is the lowest-saturation accent and sits last.
         heading_colors: [YELLOW, ORANGE, MAGENTA, CYAN, BLUE, VIOLET],
+        // GitHub's Primer tokens for alerts (accent, success, done, attention,
+        // danger) mapped onto the nearest Solarized accents.
+        alert: AlertColors {
+            note: BLUE,
+            tip: GREEN,
+            important: VIOLET,
+            warning: YELLOW,
+            caution: RED,
+        },
     };
 }

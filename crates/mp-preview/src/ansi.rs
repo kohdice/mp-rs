@@ -2,21 +2,11 @@
 
 use std::fmt::Write as _;
 
-use crate::style::{Line, Style};
+use crate::style::{ColorMode, Line, Style};
 use crate::theme::Rgb;
 
-/// Whether output carries ANSI escape sequences.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ColorMode {
-    /// 24-bit color and SGR attributes; code blocks are syntax highlighted.
-    Ansi,
-    /// Text only, with no escape sequences.
-    #[default]
-    Plain,
-}
-
-pub(crate) fn to_ansi(lines: &[Line], mode: ColorMode) -> String {
-    let mut encoded = String::new();
+/// Appends `lines` to `encoded`, joined by `\n` with no trailing newline.
+pub(crate) fn write_ansi(encoded: &mut String, lines: &[Line], mode: ColorMode) {
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
             encoded.push('\n');
@@ -31,7 +21,7 @@ pub(crate) fn to_ansi(lines: &[Line], mode: ColorMode) -> String {
                         encoded.push(';');
                     }
                 }
-                push_sgr_params(&mut encoded, span.style);
+                push_sgr_params(encoded, span.style);
                 encoded.push('m');
                 current = span.style;
             }
@@ -41,6 +31,13 @@ pub(crate) fn to_ansi(lines: &[Line], mode: ColorMode) -> String {
             encoded.push_str("\x1b[0m");
         }
     }
+}
+
+/// [`write_ansi`] into a fresh `String`, for tests that compare encodings.
+#[cfg(test)]
+pub(crate) fn to_ansi(lines: &[Line], mode: ColorMode) -> String {
+    let mut encoded = String::new();
+    write_ansi(&mut encoded, lines, mode);
     encoded
 }
 
@@ -63,6 +60,10 @@ fn push_sgr_params(encoded: &mut String, style: Style) {
     if let Some(Rgb { r, g, b }) = style.fg {
         // Formatting into a `String` cannot fail.
         let _ = write!(encoded, "{separator}38;2;{r};{g};{b}");
+        separator = ";";
+    }
+    if let Some(Rgb { r, g, b }) = style.bg {
+        let _ = write!(encoded, "{separator}48;2;{r};{g};{b}");
     }
 }
 
@@ -74,21 +75,6 @@ mod tests {
 
     fn span(text: &str, style: Style) -> Span {
         Span { text: text.to_owned(), style }
-    }
-
-    #[test]
-    fn to_ansi_joins_lines_with_newlines_without_escapes_in_plain_mode() {
-        let bold_colored =
-            Style { fg: Some(Rgb { r: 1, g: 2, b: 3 }), bold: true, ..Style::default() };
-        let lines = vec![
-            vec![span("a", Style::default()), span(" b", bold_colored)],
-            vec![span("c", Style::default())],
-        ];
-
-        let encoded = to_ansi(&lines, ColorMode::Plain);
-
-        assert_eq!(encoded, "a b\nc");
-        assert!(!encoded.contains('\x1b'));
     }
 
     #[test]
@@ -108,6 +94,7 @@ mod tests {
     fn to_ansi_encodes_all_attributes_in_order_and_resets_at_line_end() {
         let every_attribute = Style {
             fg: Some(Rgb { r: 1, g: 2, b: 3 }),
+            bg: Some(Rgb { r: 4, g: 5, b: 6 }),
             bold: true,
             dim: true,
             italic: true,
@@ -116,7 +103,10 @@ mod tests {
         };
         let lines = vec![vec![span("X", every_attribute)]];
 
-        assert_eq!(to_ansi(&lines, ColorMode::Ansi), "\x1b[1;2;3;4;9;38;2;1;2;3mX\x1b[0m");
+        assert_eq!(
+            to_ansi(&lines, ColorMode::Ansi),
+            "\x1b[1;2;3;4;9;38;2;1;2;3;48;2;4;5;6mX\x1b[0m"
+        );
     }
 
     #[test]
@@ -153,10 +143,22 @@ mod tests {
     }
 
     #[test]
-    fn to_ansi_keeps_empty_lines_between_lines() {
-        let lines =
-            vec![vec![span("a", Style::default())], vec![], vec![span("b", Style::default())]];
+    fn to_ansi_encodes_a_background_in_ansi_mode_only() {
+        let painted = Style { bg: Some(Rgb { r: 1, g: 2, b: 3 }), ..Style::default() };
+        let lines = vec![vec![span("X", painted)]];
 
-        assert_eq!(to_ansi(&lines, ColorMode::Plain), "a\n\nb");
+        assert_eq!(to_ansi(&lines, ColorMode::Ansi), "\x1b[48;2;1;2;3mX\x1b[0m");
+        assert_eq!(to_ansi(&lines, ColorMode::Plain), "X");
+    }
+
+    #[test]
+    fn to_ansi_keeps_empty_lines_between_lines() {
+        let bold = Style { bold: true, ..Style::default() };
+        let lines = vec![vec![span("a", bold)], vec![], vec![span("b", Style::default())]];
+
+        let encoded = to_ansi(&lines, ColorMode::Plain);
+
+        assert_eq!(encoded, "a\n\nb");
+        assert!(!encoded.contains('\x1b'));
     }
 }

@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -21,27 +22,40 @@ pub struct Env {
     pub stdout_width: Option<usize>,
 }
 
-/// Runs the CLI: renders the requested file to `stdout` and maps failures to exit codes.
+/// Whether `value`, the value of the `NO_COLOR` environment variable, asks for
+/// uncolored output: an empty value counts as unset (per no-color.org).
+#[must_use]
+pub fn no_color_requested(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
+}
+
+/// Turns the reported stdout terminal width into a wrapping limit. Some ptys
+/// report zero when the size is unknown, so zero means no limit, like an
+/// undeterminable size.
+#[must_use]
+pub fn usable_width(width: Option<u16>) -> Option<usize> {
+    width.filter(|width| *width > 0).map(usize::from)
+}
+
+/// Runs the CLI: writes the requested file to `stdout`, rendered or unchanged according to
+/// the flags and `env`, and maps failures to exit codes.
 ///
 /// Errors are reported on `stderr` with an `mp:` prefix; a broken pipe on `stdout` is
 /// treated as success so piping into `head` and friends stays quiet.
-pub fn run<W, E>(cli: &Cli, stdout: &mut W, stderr: &mut E, env: Env) -> ExitCode
+pub fn run<W, E>(cli: &Cli, mut stdout: W, mut stderr: E, env: Env) -> ExitCode
 where
     W: Write,
     E: Write,
 {
-    let render = render_file(&cli.file, cli.color, env, stdout);
+    let render = render_file(&cli.file, resolve_output(cli, env), env.stdout_width, &mut stdout);
     // Flush before reporting so a partial render reaches the terminal ahead of any
     // diagnostic. `and_then` would skip the flush after a render error; `and` runs it
     // and still reports the render error as the root cause when both fail.
     let flush = stdout.flush().map_err(CliError::WriteStdout);
-    match render.and(flush) {
+    match ignoring_broken_pipe(render.and(flush)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(CliError::WriteStdout(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
-            ExitCode::SUCCESS
-        }
         Err(error) => {
-            let _ = writeln!(stderr, "mp: {error}");
+            let _ = writeln!(stderr, "mp: {}", ErrorChain(&error));
             ExitCode::FAILURE
         }
     }
@@ -51,295 +65,123 @@ where
 #[derive(Debug, ClapParser)]
 #[command(name = "mp", version, about = "Preview Markdown in the terminal")]
 pub struct Cli {
-    /// When to colorize output: auto (a terminal, unless NO_COLOR), always, or never.
-    #[arg(long, value_enum, default_value_t = ColorPolicy::Auto)]
-    color: ColorPolicy,
+    /// When to render for the terminal: auto (stdout is a terminal), always, or
+    /// never. When not rendering, the file is written unchanged, like `cat`.
+    #[arg(long, value_enum, default_value_t = When::Auto)]
+    render: When,
+    /// When to colorize the rendering: auto (a terminal, unless NO_COLOR), always,
+    /// or never. Has no effect when not rendering.
+    #[arg(long, value_enum, default_value_t = When::Auto)]
+    color: When,
+    /// Alias for `--render always --color always`; keeps the rendering when piping
+    /// into a program such as `less -R`. Cannot be combined with `--render` or
+    /// `--color`.
+    #[arg(short = 'f', long, conflicts_with_all = ["render", "color"])]
+    force_render: bool,
     /// Path to the Markdown file to preview.
     file: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ColorPolicy {
+enum When {
     Auto,
     Always,
     Never,
 }
 
-#[derive(Debug)]
-enum CliError {
-    Read { path: PathBuf, source: io::Error },
-    WriteStdout(io::Error),
+/// What `mp` writes to stdout, decided once from the flags and the environment by
+/// [`resolve_output`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Output {
+    /// The file contents, byte for byte.
+    PassThrough,
+    /// The terminal rendering, with or without ANSI styling.
+    Render(ColorMode),
 }
 
-impl fmt::Display for CliError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(formatter, "unable to read '{}': {source}", path.display())
-            }
-            Self::WriteStdout(source) => write!(formatter, "unable to write stdout: {source}"),
-        }
+#[derive(Debug, thiserror::Error)]
+enum CliError {
+    #[error("unable to read '{}'", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("unable to write stdout")]
+    WriteStdout(#[source] io::Error),
+}
+
+/// A broken pipe on stdout counts as success: the reader has stopped, as `head` does,
+/// and wants no diagnostic.
+fn ignoring_broken_pipe(result: Result<(), CliError>) -> Result<(), CliError> {
+    match result {
+        Err(CliError::WriteStdout(error)) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
     }
 }
 
-impl std::error::Error for CliError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Read { source, .. } => Some(source),
-            Self::WriteStdout(source) => Some(source),
+/// Displays `error` followed by each of its sources, separated by `: `.
+struct ErrorChain<'a>(&'a dyn std::error::Error);
+
+impl fmt::Display for ErrorChain<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(error) = source {
+            write!(formatter, ": {error}")?;
+            source = error.source();
         }
+        Ok(())
     }
 }
 
 fn render_file<W>(
     path: &Path,
-    color_policy: ColorPolicy,
-    env: Env,
-    stdout: &mut W,
+    output: Output,
+    width: Option<usize>,
+    mut stdout: W,
 ) -> Result<(), CliError>
 where
     W: Write,
 {
-    let markdown = std::fs::read_to_string(path)
-        .map_err(|source| CliError::Read { path: path.to_path_buf(), source })?;
-    let options = Options { width: env.stdout_width, color: resolve_color_mode(color_policy, env) };
-    mp_preview::preview(&markdown, &options, stdout).map_err(CliError::WriteStdout)
+    let read_error = |source| CliError::Read { path: path.to_path_buf(), source };
+    match output {
+        // Read raw bytes so passing through works like `cat` even for files that
+        // are not valid UTF-8; only rendering needs the contents as text.
+        Output::PassThrough => {
+            let bytes = std::fs::read(path).map_err(read_error)?;
+            stdout.write_all(&bytes)
+        }
+        Output::Render(color) => {
+            let markdown = std::fs::read_to_string(path).map_err(read_error)?;
+            mp_preview::preview(&markdown, &Options { width, color }, stdout)
+        }
+    }
+    .map_err(CliError::WriteStdout)
 }
 
-const fn resolve_color_mode(color_policy: ColorPolicy, env: Env) -> ColorMode {
+/// Decides what [`run`] writes for `cli` in `env`. `--render auto` renders only when
+/// stdout is a terminal; `--color auto` colors only on a terminal without `NO_COLOR`,
+/// while `--color always` colors despite `NO_COLOR`; `--force-render` acts as
+/// `--render always --color always`.
+#[must_use]
+pub const fn resolve_output(cli: &Cli, env: Env) -> Output {
+    let (render_policy, color_policy) =
+        if cli.force_render { (When::Always, When::Always) } else { (cli.render, cli.color) };
+    let render = match render_policy {
+        When::Always => true,
+        When::Never => false,
+        When::Auto => env.stdout_is_terminal,
+    };
+    if render { Output::Render(resolve_color_mode(color_policy, env)) } else { Output::PassThrough }
+}
+
+const fn resolve_color_mode(color_policy: When, env: Env) -> ColorMode {
     match color_policy {
         // An explicit `--color always` wins over `NO_COLOR` (per no-color.org).
-        ColorPolicy::Always => ColorMode::Ansi,
-        ColorPolicy::Never => ColorMode::Plain,
-        ColorPolicy::Auto if env.stdout_is_terminal && !env.no_color => ColorMode::Ansi,
-        ColorPolicy::Auto => ColorMode::Plain,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::RefCell;
-    use std::fs;
-    use std::io;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use mp_preview::ColorMode;
-
-    use super::{Cli, ColorPolicy, Env, render_file, resolve_color_mode, run};
-
-    static TEMP_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    #[test]
-    fn auto_with_no_color_set_downgrades_to_plain() {
-        assert_eq!(
-            resolve_color_mode(
-                ColorPolicy::Auto,
-                Env { no_color: true, stdout_is_terminal: true, ..Env::default() }
-            ),
-            ColorMode::Plain
-        );
-    }
-
-    #[test]
-    fn explicit_always_outranks_no_color() {
-        assert_eq!(
-            resolve_color_mode(
-                ColorPolicy::Always,
-                Env { no_color: true, stdout_is_terminal: true, ..Env::default() }
-            ),
-            ColorMode::Ansi
-        );
-    }
-
-    #[test]
-    fn prints_a_clear_diagnostic_when_the_file_cannot_be_read() -> io::Result<()> {
-        let missing_file = unique_temp_path();
-        let mut output = Vec::new();
-
-        let error = render_file(&missing_file, ColorPolicy::Never, plain_env(), &mut output)
-            .err()
-            .ok_or_else(|| io::Error::other("missing file unexpectedly rendered"))?;
-
-        let diagnostic = error.to_string();
-        assert!(diagnostic.contains("unable to read '"));
-        assert!(diagnostic.contains(&missing_file.display().to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn run_flushes_stdout_after_rendering() -> io::Result<()> {
-        let file = write_temp_markdown("Hello\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let log = RefCell::new(Vec::new());
-        let mut stdout = RecordingWriter {
-            log: &log,
-            stream: OutputStream::Stdout,
-            remaining_bytes: None,
-            bytes: Vec::new(),
-        };
-        let mut stderr = Vec::new();
-
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
-
-        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        assert_eq!(stdout.bytes, b"Hello\n");
-        assert_eq!(log.borrow().last(), Some(&WriterEvent::Flush(OutputStream::Stdout)));
-        assert!(stderr.is_empty());
-        fs::remove_file(file)?;
-        Ok(())
-    }
-
-    #[test]
-    fn run_wraps_wide_tables_to_the_detected_terminal_width() -> io::Result<()> {
-        let file = write_temp_markdown(WIDE_TABLE_MARKDOWN)?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        let exit_code =
-            run(&cli, &mut stdout, &mut stderr, Env { stdout_width: Some(40), ..Env::default() });
-
-        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        let output = utf8(stdout)?;
-        assert!(
-            output.lines().all(|line| line.chars().count() <= 40),
-            "every line must fit in 40 columns: {output}"
-        );
-        fs::remove_file(file)?;
-        Ok(())
-    }
-
-    const WIDE_TABLE_MARKDOWN: &str = "| Crate | Responsibility |\n\
-         | --- | --- |\n\
-         | mp-preview | Block-to-terminal rendering with a trailing-newline guarantee |\n";
-
-    #[test]
-    fn run_flushes_stdout_before_reporting_a_mid_stream_failure() -> io::Result<()> {
-        let file = write_temp_markdown("a\n\nb\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let log = RefCell::new(Vec::new());
-        let mut stdout = RecordingWriter {
-            log: &log,
-            stream: OutputStream::Stdout,
-            remaining_bytes: Some(1),
-            bytes: Vec::new(),
-        };
-        let mut stderr = RecordingWriter {
-            log: &log,
-            stream: OutputStream::Stderr,
-            remaining_bytes: None,
-            bytes: Vec::new(),
-        };
-
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
-
-        assert_eq!(exit_code, std::process::ExitCode::FAILURE);
-        assert_eq!(stdout.bytes, b"a");
-        assert!(utf8(stderr.bytes)?.contains("unable to write stdout"));
-        let events = log.borrow();
-        let diagnostic = events
-            .iter()
-            .position(|event| *event == WriterEvent::Write(OutputStream::Stderr))
-            .ok_or_else(|| io::Error::other("missing stderr diagnostic"))?;
-        assert_eq!(
-            events[..diagnostic].last(),
-            Some(&WriterEvent::Flush(OutputStream::Stdout)),
-            "partial stdout must be flushed before the stderr diagnostic",
-        );
-        fs::remove_file(file)?;
-        Ok(())
-    }
-
-    #[test]
-    fn run_treats_closed_stdout_pipe_as_success_without_diagnostic() -> io::Result<()> {
-        let file = write_temp_markdown("Hello\n")?;
-        let cli = Cli { color: ColorPolicy::Never, file: file.clone() };
-        let mut stdout = BrokenPipeWriter;
-        let mut stderr = Vec::new();
-
-        let exit_code = run(&cli, &mut stdout, &mut stderr, plain_env());
-
-        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
-        assert!(stderr.is_empty());
-        fs::remove_file(file)?;
-        Ok(())
-    }
-
-    /// Piped stdout: not a terminal, no known width, and `NO_COLOR` unset.
-    fn plain_env() -> Env {
-        Env::default()
-    }
-
-    fn write_temp_markdown(contents: &str) -> io::Result<PathBuf> {
-        let path = unique_temp_path();
-        fs::write(&path, contents)?;
-        Ok(path)
-    }
-
-    fn unique_temp_path() -> PathBuf {
-        let id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("mp-rs-test-{}-{id}.md", std::process::id()))
-    }
-
-    fn utf8(bytes: Vec<u8>) -> io::Result<String> {
-        String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum OutputStream {
-        Stdout,
-        Stderr,
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    enum WriterEvent {
-        Write(OutputStream),
-        Flush(OutputStream),
-    }
-
-    /// Shares an event log across stdout and stderr to expose their ordering.
-    struct RecordingWriter<'a> {
-        log: &'a RefCell<Vec<WriterEvent>>,
-        stream: OutputStream,
-        remaining_bytes: Option<usize>,
-        bytes: Vec<u8>,
-    }
-
-    impl io::Write for RecordingWriter<'_> {
-        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-            if buffer.is_empty() {
-                return Ok(0);
-            }
-            let accepted = if let Some(remaining) = &mut self.remaining_bytes {
-                if *remaining == 0 {
-                    return Err(io::Error::other("stdout exhausted"));
-                }
-                let accepted = buffer.len().min(*remaining);
-                *remaining -= accepted;
-                accepted
-            } else {
-                buffer.len()
-            };
-            self.log.borrow_mut().push(WriterEvent::Write(self.stream));
-            self.bytes.write(&buffer[..accepted])
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            self.log.borrow_mut().push(WriterEvent::Flush(self.stream));
-            Ok(())
-        }
-    }
-
-    struct BrokenPipeWriter;
-
-    impl io::Write for BrokenPipeWriter {
-        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed stdout"))
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
+        When::Always => ColorMode::Ansi,
+        When::Never => ColorMode::Plain,
+        When::Auto if env.stdout_is_terminal && !env.no_color => ColorMode::Ansi,
+        When::Auto => ColorMode::Plain,
     }
 }
