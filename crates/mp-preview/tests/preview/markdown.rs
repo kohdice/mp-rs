@@ -8,11 +8,13 @@ use unicode_width::UnicodeWidthStr;
 
 #[test]
 fn preview_writes_nothing_for_empty_input() -> io::Result<()> {
-    let mut output = Vec::new();
+    for markdown in ["", "\n\n", "  \n\t\n"] {
+        let mut output = Vec::new();
 
-    preview("", &Options::default(), &mut output)?;
+        preview(markdown, &Options::default(), &mut output)?;
 
-    assert!(output.is_empty(), "expected no bytes, got {output:?}");
+        assert!(output.is_empty(), "{markdown:?}: expected no bytes, got {output:?}");
+    }
     Ok(())
 }
 
@@ -33,11 +35,6 @@ fn preview_skips_empty_headings_between_blocks() {
 }
 
 #[test]
-fn wraps_words_that_exactly_fit_the_width() {
-    assert_eq!(plain("hello world\n", Some(5)), "hello\nworld\n");
-}
-
-#[test]
 fn preview_emits_escape_sequences_in_ansi_mode() {
     let render = |color| {
         let mut output = Vec::new();
@@ -55,7 +52,7 @@ fn preview_emits_escape_sequences_in_ansi_mode() {
 
 #[test]
 fn preview_writes_earlier_blocks_before_later_ones_fail() {
-    let mut writer = FirstWriteOnly { bytes: Vec::new(), writes: 0 };
+    let mut writer = ByteBudget { bytes: Vec::new(), remaining: "a\n".len() };
 
     let result = preview("a\n\nb\n", &Options::default(), &mut writer);
 
@@ -63,18 +60,20 @@ fn preview_writes_earlier_blocks_before_later_ones_fail() {
     assert_eq!(writer.bytes, b"a\n");
 }
 
-/// Accepts its first `write` call in full and fails every later one.
-struct FirstWriteOnly {
+/// Accepts writes while they fit in `remaining` bytes, however they are split, and fails
+/// the first write that does not fit, so output held back and written in one piece
+/// leaves nothing behind.
+struct ByteBudget {
     bytes: Vec<u8>,
-    writes: usize,
+    remaining: usize,
 }
 
-impl io::Write for FirstWriteOnly {
+impl io::Write for ByteBudget {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.writes += 1;
-        if self.writes > 1 {
+        if buffer.len() > self.remaining {
             return Err(io::Error::other("closed writer"));
         }
+        self.remaining -= buffer.len();
         self.bytes.extend_from_slice(buffer);
         Ok(buffer.len())
     }
@@ -105,8 +104,24 @@ fn hard_breaks_start_new_lines_without_a_width_limit() {
 }
 
 #[test]
+fn paragraph_starting_with_a_hard_break_renders_without_a_leading_blank_line() {
+    for width in [None, Some(80)] {
+        assert_eq!(plain("\\\nfoo\n", width), "foo\n", "{width:?}");
+        assert_eq!(plain("- \\\n  foo\n", width), "• foo\n", "{width:?}");
+        assert_eq!(plain("> \\\n> foo\n", width), "│ foo\n", "{width:?}");
+        assert_eq!(plain("&#10;\n", width), "", "{width:?}");
+        assert_eq!(plain("a\n\n&#10;\n\nb\n", width), "a\n\nb\n", "{width:?}");
+    }
+}
+
+#[test]
 fn wraps_whole_words_that_do_not_fit() {
     assert_eq!(plain("hello world\n", Some(10)), "hello\nworld\n");
+}
+
+#[test]
+fn wraps_words_that_exactly_fit_the_width() {
+    assert_eq!(plain("hello world\n", Some(5)), "hello\nworld\n");
 }
 
 #[test]
@@ -171,6 +186,12 @@ fn headings_wrap_like_paragraphs() {
 }
 
 #[test]
+fn thematic_break_shrinks_to_the_available_width_down_to_one_column() {
+    assert_eq!(plain("---\n", Some(10)), "──────────\n");
+    assert_eq!(plain("---\n", Some(0)), "─\n");
+}
+
+#[test]
 fn tight_unordered_list_has_one_line_per_item() {
     assert_eq!(plain("- a\n- b\n", None), "• a\n• b\n");
 }
@@ -198,6 +219,11 @@ fn tight_list_item_with_lazy_text_and_nested_list_has_no_blank_lines() {
 #[test]
 fn empty_list_item_renders_only_its_marker() {
     assert_eq!(plain("-\n", None), "•\n");
+}
+
+#[test]
+fn wrapped_list_item_lines_indent_to_the_content_column() {
+    assert_eq!(plain("- one two three four\n", Some(10)), "• one two\n  three\n  four\n");
 }
 
 #[test]
@@ -278,6 +304,11 @@ fn empty_quote_renders_a_single_bar() {
 }
 
 #[test]
+fn alert_without_a_body_is_a_single_title_line() {
+    assert_eq!(plain("> [!NOTE]\n", None), "│ NOTE\n");
+}
+
+#[test]
 fn aligns_cells_left_center_and_right() {
     assert_eq!(
         plain("| HHHHH | HHHHH | HHHHH |\n| :- | :-: | -: |\n| a | a | a |\n", None).lines().nth(3),
@@ -336,6 +367,7 @@ fn empty_table_cell_renders_as_padding() {
     let output = plain("| H | I |\n| - | - |\n| a |  |\n", None);
 
     assert_eq!(output.lines().nth(3), Some("│ a   │     │"), "{output}");
+    assert_eq!(plain("| a |\n| --- |\n", None), "┌─────┐\n│ a   │\n└─────┘\n");
 }
 
 #[test]
@@ -370,12 +402,7 @@ fn code_block_keeps_interior_blank_lines() {
 
 #[test]
 fn html_block_renders_verbatim_without_its_final_newline_or_wrapping() {
-    assert_eq!(plain("<div>\n  x y\n</div>\n", Some(3)), "<div>\n  x y\n</div>\n");
-}
-
-#[test]
-fn html_block_expands_tabs_to_four_column_stops() {
-    assert_eq!(plain("<div>\n\tx\nab\tc\n</div>\n", None), "<div>\n    x\nab  c\n</div>\n");
+    assert_eq!(plain("<div>\n  x y\nab\tc\n</div>\n", Some(3)), "<div>\n  x y\nab  c\n</div>\n");
 }
 
 #[test]

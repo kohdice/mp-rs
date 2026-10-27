@@ -2,10 +2,13 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::text::{flatten, push_span, wrap};
+use super::text::{SoftBreak, flatten, push_span, wrap};
 use crate::model::{Align, Inline};
 use crate::style::{Line, Span, Style};
 use crate::theme::solarized::DARK_PALETTE;
+
+/// A cell's lines, each kept with its display width so it is measured once.
+type Cell = Vec<(Line, usize)>;
 
 /// Lays out a table whose rows all have the header's column count.
 pub(super) fn lay_out_table(
@@ -15,22 +18,24 @@ pub(super) fn lay_out_table(
     width: Option<usize>,
 ) -> Vec<Line> {
     let body = Style { fg: Some(DARK_PALETTE.body), ..Style::default() };
-    let mut cells: Vec<Vec<Vec<Line>>> = std::iter::once(header)
+    let mut cells: Vec<Vec<Cell>> = std::iter::once(header)
         .chain(rows.iter().map(Vec::as_slice))
-        .map(|row| row.iter().map(|cell| flatten(cell, body, false)).collect())
+        .map(|row| row.iter().map(|cell| measured(flatten(cell, body, SoftBreak::Space))).collect())
         .collect();
 
     let mut widths = vec![MIN_COLUMN_WIDTH; header.len()];
     for row in &cells {
         for (width, cell) in widths.iter_mut().zip(row) {
-            *width = cell.iter().map(|line| line_width(line)).fold(*width, usize::max);
+            *width = cell.iter().map(|(_, line_width)| *line_width).fold(*width, usize::max);
         }
     }
     if let Some(available) = width {
-        shrink_to_fit(&mut widths, available);
+        widths = shrunk_to_fit(widths, available);
         for row in &mut cells {
             for (cell, width) in row.iter_mut().zip(&widths) {
-                *cell = wrap(cell, *width);
+                let lines: Vec<Line> =
+                    std::mem::take(cell).into_iter().map(|(line, _)| line).collect();
+                *cell = measured(wrap(&lines, *width));
             }
         }
     }
@@ -46,6 +51,16 @@ pub(super) fn lay_out_table(
     lines
 }
 
+fn measured(lines: Vec<Line>) -> Cell {
+    lines
+        .into_iter()
+        .map(|line| {
+            let width = line_width(&line);
+            (line, width)
+        })
+        .collect()
+}
+
 /// Display width of the line's complete visible text.
 fn line_width(line: &[Span]) -> usize {
     match line {
@@ -54,7 +69,7 @@ fn line_width(line: &[Span]) -> usize {
     }
 }
 
-fn row_lines(cells: &[Vec<Line>], widths: &[usize], align: &[Align]) -> Vec<Line> {
+fn row_lines(cells: &[Cell], widths: &[usize], align: &[Align]) -> Vec<Line> {
     let height = cells.iter().map(Vec::len).max().unwrap_or(0);
     (0..height)
         .map(|index| {
@@ -64,8 +79,9 @@ fn row_lines(cells: &[Vec<Line>], widths: &[usize], align: &[Align]) -> Vec<Line
                 if column > 0 {
                     line.push(border_span("│"));
                 }
-                let content = cell.get(index).map_or(&[][..], Vec::as_slice);
-                let padding = width.saturating_sub(line_width(content));
+                let (content, content_width) =
+                    cell.get(index).map_or((&[][..], 0), |(line, width)| (line.as_slice(), *width));
+                let padding = width.saturating_sub(content_width);
                 let (left, right) = match align {
                     Align::Right => (padding, 0),
                     Align::Center => (padding / 2, padding - padding / 2),
@@ -131,17 +147,17 @@ fn table_total_width(widths: &[usize]) -> usize {
 /// Lowering tied columns together bounds the number of iterations by the column
 /// count, rather than by an arbitrarily wide cell's overflow. For n columns this
 /// takes O(n²) time and O(1) additional space because each iteration scans them.
-fn shrink_to_fit(widths: &mut [usize], available: usize) {
+fn shrunk_to_fit(mut widths: Vec<usize>, available: usize) -> Vec<usize> {
     loop {
-        let Some(overflow) = table_total_width(widths).checked_sub(available) else {
-            return;
+        let Some(overflow) = table_total_width(&widths).checked_sub(available) else {
+            return widths;
         };
         if overflow == 0 {
-            return;
+            return widths;
         }
         let Some(max) = widths.iter().copied().filter(|width| *width > MIN_COLUMN_WIDTH).max()
         else {
-            return;
+            return widths;
         };
         let next_width = widths
             .iter()
@@ -155,14 +171,10 @@ fn shrink_to_fit(widths: &mut [usize], available: usize) {
         let batch = overflow.min(widest_count.saturating_mul(headroom));
         let base_step = batch / widest_count;
         let mut extra_steps = batch % widest_count;
-        for width in widths.iter_mut() {
+        for width in &mut widths {
             if *width == max {
-                let extra_step = if extra_steps > 0 {
-                    extra_steps -= 1;
-                    1
-                } else {
-                    0
-                };
+                let extra_step = usize::from(extra_steps > 0);
+                extra_steps -= extra_step;
                 *width -= base_step + extra_step;
             }
         }
@@ -171,17 +183,13 @@ fn shrink_to_fit(widths: &mut [usize], available: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{shrink_to_fit, table_total_width};
+    use super::{shrunk_to_fit, table_total_width};
 
     #[test]
     fn shrinks_the_widest_column_first_to_fit_the_available_width() {
         // Natural widths are [4, 12]; borders and padding add 7, so the table
         // is 23 columns wide. Fitting into 19 must take 4 from the widest.
-        let mut widths = [4, 12];
-
-        shrink_to_fit(&mut widths, 19);
-
-        assert_eq!(widths, [4, 8]);
+        assert_eq!(shrunk_to_fit(vec![4, 12], 19), [4, 8]);
     }
 
     #[test]
@@ -189,9 +197,7 @@ mod tests {
         // Natural widths are [10, 10]; borders and padding add 7, so the
         // table is 27 columns wide. Fitting into 26 must shrink only one
         // content column, not every tied widest column.
-        let mut widths = [10, 10];
-
-        shrink_to_fit(&mut widths, 26);
+        let widths = shrunk_to_fit(vec![10, 10], 26);
 
         assert_eq!(table_total_width(&widths), 26);
         assert_eq!(
@@ -204,10 +210,6 @@ mod tests {
     #[test]
     fn columns_never_shrink_below_the_minimum_width() {
         // Even a 5-column budget cannot push content widths below 3.
-        let mut widths = [7, 7];
-
-        shrink_to_fit(&mut widths, 5);
-
-        assert_eq!(widths, [3, 3]);
+        assert_eq!(shrunk_to_fit(vec![7, 7], 5), [3, 3]);
     }
 }
