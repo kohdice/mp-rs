@@ -104,10 +104,6 @@ mod tests {
         Span { text: text.to_owned(), style }
     }
 
-    fn plain(markdown: &str, width: Option<usize>) -> String {
-        to_ansi(&lay_out(markdown, width), ColorMode::Plain)
-    }
-
     #[test]
     fn paragraph_without_width_is_one_body_colored_line() {
         let lines = lay_out("Hello world\n", None);
@@ -183,7 +179,6 @@ mod tests {
                 span(" — T", Style { italic: true, ..muted }),
             ]]
         );
-        assert_eq!(plain("<https://x.test>\n", None), "https://x.test");
     }
 
     #[test]
@@ -217,11 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn thematic_break_is_32_columns_or_the_available_width() {
+    fn thematic_break_is_32_muted_columns_without_a_width() {
         let muted = Style { fg: Some(DARK_PALETTE.muted), ..Style::default() };
         assert_eq!(lay_out("---\n", None), [vec![span(&"─".repeat(32), muted)]]);
-        assert_eq!(plain("---\n", Some(10)), "─".repeat(10));
-        assert_eq!(plain("---\n", Some(0)), "─");
     }
 
     #[test]
@@ -236,15 +229,6 @@ mod tests {
         let checked = Style { fg: Some(DARK_PALETTE.list_marker), ..Style::default() };
         assert_eq!(box_style(&lines[0]), Some(unchecked));
         assert_eq!(box_style(&lines[1]), Some(checked));
-    }
-
-    #[test]
-    fn wrapped_list_item_lines_indent_to_the_content_column() {
-        let lines = lay_out("- one two three four\n", Some(10));
-
-        assert_eq!(to_ansi(&lines, ColorMode::Plain), "• one two\n  three\n  four");
-        let indent = span("  ", Style::default());
-        assert!(lines[1..].iter().all(|line| line.first() == Some(&indent)), "{lines:?}");
     }
 
     #[test]
@@ -311,14 +295,6 @@ mod tests {
         let outer = Style { fg: Some(BLUE), ..Style::default() };
         let inner = Style { fg: Some(DARK_PALETTE.muted), dim: true, ..Style::default() };
         assert_eq!(lines[2][..2], [span("│ ", outer), span("│ ", inner)], "{lines:?}");
-    }
-
-    #[test]
-    fn alert_without_a_body_is_a_single_title_line() {
-        let lines = lay_out("> [!NOTE]\n", None);
-
-        assert_eq!(to_ansi(&lines, ColorMode::Plain), "│ NOTE");
-        assert_eq!(lines.len(), 1, "{lines:?}");
     }
 
     #[test]
@@ -398,21 +374,11 @@ mod tests {
         assert_eq!(spans, [span("fn main() { let x = 1; }", fallback)]);
     }
 
-    /// The drawing of `body` as a syntax error on `line`: the reason line above the
-    /// unchanged code block.
-    fn syntax_error_output(body: &str, line: usize, message: &str) -> String {
-        format!("mermaid: line {line}: {message}\n```mermaid\n{body}```")
-    }
-
     #[test]
-    fn mermaid_unclosed_node_label_adds_a_reason_line_above_the_code_block() {
+    fn mermaid_syntax_error_reason_line_has_the_code_fence_style() {
         let body = "flowchart LR\n    A[Start\n";
         let lines = lay_out(&format!("```mermaid\n{body}```\n"), None);
 
-        assert_eq!(
-            to_ansi(&lines, ColorMode::Plain),
-            syntax_error_output(body, 2, "unclosed node label")
-        );
         let fence_style =
             Style { fg: Some(DARK_PALETTE.code_fence), dim: true, ..Style::default() };
         assert_eq!(

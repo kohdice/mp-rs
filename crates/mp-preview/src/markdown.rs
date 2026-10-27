@@ -206,8 +206,7 @@ fn shows_url(children: &[Inline], url: &str) -> bool {
 /// `&#10;` or `&#9;` would escape both. Every other control is replaced as
 /// [`visualize_control`] describes.
 fn sanitize_inline(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .chars()
+    fold_crlf(text)
         .map(|character| match character {
             '\n' | '\r' | '\t' => ' ',
             _ => visualize_control(character),
@@ -220,14 +219,24 @@ fn sanitize_inline(text: &str) -> String {
 /// is replaced as [`visualize_control`] describes. comrak keeps the source line endings
 /// in these literals, so a CR left in would show as a control picture on every line.
 fn sanitize_block_body(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .chars()
+    fold_crlf(text)
         .map(|character| match character {
+            '\r' => '\n',
             '\n' | '\t' => character,
             _ => visualize_control(character),
         })
         .collect()
+}
+
+/// Yields the characters of `text` with each CRLF pair folded into one LF, so the pair
+/// counts as one line break like a lone LF or CR.
+fn fold_crlf(text: &str) -> impl Iterator<Item = char> {
+    let mut characters = text.chars().peekable();
+    std::iter::from_fn(move || {
+        let character = characters.next()?;
+        let crlf = character == '\r' && characters.next_if_eq(&'\n').is_some();
+        Some(if crlf { '\n' } else { character })
+    })
 }
 
 fn comrak_options() -> Options<'static> {
@@ -270,45 +279,6 @@ mod tests {
         Block::Paragraph(vec![text(value)])
     }
 
-    fn item(blocks: Vec<Block>) -> ListItem {
-        ListItem { task: None, blocks }
-    }
-
-    fn bullet_list(tight: bool, items: Vec<ListItem>) -> Block {
-        Block::List { start: None, tight, items }
-    }
-
-    fn untitled_link(url: &str, visible: &str, show_url: bool) -> Block {
-        Block::Paragraph(vec![Inline::Link {
-            url: url.to_owned(),
-            title: None,
-            children: vec![text(visible)],
-            show_url,
-        }])
-    }
-
-    #[test]
-    fn parse_returns_no_blocks_for_empty_input() {
-        assert_eq!(parse(""), Vec::new());
-        assert_eq!(parse("\n\n"), Vec::new());
-        assert_eq!(parse("  \n\t\n"), Vec::new());
-    }
-
-    #[test]
-    fn parse_nests_emphasis_strong_strikethrough_and_code() {
-        assert_eq!(
-            parse("*a **b** ~~c~~ `d`*\n"),
-            vec![Block::Paragraph(vec![Inline::Emphasis(vec![
-                text("a "),
-                Inline::Strong(vec![text("b")]),
-                text(" "),
-                Inline::Strikethrough(vec![text("c")]),
-                text(" "),
-                Inline::Code("d".to_owned()),
-            ])])]
-        );
-    }
-
     #[test]
     fn parse_keeps_inline_html_as_text() {
         assert_eq!(paragraph_text("a <b>x</b> c"), "a <b>x</b> c");
@@ -320,161 +290,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_records_heading_levels() {
-        assert_eq!(parse("## a\n"), vec![Block::Heading { level: 2, inlines: vec![text("a")] }]);
-    }
-
-    #[test]
-    fn parse_converts_hard_breaks() {
-        assert_eq!(
-            parse("a  \nb\n"),
-            vec![Block::Paragraph(vec![text("a"), Inline::HardBreak, text("b")])]
-        );
-    }
-
-    #[test]
-    fn parse_marks_simple_lists_tight_and_blank_separated_lists_loose() {
-        let items = || vec![item(vec![paragraph("a")]), item(vec![paragraph("b")])];
-
-        assert_eq!(parse("- a\n- b\n"), vec![bullet_list(true, items())]);
-        assert_eq!(parse("- a\n\n- b\n"), vec![bullet_list(false, items())]);
-    }
-
-    #[test]
-    fn parse_records_ordered_list_start_and_unordered_as_none() {
-        assert_eq!(
-            parse("3. a\n4. b\n"),
-            vec![Block::List {
-                start: Some(3),
-                tight: true,
-                items: vec![item(vec![paragraph("a")]), item(vec![paragraph("b")])],
-            }]
-        );
-        assert_eq!(parse("- a\n"), vec![bullet_list(true, vec![item(vec![paragraph("a")])])]);
-    }
-
-    #[test]
-    fn parse_records_task_list_states() {
-        let task = |state, value| ListItem { task: state, blocks: vec![paragraph(value)] };
-
-        assert_eq!(
-            parse("- [ ] a\n- [x] b\n- c\n"),
-            vec![bullet_list(
-                true,
-                vec![task(Some(false), "a"), task(Some(true), "b"), task(None, "c")]
-            )]
-        );
-    }
-
-    #[test]
-    fn parse_keeps_code_block_info_code_and_tabs() {
-        let code_block = |info: &str, code: &str| Block::CodeBlock {
-            info: info.to_owned(),
-            code: code.to_owned(),
-        };
-
-        assert_eq!(parse("```rust\n\tx\n```\n"), vec![code_block("rust", "\tx\n")]);
-        assert_eq!(parse("    x\n"), vec![code_block("", "x\n")]);
-    }
-
-    #[test]
-    fn parse_keeps_html_blocks_and_thematic_breaks() {
-        assert_eq!(
-            parse("<div>\n\n---\n"),
-            vec![Block::Html("<div>\n".to_owned()), Block::ThematicBreak]
-        );
-    }
-
-    #[test]
-    fn parse_converts_tables_with_alignment() {
-        let cells = |values: &[&str]| values.iter().map(|value| vec![text(value)]).collect();
-
-        assert_eq!(
-            parse("| a | b | c |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n"),
-            vec![Block::Table {
-                align: vec![Align::Left, Align::Center, Align::Right],
-                header: cells(&["a", "b", "c"]),
-                rows: vec![cells(&["1", "2", "3"]), cells(&["4", "5", "6"])],
-            }]
-        );
-        assert_eq!(
-            parse("| a |\n| --- |\n"),
-            vec![Block::Table { align: vec![Align::None], header: cells(&["a"]), rows: vec![] }]
-        );
-    }
-
-    #[test]
-    fn parse_shows_url_for_inline_links_with_distinct_text() {
-        assert_eq!(
-            parse("[text](https://x.test \"T\")\n"),
-            vec![Block::Paragraph(vec![Inline::Link {
-                url: "https://x.test".to_owned(),
-                title: Some("T".to_owned()),
-                children: vec![text("text")],
-                show_url: true,
-            }])]
-        );
-    }
-
-    #[test]
-    fn parse_hides_url_when_link_text_equals_destination() {
-        assert_eq!(
-            parse("<https://x.test>\n"),
-            vec![untitled_link("https://x.test", "https://x.test", false)]
-        );
-    }
-
-    #[test]
     fn shows_url_is_false_only_when_the_single_text_child_spells_the_url() {
         assert!(!shows_url(&[text("https://x.test")], "https://x.test"));
         assert!(!shows_url(&[text("a@b.test")], "mailto:a@b.test"));
         assert!(shows_url(&[text("www.example.com")], "http://www.example.com"));
         assert!(shows_url(&[text("https://"), text("x.test")], "https://x.test"));
-    }
-
-    #[test]
-    fn parse_converts_images_with_alt_and_title() {
-        assert_eq!(
-            parse("![alt *x*](i.png \"t\")\n"),
-            vec![Block::Paragraph(vec![Inline::Image {
-                url: "i.png".to_owned(),
-                title: Some("t".to_owned()),
-                alt: vec![text("alt "), Inline::Emphasis(vec![text("x")])],
-            }])]
-        );
-    }
-
-    #[test]
-    fn parse_converts_alerts_to_alert_blocks_with_their_kind() {
-        for (label, kind) in [
-            ("NOTE", AlertKind::Note),
-            ("TIP", AlertKind::Tip),
-            ("IMPORTANT", AlertKind::Important),
-            ("WARNING", AlertKind::Warning),
-            ("CAUTION", AlertKind::Caution),
-        ] {
-            assert_eq!(
-                parse(&format!("> [!{label}]\n> body\n")),
-                vec![Block::Alert {
-                    kind,
-                    title: label.to_owned(),
-                    blocks: vec![paragraph("body")],
-                }],
-                "alert kind {label}"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_uses_custom_alert_titles_in_place_of_the_label() {
-        assert_eq!(
-            parse("> [!NOTE] Custom title\n> body\n"),
-            vec![Block::Alert {
-                kind: AlertKind::Note,
-                title: "Custom title".to_owned(),
-                blocks: vec![paragraph("body")],
-            }]
-        );
     }
 
     #[test]

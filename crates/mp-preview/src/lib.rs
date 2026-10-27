@@ -1,6 +1,6 @@
 //! Renders Markdown as styled terminal text.
 //!
-//! [`preview`] is the whole public surface: callers own reading the input so they can
+//! [`preview`] is the only entry point: callers own reading the input so they can
 //! attach their own path-bearing error context, and choose the width and [`ColorMode`]
 //! through [`Options`].
 
@@ -42,14 +42,18 @@ pub struct Options {
 /// place. Parsing never fails.
 pub fn preview<W: Write>(markdown: &str, options: &Options, mut out: W) -> io::Result<()> {
     let mut wrote_block = false;
+    let mut encoded = String::new();
     for block in &markdown::parse(markdown) {
         let lines = lay_out_block(block, options.width, options.color, 0);
         if lines.is_empty() {
             continue;
         }
-        let mut encoded = if wrote_block { String::from("\n") } else { String::new() };
+        encoded.clear();
+        if wrote_block {
+            encoded.push('\n');
+        }
         wrote_block = true;
-        encoded.push_str(&ansi::to_ansi(&lines, options.color));
+        ansi::write_ansi(&mut encoded, &lines, options.color);
         encoded.push('\n');
         out.write_all(encoded.as_bytes())?;
     }

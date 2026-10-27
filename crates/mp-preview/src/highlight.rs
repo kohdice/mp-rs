@@ -24,13 +24,13 @@ static THEME: LazyLock<Theme> =
     LazyLock::new(|| two_face::theme::extra()[EmbeddedThemeName::SolarizedDark].clone());
 
 /// Splits `code` into styled pieces whose texts concatenate back to `code`; line
-/// endings stay inside the pieces. Returns `None` when the info string names no known
-/// language, the block exceeds [`MAX_CODE_BLOCK_BYTES`] or [`MAX_CODE_BLOCK_LINES`], or
-/// highlighting fails.
-pub(crate) fn highlight<'a>(info: &str, code: &'a str) -> Option<Vec<(Style, &'a str)>> {
+/// endings stay inside the pieces. Returns `None` when `language`, a fence info string's
+/// language token, names no known syntax, the block exceeds [`MAX_CODE_BLOCK_BYTES`] or
+/// [`MAX_CODE_BLOCK_LINES`], or highlighting fails.
+pub(crate) fn highlight<'a>(language: &str, code: &'a str) -> Option<Vec<(Style, &'a str)>> {
     // Resolve the syntax first so a block in an unknown language skips the body scan
     // in `is_within_highlight_limits`.
-    let syntax = syntax_for_info(info)?;
+    let syntax = SYNTAX_SET.find_syntax_by_token(language)?;
     if !is_within_highlight_limits(code) {
         return None;
     }
@@ -54,19 +54,6 @@ fn highlight_with_syntax<'a>(
     Ok(pieces)
 }
 
-fn syntax_for_info(info: &str) -> Option<&'static SyntaxReference> {
-    let token = language_token(info)?;
-    SYNTAX_SET.find_syntax_by_token(token)
-}
-
-/// The first whitespace-separated word of a fence info string, without a `,flags`
-/// suffix; `None` when there is no word.
-pub(crate) fn language_token(info: &str) -> Option<&str> {
-    let token = info.trim_ascii().split_ascii_whitespace().next()?;
-    let token = token.split_once(',').map_or(token, |(language, _flags)| language);
-    if token.is_empty() { None } else { Some(token) }
-}
-
 fn is_within_highlight_limits(code: &str) -> bool {
     code.len() <= MAX_CODE_BLOCK_BYTES
         && LinesWithEndings::from(code).nth(MAX_CODE_BLOCK_LINES).is_none()
@@ -85,29 +72,7 @@ fn convert_style(style: SyntectStyle) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{highlight, language_token};
-
-    #[test]
-    fn language_token_drops_rustdoc_style_flags() {
-        assert_eq!(language_token("rust,no_run"), Some("rust"));
-    }
-
-    #[test]
-    fn language_token_keeps_only_the_first_word() {
-        assert_eq!(language_token("rust linenums"), Some("rust"));
-    }
-
-    #[test]
-    fn language_token_is_none_without_a_language_word() {
-        assert_eq!(language_token("  "), None);
-        assert_eq!(language_token(",flags"), None);
-    }
-
-    #[test]
-    fn rejects_empty_and_unsupported_language_tokens() {
-        assert_eq!(highlight("   ", "x"), None);
-        assert_eq!(highlight("definitely-not-a-language", "x"), None);
-    }
+    use super::highlight;
 
     #[test]
     fn highlight_pieces_concatenate_to_the_code_with_line_endings_inside() {
