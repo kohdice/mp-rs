@@ -75,8 +75,9 @@ reader as they are, like `cat`.
 
 `mp` exits with 0 on success, including when stdout is closed early as in
 `mp file.md | head`. When the file cannot be read or stdout cannot be written, it prints a
-diagnostic prefixed with `mp:` on stderr and exits with 1. Malformed Markdown is never an
-error.
+diagnostic prefixed with `mp:` on stderr and exits with 1. Invalid arguments, such as an
+unknown flag, a missing file argument, or `-f` combined with `--render` or `--color`,
+print a usage error on stderr and exit with 2. Malformed Markdown is never an error.
 
 ## For developers
 
