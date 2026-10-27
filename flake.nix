@@ -45,8 +45,8 @@
             name = "mp";
 
             packages = with pkgs; [
-              goreleaser
               hyperfine
+              jq
               just
               rustToolchain
             ];
