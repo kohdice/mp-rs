@@ -24,6 +24,7 @@ pub struct Env {
 
 /// Whether `value`, the value of the `NO_COLOR` environment variable, asks for
 /// uncolored output: an empty value counts as unset (per no-color.org).
+#[must_use]
 pub fn no_color_requested(value: Option<&OsStr>) -> bool {
     value.is_some_and(|value| !value.is_empty())
 }
@@ -31,6 +32,7 @@ pub fn no_color_requested(value: Option<&OsStr>) -> bool {
 /// Turns the reported stdout terminal width into a wrapping limit. Some ptys
 /// report zero when the size is unknown, so zero means no limit, like an
 /// undeterminable size.
+#[must_use]
 pub fn usable_width(width: Option<u16>) -> Option<usize> {
     width.filter(|width| *width > 0).map(usize::from)
 }
@@ -50,11 +52,8 @@ where
     // diagnostic. `and_then` would skip the flush after a render error; `and` runs it
     // and still reports the render error as the root cause when both fail.
     let flush = stdout.flush().map_err(CliError::WriteStdout);
-    match render.and(flush) {
+    match ignoring_broken_pipe(render.and(flush)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(CliError::WriteStdout(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
-            ExitCode::SUCCESS
-        }
         Err(error) => {
             let _ = writeln!(stderr, "mp: {}", ErrorChain(&error));
             ExitCode::FAILURE
@@ -90,9 +89,10 @@ enum When {
     Never,
 }
 
-/// What `mp` writes to stdout, decided once from the flags and the environment.
+/// What `mp` writes to stdout, decided once from the flags and the environment by
+/// [`resolve_output`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Output {
+pub enum Output {
     /// The file contents, byte for byte.
     PassThrough,
     /// The terminal rendering, with or without ANSI styling.
@@ -109,6 +109,15 @@ enum CliError {
     },
     #[error("unable to write stdout")]
     WriteStdout(#[source] io::Error),
+}
+
+/// A broken pipe on stdout counts as success: the reader has stopped, as `head` does,
+/// and wants no diagnostic.
+fn ignoring_broken_pipe(result: Result<(), CliError>) -> Result<(), CliError> {
+    match result {
+        Err(CliError::WriteStdout(error)) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
 }
 
 /// Displays `error` followed by each of its sources, separated by `: `.
@@ -151,7 +160,12 @@ where
     .map_err(CliError::WriteStdout)
 }
 
-const fn resolve_output(cli: &Cli, env: Env) -> Output {
+/// Decides what [`run`] writes for `cli` in `env`. `--render auto` renders only when
+/// stdout is a terminal; `--color auto` colors only on a terminal without `NO_COLOR`,
+/// while `--color always` colors despite `NO_COLOR`; `--force-render` acts as
+/// `--render always --color always`.
+#[must_use]
+pub const fn resolve_output(cli: &Cli, env: Env) -> Output {
     let (render_policy, color_policy) =
         if cli.force_render { (When::Always, When::Always) } else { (cli.render, cli.color) };
     let render = match render_policy {

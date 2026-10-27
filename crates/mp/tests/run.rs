@@ -1,6 +1,7 @@
-//! The CLI, checked through [`mp::run`] on parsed arguments and supplied environment facts.
-//! The two calculations `main` builds those facts with, [`mp::no_color_requested`] and
-//! [`mp::usable_width`], are checked here too.
+//! The CLI, checked through [`mp::run`] on parsed arguments and supplied environment facts,
+//! and its render and color policy through [`mp::resolve_output`]. The two calculations
+//! `main` builds those facts with, [`mp::no_color_requested`] and [`mp::usable_width`],
+//! are checked here too.
 
 use std::cell::RefCell;
 use std::error::Error;
@@ -13,7 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use clap::Parser as _;
 use clap::error::ErrorKind;
-use mp::{Cli, Env, no_color_requested, run, usable_width};
+use mp::{Cli, Env, Output, no_color_requested, resolve_output, run, usable_width};
+use mp_preview::ColorMode;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -61,26 +63,16 @@ fn run_flushes_stdout_after_rendering() -> TestResult {
 }
 
 #[test]
-fn run_wraps_to_the_detected_terminal_width() -> TestResult {
-    let output = run_on(
-        "hello world\n",
-        &["--color", "never"],
-        Env { stdout_is_terminal: true, stdout_width: Some(5), ..Env::default() },
-    )?;
+fn run_wraps_to_the_detected_terminal_width_and_not_without_one() -> TestResult {
+    for (stdout_width, expected) in [(Some(5), "hello\nworld\n"), (None, "hello world\n")] {
+        let output = run_on(
+            "hello world\n",
+            &["--color", "never"],
+            Env { stdout_is_terminal: true, stdout_width, ..Env::default() },
+        )?;
 
-    assert_eq!(output, "hello\nworld\n");
-    Ok(())
-}
-
-#[test]
-fn run_does_not_wrap_without_a_detected_terminal_width() -> TestResult {
-    let output = run_on(
-        "hello world\n",
-        &["--color", "never"],
-        Env { stdout_is_terminal: true, stdout_width: None, ..Env::default() },
-    )?;
-
-    assert_eq!(output, "hello world\n");
+        assert_eq!(output, expected, "{stdout_width:?}");
+    }
     Ok(())
 }
 
@@ -135,22 +127,6 @@ fn run_treats_closed_stdout_pipe_as_success_without_diagnostic() -> TestResult {
 }
 
 #[test]
-fn run_passes_the_file_through_unchanged_when_stdout_is_piped() -> TestResult {
-    let markdown = "# Title\n\n| a | b |\n| --- | --- |\n| 1 | 2 |";
-    let file = TempMarkdown::new(markdown)?;
-    let cli = parse(&[], file.path())?;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-
-    let exit_code = run(&cli, &mut stdout, &mut stderr, Env::default());
-
-    assert_eq!(exit_code, ExitCode::SUCCESS);
-    assert_eq!(String::from_utf8(stdout)?, markdown);
-    assert!(stderr.is_empty());
-    Ok(())
-}
-
-#[test]
 fn run_passes_non_utf8_bytes_through_unchanged() -> TestResult {
     let bytes = b"caf\xe9\n";
     let file = TempMarkdown::new(bytes)?;
@@ -194,77 +170,27 @@ fn run_renders_when_stdout_is_a_terminal() -> TestResult {
 }
 
 #[test]
-fn run_renders_plain_on_a_terminal_when_no_color_is_set() -> TestResult {
-    let output = run_on(
-        "# Title\n",
-        &[],
-        Env { no_color: true, stdout_is_terminal: true, ..Env::default() },
-    )?;
+fn resolve_output_renders_on_a_terminal_and_colors_unless_told_otherwise() -> TestResult {
+    let pipe = Env::default();
+    let pipe_with_no_color = Env { no_color: true, ..Env::default() };
+    let terminal = Env { stdout_is_terminal: true, ..Env::default() };
+    let terminal_with_no_color = Env { no_color: true, ..terminal };
+    let cases: [(&[&str], Env, Output); 10] = [
+        (&[], pipe, Output::PassThrough),
+        (&[], terminal, Output::Render(ColorMode::Ansi)),
+        (&[], terminal_with_no_color, Output::Render(ColorMode::Plain)),
+        (&["--color", "always"], terminal_with_no_color, Output::Render(ColorMode::Ansi)),
+        (&["--render", "never"], terminal, Output::PassThrough),
+        (&["--render", "always"], pipe, Output::Render(ColorMode::Plain)),
+        (&["--render", "always", "--color", "always"], pipe, Output::Render(ColorMode::Ansi)),
+        (&["--render", "never", "--color", "always"], pipe, Output::PassThrough),
+        (&["-f"], pipe_with_no_color, Output::Render(ColorMode::Ansi)),
+        (&["--force-render"], pipe_with_no_color, Output::Render(ColorMode::Ansi)),
+    ];
 
-    assert_eq!(output, "Title\n");
-    Ok(())
-}
-
-#[test]
-fn run_color_always_outranks_no_color_on_a_terminal() -> TestResult {
-    let output = run_on(
-        "# Title\n",
-        &["--color", "always"],
-        Env { no_color: true, stdout_is_terminal: true, ..Env::default() },
-    )?;
-
-    assert!(output.contains("Title"), "{output:?}");
-    assert!(!output.contains("# Title"), "{output:?}");
-    assert!(output.contains("\x1b["), "{output:?}");
-    Ok(())
-}
-
-#[test]
-fn run_passes_the_file_through_on_a_terminal_with_render_never() -> TestResult {
-    let output = run_on(
-        "# Title\n",
-        &["--render", "never"],
-        Env { stdout_is_terminal: true, ..Env::default() },
-    )?;
-
-    assert_eq!(output, "# Title\n");
-    Ok(())
-}
-
-#[test]
-fn run_renders_plain_on_a_pipe_with_render_always() -> TestResult {
-    let output = run_on("# Title\n", &["--render", "always"], Env::default())?;
-
-    assert_eq!(output, "Title\n");
-    Ok(())
-}
-
-#[test]
-fn run_renders_with_ansi_on_a_pipe_with_render_always_and_color_always() -> TestResult {
-    let output = run_on("# Title\n", &["--render", "always", "--color", "always"], Env::default())?;
-
-    assert!(output.contains("Title"), "{output:?}");
-    assert!(!output.contains("# Title"), "{output:?}");
-    assert!(output.contains("\x1b["), "{output:?}");
-    Ok(())
-}
-
-#[test]
-fn run_ignores_color_when_not_rendering() -> TestResult {
-    let output = run_on("# Title\n", &["--render", "never", "--color", "always"], Env::default())?;
-
-    assert_eq!(output, "# Title\n");
-    Ok(())
-}
-
-#[test]
-fn run_force_render_renders_with_ansi_on_a_pipe_despite_no_color() -> TestResult {
-    for flag in ["-f", "--force-render"] {
-        let output = run_on("# Title\n", &[flag], Env { no_color: true, ..Env::default() })?;
-
-        assert!(output.contains("Title"), "{flag}: {output:?}");
-        assert!(!output.contains("# Title"), "{flag}: {output:?}");
-        assert!(output.contains("\x1b["), "{flag}: {output:?}");
+    for (flags, env, expected) in cases {
+        let cli = parse(flags, Path::new("ignored.md"))?;
+        assert_eq!(resolve_output(&cli, env), expected, "{flags:?} with {env:?}");
     }
     Ok(())
 }
