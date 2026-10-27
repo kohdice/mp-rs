@@ -2,7 +2,7 @@
 
 use crate::diagram::Failure;
 
-use super::parse::{Edge, End, Flowchart};
+use super::chart::{End, Flowchart};
 
 /// `chart` without the links between a subgraph and a node or subgraph inside it, at any
 /// depth, in either direction; unsupported when such a link has a label.
@@ -17,23 +17,22 @@ use super::parse::{Edge, End, Flowchart};
 /// a browser, against the node's border with no line under it; with no line to carry it
 /// here either, the chart falls back rather than dropping or floating the text, as it does
 /// for a labelled `~~~` link.
-pub(super) fn drop_own_frame_links(mut chart: Flowchart) -> Result<Flowchart, Failure> {
-    let edges = std::mem::take(&mut chart.edges);
-    let mut kept = Vec::with_capacity(edges.len());
-    for edge in edges {
-        if !joins_own_frame(&chart, &edge) {
-            kept.push(edge);
-        } else if edge.label.is_some() {
-            return Err(Failure::Unsupported);
-        }
-    }
-    chart.edges = kept;
-    Ok(chart)
-}
-
-/// Whether one end of `edge` is a subgraph and the other lies inside it.
-fn joins_own_frame(chart: &Flowchart, edge: &Edge) -> bool {
-    holds(chart, edge.from, edge.to) || holds(chart, edge.to, edge.from)
+pub(super) fn drop_own_frame_links(chart: Flowchart) -> Result<Flowchart, Failure> {
+    let Flowchart { direction, spelled_br, nodes, edges, subgraphs } = chart;
+    let chart = Flowchart { direction, spelled_br, nodes, edges: Vec::new(), subgraphs };
+    let edges = edges
+        .into_iter()
+        .filter_map(|edge| {
+            if !(holds(&chart, edge.from, edge.to) || holds(&chart, edge.to, edge.from)) {
+                Some(Ok(edge))
+            } else if edge.label.is_some() {
+                Some(Err(Failure::Unsupported))
+            } else {
+                None
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Flowchart { edges, ..chart })
 }
 
 /// Whether `outer` is a subgraph and `inner` a node among its members or a subgraph

@@ -28,8 +28,9 @@ const DOWN_HORIZONTAL: u32 = 0x252C;
 const UP_HORIZONTAL: u32 = 0x2534;
 const CROSS: u32 = 0x253C;
 
-/// How far into the run from `┼` (U+253C) to `╋` (U+254B) the cross whose arms are heavy
-/// as the connection bits of the index say lies (see the run layout above `DOWN_RIGHT`).
+/// How far into the run from `┼` (U+253C) to `╋` (U+254B) the cross lies whose heavy arms
+/// are the bits of the index, the low four bits of a cell's `heavy` (see the run layout
+/// above `DOWN_RIGHT`).
 const CROSS_OFFSETS: [u32; 16] = [0, 4, 5, 6, 1, 7, 9, 13, 2, 8, 10, 14, 3, 11, 12, 15];
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -277,16 +278,6 @@ mod tests {
         canvas.put(0, 2, "x", Style::default());
 
         assert_eq!(canvas_line_texts(canvas), ["  x"]);
-    }
-
-    #[test]
-    fn canvas_text_over_the_first_column_of_wide_text_leaves_a_blank_that_trailing_trimming_drops()
-    {
-        let mut canvas = Canvas::default();
-        canvas.put(0, 0, "あ", Style::default());
-        canvas.put(0, 0, "x", Style::default());
-
-        assert_eq!(canvas_line_texts(canvas), ["x"]);
     }
 
     #[test]

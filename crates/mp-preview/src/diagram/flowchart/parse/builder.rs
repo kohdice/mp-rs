@@ -3,20 +3,20 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::diagram::Failure;
-use crate::diagram::flowchart::label::{Label, unquoted};
+use crate::diagram::flowchart::chart::{
+    Body, Direction, Edge, End, Flowchart, Node, Shape, Subgraph, compact_index,
+};
+use crate::diagram::flowchart::label::{Label, leading_string, unquoted};
 use crate::diagram::flowchart::styling::Styling;
 
 use super::link::{Link, edge_id, link};
-use super::shape_data::{shape_data, shape_data_end};
+use super::shape_data::{edge_data_end, shape_data};
 use super::statements::keyword_statement;
 use super::tokens::{
     BRACKETS, LABEL_TOKENS, bracket_label, check_label, check_link_text, check_trap_label,
-    check_unbracketed_title, split_id,
+    check_unbracketed_title, id_keyword, leading_keyword, split_id,
 };
-use super::{
-    Body, Direction, Edge, End, Flowchart, Node, Shape, Subgraph, compact_index, direction_word,
-    syntax_error,
-};
+use super::{DIRECTION_WORDS, direction_statement, syntax_error};
 
 /// Mermaid's default `maxEdges`, a top-level configuration key like `maxTextSize`.
 const MAX_EDGES: usize = 500;
@@ -40,9 +40,6 @@ pub(super) struct Builder<'a> {
     /// The ids a registered subgraph has already taken into its list, which no later
     /// block may list again.
     claimed: HashSet<SubgraphId<'a>>,
-    /// The id of every subgraph, indexed like [`Flowchart::subgraphs`]; a named one is
-    /// what a link may point to. Filled by [`Builder::finish`].
-    subgraph_ids: Vec<SubgraphId<'a>>,
     /// The ids given to links (`A e1@--> B`), which an `e1@{ … }` statement refers to.
     edge_ids: HashSet<&'a str>,
     /// The ids of closed subgraphs whose last `view` in `@{ … }` data, given after their
@@ -52,19 +49,26 @@ pub(super) struct Builder<'a> {
     /// registers only then, and the index into `blocks` of the first block that ended
     /// with the id.
     closed_subgraphs: HashMap<SubgraphId<'a>, usize>,
+    styles: Styles<'a>,
+    /// The id of each link, indexed like [`Flowchart::edges`].
+    edge_names: Vec<Option<&'a str>>,
+}
+
+/// What the `style`, `classDef`, `class` and `linkStyle` statements set, which
+/// [`with_styles`] gives the nodes, links and subgraphs once every statement is read.
+#[derive(Default)]
+struct Styles<'a> {
     /// What the `style` statements naming each id set, the later ones over the earlier.
-    styles: HashMap<&'a str, Styling>,
+    of_ids: HashMap<&'a str, Styling>,
     /// What the `classDef` statements naming each class set, the later ones over the
     /// earlier.
     class_defs: HashMap<&'a str, Styling>,
     /// The classes attached to each id, in the order they were attached.
     classes: HashMap<&'a str, Vec<&'a str>>,
-    /// The id of each link, indexed like [`Flowchart::edges`].
-    edge_names: Vec<Option<&'a str>>,
     /// What the last `linkStyle` statement naming each link's index sets.
-    link_styles: HashMap<usize, Styling>,
+    of_links: HashMap<usize, Styling>,
     /// What the last `linkStyle default` statement sets.
-    default_link_style: Styling,
+    default_link: Styling,
 }
 
 /// A `subgraph … end` block.
@@ -104,11 +108,13 @@ impl<'a> SubgraphId<'a> {
 }
 
 impl<'a> Builder<'a> {
-    /// A builder for a chart running in `direction` that has read no statement yet.
-    pub(super) fn new(direction: Direction) -> Self {
+    /// A builder for a chart running in `direction`, spelled `BR` when `spelled_br` (see
+    /// [`Flowchart::spelled_br`]), that has read no statement yet.
+    pub(super) fn new((direction, spelled_br): (Direction, bool)) -> Self {
         Self {
             chart: Flowchart {
                 direction,
+                spelled_br,
                 nodes: Vec::new(),
                 edges: Vec::new(),
                 subgraphs: Vec::new(),
@@ -117,16 +123,11 @@ impl<'a> Builder<'a> {
             blocks: Vec::new(),
             open: Vec::new(),
             claimed: HashSet::new(),
-            subgraph_ids: Vec::new(),
             edge_ids: HashSet::new(),
             collapsed: HashSet::new(),
             closed_subgraphs: HashMap::new(),
-            styles: HashMap::new(),
-            class_defs: HashMap::new(),
-            classes: HashMap::new(),
+            styles: Styles::default(),
             edge_names: Vec::new(),
-            link_styles: HashMap::new(),
-            default_link_style: Styling::default(),
         }
     }
 
@@ -134,40 +135,21 @@ impl<'a> Builder<'a> {
     /// still open. Each node, link and subgraph gets its styles, references to subgraph
     /// ids become references to the subgraphs, and every empty subgraph gets one hidden
     /// member.
-    pub(super) fn finish(mut self) -> Result<Flowchart, Failure> {
+    pub(super) fn finish(self) -> Result<Flowchart, Failure> {
         if let Some(open) = self.open.last().and_then(|&open| self.blocks.get(open)) {
             return Err(syntax_error(open.line, "subgraph is not closed with \"end\""));
         }
-        let lists = self.add_subgraphs();
-        // Styles are written through the node indices `index_of` holds, which stop
-        // being valid once `resolve_subgraph_ids` drops the nodes named by subgraph ids,
-        // and to subgraphs through `subgraph_ids`, which `add_subgraphs` fills.
-        self.apply_styles();
-        self.resolve_subgraph_ids(&lists)?;
-        let mut chart = self.chart;
-        // Mermaid draws an empty subgraph as a frame showing only its title, placed in the
-        // flow like a node: a hidden member gives it a place and its frame the least size.
-        // Inner subgraphs come first, so that a subgraph holding only an empty one is not
-        // empty itself.
-        for subgraph in chart.innermost_first() {
-            if chart.subgraphs.get(subgraph).is_some_and(|subgraph| subgraph.members.is_empty()) {
-                let hidden = chart.nodes.len();
-                chart.nodes.push(Node {
-                    body: Body::Hidden,
-                    spread: 0,
-                    styling: Styling::default(),
-                    array_index: None,
-                });
-                let holders: Vec<usize> =
-                    std::iter::once(subgraph).chain(chart.enclosing(subgraph)).collect();
-                for holder in holders {
-                    if let Some(holder) = chart.subgraphs.get_mut(holder) {
-                        holder.members.push(hidden);
-                    }
-                }
-            }
-        }
-        Ok(chart)
+        let registered = registered_blocks(&self.blocks, &self.closed_subgraphs);
+        let ids: Vec<SubgraphId<'a>> = registered.iter().map(|block| block.id).collect();
+        let lists: Vec<&[SubgraphId<'a>]> =
+            registered.iter().map(|block| block.listed.as_slice()).collect();
+        let chart = Flowchart {
+            subgraphs: registered.iter().map(|block| block.subgraph()).collect(),
+            ..self.chart
+        };
+        let chart = with_styles(chart, &self.styles, &self.index_of, &self.edge_names, &ids);
+        let chart = resolve_subgraph_ids(chart, &self.index_of, &ids, &lists, &self.collapsed)?;
+        Ok(with_hidden_members(chart))
     }
 
     /// Applies one statement, whose first word picks its form: `subgraph`, `end`, `style`,
@@ -175,8 +157,18 @@ impl<'a> Builder<'a> {
     /// (`e1@{ … }`), or else a group of nodes optionally followed by links to further
     /// groups, where a link joins every node of the group before it to every node of the
     /// group after it. `line` is the statement's 1-based line number in the source, for
-    /// error reports.
-    pub(super) fn statement(&mut self, line: usize, statement: &'a str) -> Result<(), Failure> {
+    /// error reports, `direction_words` the [`super::direction_words`] of its line, counted
+    /// from the statement's start, and `followed_by` the character after the statement in
+    /// the source, if any. Returns whether the statement is a direction statement, which
+    /// takes the rest of its line, so that any statement starting before that line's end
+    /// is part of it.
+    pub(super) fn statement(
+        &mut self,
+        line: usize,
+        statement: &'a str,
+        direction_words: [Option<usize>; DIRECTION_WORDS.len()],
+        followed_by: Option<char>,
+    ) -> Result<bool, Failure> {
         // A closed `accDescr {` block never reaches here
         // (`statements::accessibility_end` passes it over); an unclosed one is an error,
         // as upstream's `acc_descr_multiline` lexer state reads up to a `}` and fails at
@@ -187,25 +179,39 @@ impl<'a> Builder<'a> {
         {
             return Err(syntax_error(line, "unclosed accessibility description"));
         }
-        if let Some(rest) = statement.strip_prefix("subgraph")
-            && (rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
-        {
-            return self.open_subgraph(line, rest);
-        }
-        if statement == "end" {
+        check_direction_after_keyword(line, statement, direction_words, 0)?;
+        // Upstream's `"end"\b\s*` token takes the blanks after it, and its subgraph rule
+        // needs no separator after `end`, so a statement may follow on the same line.
+        let (whole, mut statement) = (statement.len(), statement);
+        while leading_keyword(statement) == Some("end") {
             let closed = self
                 .open
                 .pop()
                 .ok_or_else(|| syntax_error(line, "\"end\" without an open subgraph"))?;
             self.register(closed);
-            return Ok(());
+            statement = statement.get("end".len()..).unwrap_or_default().trim_start();
+            if statement.is_empty() {
+                return Ok(false);
+            }
+            check_direction_after_keyword(
+                line,
+                statement,
+                direction_words,
+                whole - statement.len(),
+            )?;
+        }
+        if let Some(rest) = statement.strip_prefix("subgraph")
+            && (rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
+        {
+            return self.open_subgraph(line, rest).map(|()| false);
         }
         // Upstream's grammar needs every part of a styling statement, so a statement
         // missing one is a syntax error.
         if let Some((id, list)) = keyword_statement(statement, "style") {
-            if id.is_empty() {
+            if id.is_empty() || split_id(id).0 != id {
                 return Err(syntax_error(line, "style has no node id"));
             }
+            check_id(line, id)?;
             if list.is_empty() {
                 return Err(syntax_error(line, "style has no property list"));
             }
@@ -215,23 +221,24 @@ impl<'a> Builder<'a> {
             // `getData` merges the two.
             let styling = Styling::parse(property_list(line, without_color_semicolon(list))?);
             self.declare(id);
-            let styles = self.styles.entry(id).or_default();
+            let styles = self.styles.of_ids.entry(id).or_default();
             *styles = styles.then(styling);
-            return Ok(());
+            return Ok(false);
         }
         if let Some((names, list)) = keyword_statement(statement, "classDef") {
             if names.is_empty() {
                 return Err(syntax_error(line, "classDef has no class name"));
             }
+            check_class_name(line, names)?;
             if list.is_empty() {
                 return Err(syntax_error(line, "classDef has no property list"));
             }
             let styling = Styling::parse(property_list(line, without_color_semicolon(list))?);
             for name in names.split(',') {
-                let class = self.class_defs.entry(name).or_default();
+                let class = self.styles.class_defs.entry(name).or_default();
                 *class = class.then(styling);
             }
-            return Ok(());
+            return Ok(false);
         }
         if let Some((positions, list)) = keyword_statement(statement, "linkStyle") {
             if positions.is_empty() {
@@ -256,7 +263,7 @@ impl<'a> Builder<'a> {
                 Some(("", _)) => {
                     return Err(syntax_error(line, "linkStyle interpolate has no curve name"));
                 }
-                Some((_, "")) => return Ok(()),
+                Some((_, "")) => return Ok(false),
                 Some((_, after_curve)) => after_curve,
                 None => list,
             };
@@ -267,23 +274,29 @@ impl<'a> Builder<'a> {
             // assigns the list rather than appending to it.
             let styling = Styling::parse(property_list(line, list)?);
             let Some(indexes) = indexes else {
-                self.default_link_style = styling;
-                return Ok(());
+                self.styles.default_link = styling;
+                return Ok(false);
             };
             for index in indexes {
-                self.link_styles.insert(index, styling);
+                self.styles.of_links.insert(index, styling);
             }
-            return Ok(());
+            return Ok(false);
         }
         // Upstream's `setClass` splits the ids at commas but not the class name.
         if let Some((ids, class)) = keyword_statement(statement, "class") {
-            if ids.is_empty() || class.is_empty() || class.contains(char::is_whitespace) {
+            if ids.is_empty()
+                || split_id(ids).0 != ids
+                || class.is_empty()
+                || class.contains(char::is_whitespace)
+            {
                 return Err(syntax_error(line, "class needs one node id list and one class name"));
             }
+            check_id(line, ids)?;
+            check_class_name(line, class)?;
             for id in ids.split(',') {
                 self.attach_class(id, class);
             }
-            return Ok(());
+            return Ok(false);
         }
         // A `click` statement binds an interaction, which a text drawing cannot show, so
         // it is checked and then dropped.
@@ -293,22 +306,22 @@ impl<'a> Builder<'a> {
             if !is_click(click) {
                 return Err(syntax_error(line, "click needs a callback, a link or a string"));
             }
-            return Ok(());
+            return Ok(false);
         }
-        // `direction` before a direction word sets the direction a subgraph's members are
-        // laid out in, the last such statement winning; Mermaid reads it only there and
-        // ignores it at the top level. Before anything else, `direction` is a node id, as
-        // upstream lexes it as a direction only before a direction word.
-        let mut words = statement.split_ascii_whitespace();
-        if words.next() == Some("direction")
-            && let Some(word) = words.next()
-            && let Some(direction) = direction_word(word)
+        // A `direction` statement sets the direction a subgraph's members are laid out
+        // in, the last such statement winning; Mermaid reads it only there and ignores it
+        // at the top level. A statement led by a keyword never gets here with a direction
+        // word on its line: upstream's keyword rules come before its direction rules, and
+        // after the keyword the rest of the line lexes as a direction token, which the
+        // grammar does not accept there (see `check_direction_after_keyword`).
+        if let Some((word, direction)) =
+            direction_statement(direction_words, whole - statement.len())
         {
             if let Some(open) = self.open.last().and_then(|&open| self.blocks.get_mut(open)) {
                 open.direction = Some(direction);
                 open.spelled_td = word == "TD";
             }
-            return Ok(());
+            return Ok(true);
         }
         // Data for a link declared earlier with an id: its keys (`animate`, `animation`,
         // `curve`) have no text drawing, and upstream ignores the rest. Upstream animates
@@ -318,16 +331,15 @@ impl<'a> Builder<'a> {
         if self.edge_ids.contains(id)
             && let Some(data) = after_id.strip_prefix("@{")
         {
-            let end =
-                shape_data_end(data).ok_or_else(|| syntax_error(line, "unclosed shape data"))?;
+            let end = edge_data_end(line, data)?;
             if data.get(end + 1..).is_some_and(|after| after.trim().is_empty()) {
-                return Ok(());
+                return Ok(false);
             }
         }
-        let (mut sources, mut rest) = self.group(line, statement)?;
+        let (mut sources, mut rest) = self.group(line, statement, followed_by)?;
         while !rest.is_empty() {
-            // An id is an edge id only when a link starts right after its `@`, so that an
-            // `@` inside a link's label stays label text.
+            // An id is an edge id only when a link starts after its `@` and any blanks, so
+            // that an `@` inside a link's label stays label text.
             let with_id = edge_id(rest)
                 .and_then(|(id, after_id)| Some((Some(id), link(after_id)?)))
                 .or_else(|| Some((None, link(rest)?)));
@@ -365,6 +377,11 @@ impl<'a> Builder<'a> {
                 Some(after_pipe) => {
                     let (label, after_label) = bracket_label(after_pipe, "|")
                         .ok_or_else(|| syntax_error(line, "unclosed edge label"))?;
+                    // Upstream's `arrowText` needs a `text` token between the pipes, and an
+                    // empty string yields none, but a blank does (`SPACE`).
+                    if matches!(label, "" | "\"\"") {
+                        return Err(syntax_error(line, "empty edge label"));
+                    }
                     check_label(line, label, &LABEL_TOKENS)?;
                     (Some(label.trim()), after_label.trim_start())
                 }
@@ -376,7 +393,7 @@ impl<'a> Builder<'a> {
             if after_link.is_empty() {
                 return Err(syntax_error(line, "edge has no target"));
             }
-            let (targets, after_targets) = self.group(line, after_link)?;
+            let (targets, after_targets) = self.group(line, after_link, followed_by)?;
             // Upstream's `addLink` passes the id only for the link from the last source
             // to the first target; every other link of the group gets a generated one. The
             // id is taken once, as a group naming a node twice (`A & A`) repeats that pair
@@ -406,11 +423,12 @@ impl<'a> Builder<'a> {
             }
             (sources, rest) = (targets, after_targets);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Starts the subgraph declared by `text`, the part of a `subgraph` statement after
-    /// the keyword: an id, which may be a quoted string, followed by a bracketed title, or
+    /// the keyword: an id, which may hold blanks and start with a quoted string, whose
+    /// quotes are dropped when it is nothing else, followed by a bracketed title, or
     /// else the rest of the statement as the id, without the quotes around it, and as the
     /// title. Either title is read by [`Label::parse_after_string`], as it may go on in
     /// plain text after a leading string.
@@ -421,19 +439,35 @@ impl<'a> Builder<'a> {
         if text.is_empty() {
             return Err(syntax_error(line, "subgraph has no id or title"));
         }
-        let quoted = text.strip_prefix('"').and_then(|rest| rest.split_once('"'));
-        // Upstream reads a subgraph id as `textNoTags`, which, unlike a node's
-        // `idString`, holds no `COMMA`.
-        let (id, after_id) = quoted.unwrap_or_else(|| {
-            let (id, _) = split_id(text);
-            text.split_at(id.find(',').unwrap_or(id.len()))
-        });
-        let (id, title) = match after_id.trim_start().strip_prefix('[') {
-            Some(after_open) => {
-                let (title, _) = bracket_label(after_open, "]")
-                    .ok_or_else(|| syntax_error(line, "unclosed subgraph title"))?;
+        // Upstream reads the id before a bracketed title as `textNoTags`, the same text
+        // as an unbracketed title, blanks included; `addSubGraph` keeps such an id named,
+        // as it drops only an id that equals the title.
+        let after_string = leading_string(text).map_or(text, |(_, rest)| rest);
+        let (id, title) = match after_string.find('[') {
+            Some(open) => {
+                let (id, after_id) = text.split_at(text.len() - after_string.len() + open);
+                let id = id.trim_end();
+                // `subgraph SPACE textNoTags SQS text SQE` needs a token in both texts, and
+                // upstream's string lexer makes no `STR` token of `""`.
+                if id.is_empty() {
+                    return Err(syntax_error(line, "subgraph has no id or title"));
+                }
+                check_unbracketed_title(line, id)?;
+                let (title, after_title) =
+                    bracket_label(after_id.get(1..).unwrap_or_default(), "]")
+                        .ok_or_else(|| syntax_error(line, "unclosed subgraph title"))?;
+                if title.is_empty() || title == "\"\"" {
+                    return Err(syntax_error(line, "empty subgraph title"));
+                }
                 check_label(line, title, &LABEL_TOKENS)?;
-                (SubgraphId::Named(id), Label::parse_after_string(title))
+                // The grammar's `separator` follows the `SQE`.
+                if !after_title.trim().is_empty() {
+                    return Err(syntax_error(
+                        line,
+                        "expected a new line or \";\" after the subgraph title",
+                    ));
+                }
+                (SubgraphId::Named(unquoted(id)), Label::parse_after_string(title))
             }
             // Upstream reads an unbracketed title as `textNoTags`, not as a bracket label:
             // see `check_unbracketed_title` for what it rejects. A leading string and the
@@ -444,9 +478,10 @@ impl<'a> Builder<'a> {
             None => {
                 check_unbracketed_title(line, text)?;
                 let id = unquoted(text);
-                let id = match id.contains(char::is_whitespace) {
-                    true => SubgraphId::Anonymous(self.blocks.len()),
-                    false => SubgraphId::Named(id),
+                let id = if id.contains(char::is_whitespace) {
+                    SubgraphId::Anonymous(self.blocks.len())
+                } else {
+                    SubgraphId::Named(id)
                 };
                 (id, Label::parse_after_string(text))
             }
@@ -486,121 +521,24 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Makes one [`Subgraph`] for each registered id, in the order their first blocks
-    /// open, with neither members nor parent yet, and fills `subgraph_ids`; returns the
-    /// ids each one lists, indexed like [`Flowchart::subgraphs`].
-    fn add_subgraphs(&mut self) -> Vec<Vec<SubgraphId<'a>>> {
-        let mut first_blocks: Vec<usize> = self.closed_subgraphs.values().copied().collect();
-        first_blocks.sort_unstable();
-        let blocks: Vec<&Block<'a>> =
-            first_blocks.iter().filter_map(|&block| self.blocks.get(block)).collect();
-        self.subgraph_ids = blocks.iter().map(|block| block.id).collect();
-        self.chart.subgraphs = blocks
-            .iter()
-            .map(|block| Subgraph {
-                title: block.title.clone(),
-                members: Vec::new(),
-                parent: None,
-                direction: block.direction,
-                spelled_td: block.spelled_td,
-                spread: 0,
-                collapsed: false,
-                styling: Styling::default(),
-            })
-            .collect();
-        blocks.into_iter().map(|block| block.listed.clone()).collect()
-    }
-
-    /// Gives each subgraph the parent and members its list `lists` names, indexed like
-    /// [`Flowchart::subgraphs`]: a subgraph whose id is listed is nested in the subgraph
-    /// listing it, and every other listed id is a node's. Then turns every reference to
-    /// a subgraph's name, declared before or after it, into a reference to the subgraph,
-    /// as Mermaid reads it: a link end becomes [`End::Subgraph`], and the node declared
-    /// for the name is dropped. Subgraphs nested in themselves through such lists are
-    /// [`Failure::Unsupported`], as is an index outside the chart's subgraphs or nodes.
-    /// Each subgraph whose name was last given `view: collapsed` is marked
-    /// [`Subgraph::collapsed`].
-    fn resolve_subgraph_ids(&mut self, lists: &[Vec<SubgraphId<'a>>]) -> Result<(), Failure> {
-        for (subgraph, id) in self.chart.subgraphs.iter_mut().zip(&self.subgraph_ids) {
-            subgraph.collapsed = id.name().is_some_and(|name| self.collapsed.contains(name));
-        }
-        let subgraph_of: HashMap<SubgraphId<'a>, usize> =
-            self.subgraph_ids.iter().enumerate().map(|(subgraph, &id)| (id, subgraph)).collect();
-        let mut named = vec![None; self.chart.nodes.len()];
-        for (&id, &subgraph) in &subgraph_of {
-            if let Some(&node) = id.name().and_then(|name| self.index_of.get(name))
-                && let Some(slot) = named.get_mut(node)
-            {
-                *slot = Some(subgraph);
-            }
-        }
-        for (holder, list) in lists.iter().enumerate() {
-            for id in list {
-                if let Some(&listed) = subgraph_of.get(id) {
-                    let listed =
-                        self.chart.subgraphs.get_mut(listed).ok_or(Failure::Unsupported)?;
-                    listed.parent = Some(holder);
-                }
-            }
-        }
-        if (0..self.chart.subgraphs.len())
-            .any(|subgraph| self.chart.enclosing(subgraph).any(|outer| outer == subgraph))
-        {
-            return Err(Failure::Unsupported);
-        }
-        // A subgraph's members are its listed nodes and the members of the subgraphs it
-        // lists, which come first as they are nested deeper. No id is listed twice, so
-        // no member repeats.
-        for subgraph in self.chart.innermost_first() {
-            let mut members = Vec::new();
-            for id in lists.get(subgraph).into_iter().flatten() {
-                match subgraph_of.get(id) {
-                    Some(&inner) => members.extend(
-                        self.chart.subgraphs.get(inner).ok_or(Failure::Unsupported)?.members.iter(),
-                    ),
-                    None => members.push(
-                        *id.name()
-                            .and_then(|name| self.index_of.get(name))
-                            .ok_or(Failure::Unsupported)?,
-                    ),
-                }
-            }
-            if let Some(subgraph) = self.chart.subgraphs.get_mut(subgraph) {
-                subgraph.members = members;
-            }
-        }
-        let renumbered = compact_index(named.len(), |node| named.get(node) == Some(&None));
-        let resolve = |end: End| match end {
-            End::Node(node) => match named.get(node).copied().flatten() {
-                Some(subgraph) => Some(End::Subgraph(subgraph)),
-                None => Some(End::Node((*renumbered.get(node)?)?)),
-            },
-            End::Subgraph(_) => Some(end),
-        };
-        for edge in &mut self.chart.edges {
-            edge.from = resolve(edge.from).ok_or(Failure::Unsupported)?;
-            edge.to = resolve(edge.to).ok_or(Failure::Unsupported)?;
-        }
-        for member in self.chart.subgraphs.iter_mut().flat_map(|subgraph| &mut subgraph.members) {
-            *member = renumbered.get(*member).copied().flatten().ok_or(Failure::Unsupported)?;
-        }
-        let mut names = named.iter();
-        self.chart.nodes.retain(|_| names.next().is_some_and(Option::is_none));
-        Ok(())
-    }
-
     /// Reads node references joined by `&` at the start of `text`, and returns their
     /// indices with the text after them. Upstream's `node spaceList AMP spaceList
-    /// styledVertex` needs a blank on both sides of each `&`.
-    fn group(&mut self, line: usize, text: &'a str) -> Result<(Vec<usize>, &'a str), Failure> {
-        let (first, mut rest) = self.node(line, text)?;
+    /// styledVertex` needs a blank on both sides of each `&`. `followed_by` is as for
+    /// [`node`](Self::node).
+    fn group(
+        &mut self,
+        line: usize,
+        text: &'a str,
+        followed_by: Option<char>,
+    ) -> Result<(Vec<usize>, &'a str), Failure> {
+        let (first, mut rest) = self.node(line, text, followed_by)?;
         let mut nodes = vec![first];
         while let Some(after_ampersand) = rest
             .strip_prefix(char::is_whitespace)
             .and_then(|after_blank| after_blank.trim_start().strip_prefix('&'))
             .filter(|after_ampersand| after_ampersand.starts_with(char::is_whitespace))
         {
-            let (node, after_node) = self.node(line, after_ampersand.trim_start())?;
+            let (node, after_node) = self.node(line, after_ampersand.trim_start(), followed_by)?;
             nodes.push(node);
             rest = after_node;
         }
@@ -616,68 +554,11 @@ impl<'a> Builder<'a> {
         *self.index_of.entry(id).or_insert_with(|| {
             self.chart.nodes.push(Node {
                 body: Body::Box { label: Label::plain(id), shape: Shape::Rectangle },
-                spread: 0,
                 styling: Styling::default(),
                 array_index: array_index(id),
             });
             self.chart.nodes.len() - 1
         })
-    }
-
-    /// Gives each node, link and subgraph what its classes and its `style` or
-    /// `linkStyle` statements set (see [`Node::styling`], [`Edge::styling`] and
-    /// [`Subgraph::styling`]).
-    /// Classes are looked up only after every statement is read, so that a `classDef`
-    /// may follow the `class` statement using it, as upstream compiles them when the
-    /// diagram is drawn.
-    fn apply_styles(&mut self) {
-        let resolved: Vec<(usize, Styling)> = self
-            .index_of
-            .iter()
-            .map(|(id, &index)| (index, self.styling_of(id, &NODE_CLASSES)))
-            .collect();
-        for (index, styling) in resolved {
-            if let Some(node) = self.chart.nodes.get_mut(index) {
-                node.styling = styling;
-            }
-        }
-        // Upstream applies a link's classes as compiled styles and its `linkStyle` lists,
-        // the default one first, as inline styles over them.
-        let link_stylings: Vec<Styling> = (0..self.chart.edges.len())
-            .map(|index| {
-                let name = self.edge_names.get(index).copied().flatten();
-                let classes = name.map(|id| self.class_styling(id, &[])).unwrap_or_default();
-                let own = self.link_styles.get(&index).copied().unwrap_or_default();
-                classes.then(self.default_link_style).then(own)
-            })
-            .collect();
-        for (edge, styling) in self.chart.edges.iter_mut().zip(link_stylings) {
-            edge.styling = styling;
-        }
-        // Upstream compiles no `default` class for a subgraph, only its own classes.
-        let subgraph_stylings: Vec<Styling> = self
-            .subgraph_ids
-            .iter()
-            .map(|id| id.name().map(|name| self.styling_of(name, &[])).unwrap_or_default())
-            .collect();
-        for (subgraph, styling) in self.chart.subgraphs.iter_mut().zip(subgraph_stylings) {
-            subgraph.styling = styling;
-        }
-    }
-
-    /// What the classes `base` and then the classes attached to `id` set, in order, and
-    /// then the `style` statements naming it.
-    fn styling_of(&self, id: &str, base: &[&str]) -> Styling {
-        self.class_styling(id, base).then(self.styles.get(id).copied().unwrap_or_default())
-    }
-
-    /// What the classes `base` and then the classes attached to `id` set, in order; a
-    /// class no `classDef` defines sets nothing.
-    fn class_styling(&self, id: &str, base: &[&str]) -> Styling {
-        let classes = base.iter().chain(self.classes.get(id).into_iter().flatten());
-        classes
-            .filter_map(|class| self.class_defs.get(class))
-            .fold(Styling::default(), |styling, &later| styling.then(later))
     }
 
     /// Attaches `class` to `id` when a node, a link or a subgraph whose `end` has been
@@ -688,19 +569,31 @@ impl<'a> Builder<'a> {
             || self.edge_ids.contains(id)
             || self.closed_subgraphs.contains_key(&SubgraphId::Named(id));
         if known {
-            self.classes.entry(id).or_default().push(class);
+            self.styles.classes.entry(id).or_default().push(class);
         }
     }
 
     /// Reads one node reference at the start of `text`, declaring the node on first
-    /// use, and returns its index with the text after it.
-    fn node(&mut self, line: usize, text: &'a str) -> Result<(usize, &'a str), Failure> {
+    /// use, and returns its index with the text after it. `followed_by` is the character
+    /// in the source after the statement `text` ends, if any, which tells whether
+    /// whitespace follows an id ending the statement.
+    fn node(
+        &mut self,
+        line: usize,
+        text: &'a str,
+        followed_by: Option<char>,
+    ) -> Result<(usize, &'a str), Failure> {
         let (id, rest) = split_id(text);
         if id.is_empty() {
             return Err(syntax_error(line, "expected a node id"));
         }
-        if id == "end" {
-            return Err(syntax_error(line, "\"end\" cannot be a node id"));
+        check_id(line, id)?;
+        // `"click"[\s]+`, `"href"[\s]` and `"call"[\s]+` need whitespace after the word, a
+        // line break included, so each is a node id only before anything else.
+        if matches!(id, "click" | "href" | "call")
+            && rest.chars().next().or(followed_by).is_some_and(char::is_whitespace)
+        {
+            return Err(syntax_error(line, format!("\"{id}\" cannot be a node id")));
         }
         let index = self.declare(id);
         if let Some(open) = self.open.last().and_then(|&open| self.blocks.get_mut(open)) {
@@ -778,6 +671,243 @@ impl<'a> Builder<'a> {
     }
 }
 
+impl Block<'_> {
+    /// The subgraph the block declares, with neither members nor parent yet, which
+    /// [`resolve_subgraph_ids`] gives it, and without styles, which [`with_styles`] gives
+    /// it.
+    fn subgraph(&self) -> Subgraph {
+        Subgraph {
+            title: self.title.clone(),
+            members: Vec::new(),
+            parent: None,
+            direction: self.direction,
+            spelled_td: self.spelled_td,
+            collapsed: false,
+            styling: Styling::default(),
+        }
+    }
+}
+
+impl Styles<'_> {
+    /// What the classes `base` and then the classes attached to `id` set, in order, and
+    /// then the `style` statements naming it.
+    fn styling_of(&self, id: &str, base: &[&str]) -> Styling {
+        self.class_styling(id, base).then(self.of_ids.get(id).copied().unwrap_or_default())
+    }
+
+    /// What the classes `base` and then the classes attached to `id` set, in order; a
+    /// class no `classDef` defines sets nothing.
+    fn class_styling(&self, id: &str, base: &[&str]) -> Styling {
+        let classes = base.iter().chain(self.classes.get(id).into_iter().flatten());
+        classes
+            .filter_map(|class| self.class_defs.get(class))
+            .fold(Styling::default(), |styling, &later| styling.then(later))
+    }
+}
+
+/// The first block to end with each registered id (see `closed_subgraphs`), in the
+/// order the blocks open: one for each subgraph, indexed like [`Flowchart::subgraphs`].
+fn registered_blocks<'b, 'a>(
+    blocks: &'b [Block<'a>],
+    closed_subgraphs: &HashMap<SubgraphId<'a>, usize>,
+) -> Vec<&'b Block<'a>> {
+    let mut first_blocks: Vec<usize> = closed_subgraphs.values().copied().collect();
+    first_blocks.sort_unstable();
+    first_blocks.iter().filter_map(|&block| blocks.get(block)).collect()
+}
+
+/// `chart` with each node, link and subgraph given what its classes and its `style` or
+/// `linkStyle` statements set (see [`Node::styling`], [`Edge::styling`] and
+/// [`Subgraph::styling`]). `index_of` maps each id to the index of the node declared for
+/// it, `edge_names` holds the id of each link and `subgraph_ids` that of each subgraph.
+/// Classes are looked up only after every statement is read, so that a `classDef` may
+/// follow the `class` statement using it, as upstream compiles them when the diagram is
+/// drawn.
+fn with_styles(
+    mut chart: Flowchart,
+    styles: &Styles<'_>,
+    index_of: &HashMap<&str, usize>,
+    edge_names: &[Option<&str>],
+    subgraph_ids: &[SubgraphId<'_>],
+) -> Flowchart {
+    for (id, &index) in index_of {
+        if let Some(node) = chart.nodes.get_mut(index) {
+            node.styling = styles.styling_of(id, &NODE_CLASSES);
+        }
+    }
+    // Upstream applies a link's classes as compiled styles and its `linkStyle` lists,
+    // the default one first, as inline styles over them.
+    for (index, edge) in chart.edges.iter_mut().enumerate() {
+        let name = edge_names.get(index).copied().flatten();
+        let classes = name.map(|id| styles.class_styling(id, &[])).unwrap_or_default();
+        let own = styles.of_links.get(&index).copied().unwrap_or_default();
+        edge.styling = classes.then(styles.default_link).then(own);
+    }
+    // Upstream compiles no `default` class for a subgraph, only its own classes.
+    for (subgraph, id) in chart.subgraphs.iter_mut().zip(subgraph_ids) {
+        subgraph.styling = id.name().map(|name| styles.styling_of(name, &[])).unwrap_or_default();
+    }
+    chart
+}
+
+/// `chart` with each subgraph given the parent and members its list in `lists` names,
+/// indexed like [`Flowchart::subgraphs`]: a subgraph whose id in `subgraph_ids` is listed
+/// is nested in the subgraph listing it, and every other listed id is a node's, which
+/// `index_of` maps to the node's index. Then every reference to a subgraph's name,
+/// declared before or after it, is turned into a reference to the subgraph, as Mermaid
+/// reads it: a link end becomes [`End::Subgraph`], and the node declared for the name is
+/// dropped. Subgraphs nested in themselves through such lists are
+/// [`Failure::Unsupported`], as is an index outside the chart's subgraphs or nodes. Each
+/// subgraph whose name is in `collapsed` is marked [`Subgraph::collapsed`].
+fn resolve_subgraph_ids(
+    mut chart: Flowchart,
+    index_of: &HashMap<&str, usize>,
+    subgraph_ids: &[SubgraphId<'_>],
+    lists: &[&[SubgraphId<'_>]],
+    collapsed: &HashSet<&str>,
+) -> Result<Flowchart, Failure> {
+    for (subgraph, id) in chart.subgraphs.iter_mut().zip(subgraph_ids) {
+        subgraph.collapsed = id.name().is_some_and(|name| collapsed.contains(name));
+    }
+    let subgraph_of: HashMap<SubgraphId<'_>, usize> =
+        subgraph_ids.iter().enumerate().map(|(subgraph, &id)| (id, subgraph)).collect();
+    let mut named = vec![None; chart.nodes.len()];
+    for (&id, &subgraph) in &subgraph_of {
+        if let Some(&node) = id.name().and_then(|name| index_of.get(name))
+            && let Some(slot) = named.get_mut(node)
+        {
+            *slot = Some(subgraph);
+        }
+    }
+    for (holder, list) in lists.iter().enumerate() {
+        for id in *list {
+            if let Some(&listed) = subgraph_of.get(id) {
+                let listed = chart.subgraphs.get_mut(listed).ok_or(Failure::Unsupported)?;
+                listed.parent = Some(holder);
+            }
+        }
+    }
+    if (0..chart.subgraphs.len())
+        .any(|subgraph| chart.enclosing(subgraph).any(|outer| outer == subgraph))
+    {
+        return Err(Failure::Unsupported);
+    }
+    // A subgraph's members are its listed nodes and the members of the subgraphs it
+    // lists, which come first as they are nested deeper. No id is listed twice, so
+    // no member repeats.
+    for subgraph in chart.innermost_first() {
+        let mut members = Vec::new();
+        for id in lists.get(subgraph).copied().into_iter().flatten() {
+            match subgraph_of.get(id) {
+                Some(&inner) => members
+                    .extend(chart.subgraphs.get(inner).ok_or(Failure::Unsupported)?.members.iter()),
+                None => members.push(
+                    *id.name().and_then(|name| index_of.get(name)).ok_or(Failure::Unsupported)?,
+                ),
+            }
+        }
+        if let Some(subgraph) = chart.subgraphs.get_mut(subgraph) {
+            subgraph.members = members;
+        }
+    }
+    let renumbered = compact_index(named.len(), |node| named.get(node) == Some(&None));
+    let resolve = |end: End| match end {
+        End::Node(node) => match named.get(node).copied().flatten() {
+            Some(subgraph) => Some(End::Subgraph(subgraph)),
+            None => Some(End::Node((*renumbered.get(node)?)?)),
+        },
+        End::Subgraph(_) => Some(end),
+    };
+    for edge in &mut chart.edges {
+        edge.from = resolve(edge.from).ok_or(Failure::Unsupported)?;
+        edge.to = resolve(edge.to).ok_or(Failure::Unsupported)?;
+    }
+    for member in chart.subgraphs.iter_mut().flat_map(|subgraph| &mut subgraph.members) {
+        *member = renumbered.get(*member).copied().flatten().ok_or(Failure::Unsupported)?;
+    }
+    let mut names = named.iter();
+    chart.nodes.retain(|_| names.next().is_some_and(Option::is_none));
+    Ok(chart)
+}
+
+/// `chart` with one hidden member added to every empty subgraph: Mermaid draws an empty
+/// subgraph as a frame showing only its title, placed in the flow like a node, and the
+/// member gives it a place and its frame the least size.
+fn with_hidden_members(mut chart: Flowchart) -> Flowchart {
+    // Inner subgraphs come first, so that a subgraph holding only an empty one is not
+    // empty itself.
+    for subgraph in chart.innermost_first() {
+        if chart.subgraphs.get(subgraph).is_some_and(|subgraph| subgraph.members.is_empty()) {
+            let hidden = chart.nodes.len();
+            chart.nodes.push(Node {
+                body: Body::Hidden,
+                styling: Styling::default(),
+                array_index: None,
+            });
+            let holders: Vec<usize> =
+                std::iter::once(subgraph).chain(chart.enclosing(subgraph)).collect();
+            for holder in holders {
+                if let Some(holder) = chart.subgraphs.get_mut(holder) {
+                    holder.members.push(hidden);
+                }
+            }
+        }
+    }
+    chart
+}
+
+/// Checks that `id`, read on `line`, holds no keyword where upstream's lexer starts a
+/// token (see [`id_keyword`]): `idStringToken` admits `DEFAULT` and `DOWN` (`v`) but no
+/// other keyword.
+fn check_id(line: usize, id: &str) -> Result<(), Failure> {
+    match id_keyword(id) {
+        Some(keyword) => Err(syntax_error(line, format!("\"{keyword}\" cannot be a node id"))),
+        None => Ok(()),
+    }
+}
+
+/// Checks that `name`, a class name or list of them read on `line`, holds no keyword
+/// where upstream's lexer starts a token, as [`check_id`] does for node ids.
+fn check_class_name(line: usize, name: &str) -> Result<(), Failure> {
+    match id_keyword(name) {
+        Some(keyword) => Err(syntax_error(line, format!("\"{keyword}\" cannot be a class name"))),
+        None => Ok(()),
+    }
+}
+
+/// Checks that no `direction` word follows a keyword leading `statement` on its line (see
+/// [`statement_keyword`]): after the keyword, upstream's lexer reads the rest of the line
+/// as a direction token (`.*direction\s+TB[^\n]*` and the like), which its grammar takes
+/// after no keyword. `words` holds the line's direction words, counted from `offset`
+/// before the statement's start (see [`direction_statement`]).
+fn check_direction_after_keyword(
+    line: usize,
+    statement: &str,
+    words: [Option<usize>; DIRECTION_WORDS.len()],
+    offset: usize,
+) -> Result<(), Failure> {
+    match statement_keyword(statement) {
+        Some(keyword) if direction_statement(words, offset + keyword.len()).is_some() => Err(
+            syntax_error(line, format!("\"direction\" cannot follow \"{keyword}\" on its line")),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// The keyword upstream's lexer reads at the start of `statement` before trying its
+/// direction rules, if any: one of [`leading_keyword`]'s but `end`, whose token takes the
+/// blanks after it and ends its statement, and `v`, whose rule comes after the direction
+/// rules; or `click`, `href` or `call` followed by the whitespace their rules need.
+fn statement_keyword(statement: &str) -> Option<&'static str> {
+    leading_keyword(statement).filter(|&keyword| !matches!(keyword, "end" | "v")).or_else(|| {
+        ["click", "href", "call"].into_iter().find(|keyword| {
+            statement
+                .strip_prefix(keyword)
+                .is_some_and(|after| after.starts_with(char::is_whitespace))
+        })
+    })
+}
+
 /// Whether `text`, a `click` statement after the keyword and the blank ending it, is
 /// one of upstream's `clickStatement` forms: a node id, one blank, and then a callback,
 /// `call name(args)` or a bare name, or a link, `href "url"` or `"url"`. A tooltip
@@ -851,46 +981,50 @@ fn string(text: &str) -> Option<&str> {
 /// `/style.*:\S*#.*;/` and `/classDef.*:\S*#.*;/` before parsing.
 fn without_color_semicolon(list: &str) -> &str {
     let Some(before) = list.strip_suffix(';') else { return list };
-    let color_after_colon = before.match_indices(':').any(|(at, _)| {
-        before
-            .get(at + 1..)
-            .is_some_and(|after| after.chars().take_while(|c| !c.is_whitespace()).any(|c| c == '#'))
-    });
+    let color_after_colon = before
+        .chars()
+        .scan(false, |after_colon, c| {
+            let hash_after_colon = *after_colon && c == '#';
+            *after_colon = c == ':' || (*after_colon && !c.is_whitespace());
+            Some(hash_after_colon)
+        })
+        .any(|hash_after_colon| hash_after_colon);
     if color_after_colon { before } else { list }
 }
 
 /// The property `list` of a `style`, `classDef` or `linkStyle` statement on `line`, or a
-/// syntax error quoting the first character or pair that no token of upstream's
+/// syntax error quoting the first character, pair or keyword that no token of upstream's
 /// `styleComponent` (`NUM`, `NODE_STRING`, `COLON`, `SPACE`, `BRKT`, `STYLE`) nor the
 /// `COMMA` between declarations reads: a character outside those tokens, such as the `(`
 /// of `fill:rgb(255,0,0)`, which upstream lexes as a label opener; a `"`, `&` or `*`
-/// starting a word, or a word that is just `v`, which upstream lexes as a string, `AMP`,
-/// `MULT` or `DOWN`; and `--`, `-.`, `->` or `==` anywhere, where `NODE_STRING`'s
+/// starting a word, which upstream lexes as a string, `AMP` or `MULT`; a keyword other
+/// than `style` starting a word (see [`leading_keyword`]), such as the `end` of
+/// `text-align:end`; and `--`, `-.`, `->` or `==` anywhere, where `NODE_STRING`'s
 /// lookaheads end the word and a link token follows. A word starts the list or follows a
 /// blank, `:` or `,`. A `;` reaches here only where the statement splitter kept it after
 /// an entity code.
 ///
-/// Upstream's lexer takes the first rule that matches, and jison appends `\b` to a
-/// pattern ending in a word character, so `"v"` (`DOWN`) matches only a whole word
-/// while `"&"`, `"*"` and `["]` match at any token start; inside a word `NODE_STRING`
-/// has already taken them.
+/// Upstream's lexer takes the first rule that matches, so a keyword matches only a whole
+/// word while `"&"`, `"*"` and `["]` match at any token start; inside a word
+/// `NODE_STRING` has already taken them.
 fn property_list(line: usize, list: &str) -> Result<&str, Failure> {
     let held = |c: char| {
         c.is_ascii_alphanumeric()
             || "!\"#$%&'*+,-./:;=?\\_`".contains(c)
             || (c.is_whitespace() && !matches!(c, '\n' | '\r'))
     };
-    let is_word_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let mut previous: Option<char> = None;
-    let mut chars = list.chars().peekable();
-    while let Some(c) = chars.next() {
-        let next = chars.peek().copied();
+    let mut chars = list.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        let next = chars.peek().map(|&(_, next)| next);
         let starts_word = previous.is_none_or(|p| p.is_whitespace() || matches!(p, ':' | ','));
         let rejected = match (c, next) {
             _ if !held(c) => Some(c.to_string()),
             ('-', Some(n @ ('-' | '.' | '>'))) | ('=', Some(n @ '=')) => Some(format!("{c}{n}")),
             ('"' | '&' | '*', _) if starts_word => Some(c.to_string()),
-            ('v', _) if starts_word && !next.is_some_and(is_word_char) => Some(c.to_string()),
+            _ if starts_word => leading_keyword(list.get(at..).unwrap_or_default())
+                .filter(|&keyword| keyword != "style")
+                .map(str::to_owned),
             _ => None,
         };
         if let Some(rejected) = rejected {
@@ -915,7 +1049,7 @@ fn link_index(line: usize, position: &str, links: usize) -> Result<usize, Failur
             None => "no links".to_owned(),
         };
         let message = format!("linkStyle index {index} is out of range ({range})");
-        return Err(syntax_error(line, &message));
+        return Err(syntax_error(line, message));
     }
     Ok(index)
 }

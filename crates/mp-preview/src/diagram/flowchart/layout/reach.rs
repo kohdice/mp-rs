@@ -2,39 +2,41 @@
 //! path the label goes.
 
 use super::Axis;
+use crate::diagram::flowchart::chart::Edge;
 use crate::diagram::flowchart::label::Label;
-use crate::diagram::flowchart::parse::Edge;
 
 /// A cell where a drawn link between something outside a frame and one of its members, or
 /// a frame nested in it, crosses one of the frame's borders across the flow: where the
 /// link enters the member or nested frame, with the reach of its label there, or where it
 /// leaves the member, with no reach recorded. The cell is fixed by the link's other end,
 /// so the frame's own link ends keep clear of it.
-pub(super) type Crossing = (isize, Reach);
+pub(super) type Crossing = (isize, Option<Reach>);
 
-/// The cells a link's label takes before and after the cell where the link meets a
-/// border, across the flow; `None` for a link without a label there.
-pub(in crate::diagram::flowchart) type Reach = Option<(usize, usize)>;
+/// The cells something takes across the flow before and after a cell: a link's label
+/// about the cell where the link meets a border, or the labels hanging off a box or a
+/// frame's border about its cells.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::diagram::flowchart) struct Reach {
+    pub before: usize,
+    pub after: usize,
+}
 
 /// The cells a label `width` cells wide takes on either side of the cell it is centred
 /// on: an odd cell left over goes before it, as the label leans left.
-pub(in crate::diagram::flowchart) fn label_reach(width: usize) -> (usize, usize) {
-    (width / 2, width.saturating_sub(1) - width / 2)
+pub(in crate::diagram::flowchart) fn label_reach(width: usize) -> Reach {
+    Reach { before: width / 2, after: width.saturating_sub(1) - width / 2 }
 }
 
 /// The cells `label` takes across the flow before and after the cell of the line it lies
 /// on: in a vertical layout its rows are centred on the line's column (see
 /// [`label_reach`]); in a horizontal one the line runs through its middle row (see
 /// [`Label::middle_row`]) and the other rows lie above and below it.
-pub(in crate::diagram::flowchart) fn label_cross_reach(
-    axis: Axis,
-    label: &Label,
-) -> (usize, usize) {
+pub(in crate::diagram::flowchart) fn label_cross_reach(axis: Axis, label: &Label) -> Reach {
     match axis {
         Axis::Vertical => label_reach(label.width()),
         Axis::Horizontal => {
             let middle = label.middle_row();
-            (middle, label.height() - 1 - middle)
+            Reach { before: middle, after: label.height().saturating_sub(middle + 1) }
         }
     }
 }
@@ -83,7 +85,7 @@ pub(super) fn labelled_slot_footprint(axis: Axis, label: &Label) -> Footprint {
         Axis::Horizontal => (label.width() + 2, label.height()),
         Axis::Vertical => (label.height(), label.width()),
     };
-    let (before, _) = label_cross_reach(axis, label);
+    let Reach { before, .. } = label_cross_reach(axis, label);
     Footprint { main, cross: across + 2, port_offset: before + 1 }
 }
 
@@ -99,7 +101,7 @@ pub(in crate::diagram::flowchart) fn entry_reach(
     edge: &Edge,
     path: &[usize],
     segment: usize,
-) -> Reach {
+) -> Option<Reach> {
     if label_spot(path) != Some(LabelSpot::Gap(segment)) {
         return None;
     }

@@ -1,14 +1,13 @@
 //! The cells boxes and subgraph frames grow by across the flow so that the links meeting
 //! their borders take cells of their own.
 
-use super::layers::{cycle_closing_edges, reversed_links};
 use super::ports::{end_gaps, exit_gaps, symmetric_offsets};
 use super::reach::{Reach, entry_reach};
 use super::size::{TITLE_CORNER_OFFSET, box_height, box_width};
-use super::{Axis, Layered, laid_out_end};
+use super::{Axis, Layered, Ranked, laid_out_end};
+use crate::diagram::flowchart::chart::{Body, End, Flowchart, Node, Shape};
 use crate::diagram::flowchart::label::Label;
 use crate::diagram::flowchart::outline::outline;
-use crate::diagram::flowchart::parse::{Body, End, Flowchart, Node, Shape};
 
 /// Grows each box across the flow by whole cells on both sides of its label until the
 /// link ends on each of its two borders along the flow fit its port cells at
@@ -19,17 +18,18 @@ use crate::diagram::flowchart::parse::{Body, End, Flowchart, Node, Shape};
 /// `flowchart.minNodeWidth`) and padding, never by its edges, and lets edges meet its
 /// border at any point (`intersect`); a three-row box has one non-corner cell on each
 /// side, and two links sharing a cell would show a single line and marker, so the box
-/// grows instead. Returns each box's growth; `None` when a link joins a subgraph to
-/// itself or to one of its own members (see [`cycle_closing_edges`]).
-pub(in crate::diagram::flowchart) fn grow_boxes(chart: &Flowchart) -> Option<Growth> {
+/// grows instead. Returns the growth of `ranked`'s chart, its frames not grown; `None`
+/// when a link names a node outside the chart.
+pub(in crate::diagram::flowchart) fn grow_boxes(ranked: &Ranked) -> Option<Growth> {
+    let Ranked { chart, skeleton, .. } = ranked;
     let axis = chart.direction.axis();
-    let reversed = reversed_links(&cycle_closing_edges(chart)?);
+    let reversed = &skeleton.reversed;
     let mut entering = vec![0; chart.nodes.len()];
     let mut leaving = vec![0; chart.nodes.len()];
     let mut loops: Vec<Vec<Option<&Label>>> = vec![Vec::new(); chart.nodes.len()];
-    for (edge, &reversed) in chart.edges.iter().zip(&reversed) {
-        // An invisible link meets no border.
-        if !edge.stroke.is_visible() {
+    for (edge, &reversed) in chart.edges.iter().zip(reversed) {
+        // An invisible link meets no border, and a subgraph's self loop meets its frame's.
+        if !edge.stroke.is_visible() || edge.frame_loop().is_some() {
             continue;
         }
         let (from, to) = if reversed { (edge.to, edge.from) } else { (edge.from, edge.to) };
@@ -64,12 +64,13 @@ pub(in crate::diagram::flowchart) fn grow_boxes(chart: &Flowchart) -> Option<Gro
             Some(farthest(entries).max(farthest(exits)))
         })
         .collect::<Option<Vec<_>>>()?;
-    let spreads = chart
+    let boxes = chart
         .nodes
         .iter()
         .zip(spreads)
-        .map(|(node, farthest_port)| spread_for(node, axis, farthest_port));
-    Some(Growth::Boxes(spreads.collect()))
+        .map(|(node, farthest_port)| spread_for(node, axis, farthest_port))
+        .collect();
+    Some(Growth { boxes, frames: vec![0; chart.subgraphs.len()] })
 }
 
 /// The cells `node` grows by on both sides of its label across the flow so that its
@@ -119,12 +120,15 @@ pub(super) fn vertical_port_inset(shape: Shape) -> usize {
 
 /// Grows each box further where the labels of the links entering it need their entries
 /// further apart than [`grow_boxes`] allowed, given the order the links arrive in under
-/// `layered`, as [`port_cells`](super::port_cells) spreads them. The order of the slots
-/// in each layer does not depend on the boxes' sizes, so the chart can be laid out again
-/// with the grown boxes. Returns each box's growth, never less than it already grows by;
-/// `None` when a link's slot is missing from `layered`.
+/// `layered`, as [`port_cells`](super::port_cells) spreads them. Slots keep their order
+/// within each layer when the boxes grow, except where [`lay_out`](super::lay_out) moves
+/// a stray out of a frame it does not belong to, so the growth is measured again until it
+/// settles. Returns `growth` with each box grown by what it needs, never less than it
+/// already grows by; `None` when a link's slot is missing from `layered` or a box from
+/// `growth`.
 pub(in crate::diagram::flowchart) fn grow_for_labels(
     chart: &Flowchart,
+    growth: &Growth,
     layered: &Layered,
 ) -> Option<Growth> {
     let axis = chart.direction.axis();
@@ -147,19 +151,20 @@ pub(in crate::diagram::flowchart) fn grow_for_labels(
             }
         }
     }
-    let mut spreads = Vec::with_capacity(chart.nodes.len());
-    for (node, mut arriving) in chart.nodes.iter().zip(arrivals) {
+    let mut boxes = Vec::with_capacity(chart.nodes.len());
+    for (index, (node, mut arriving)) in chart.nodes.iter().zip(arrivals).enumerate() {
+        let spread = *growth.boxes.get(index)?;
         if arriving.iter().all(|entry| entry.reach.is_none()) {
-            spreads.push(node.spread);
+            boxes.push(spread);
             continue;
         }
         arriving.sort_by_key(|entry| (entry.from_port, entry.edge_index));
-        let ordered: Vec<Reach> = arriving.iter().map(|entry| entry.reach).collect();
+        let ordered: Vec<Option<Reach>> = arriving.iter().map(|entry| entry.reach).collect();
         let offsets = symmetric_offsets(ordered.len(), &end_gaps(axis, &ordered))?;
         let farthest_port = offsets.iter().map(|offset| offset.unsigned_abs()).max().unwrap_or(0);
-        spreads.push(node.spread.max(spread_for(node, axis, Some(farthest_port))));
+        boxes.push(spread.max(spread_for(node, axis, Some(farthest_port))));
     }
-    Some(Growth::Boxes(spreads))
+    Some(Growth { boxes, frames: growth.frames.clone() })
 }
 
 /// A drawn link entering a box, as [`grow_for_labels`] sizes the box for it.
@@ -169,7 +174,7 @@ struct LabelledEntry {
     /// The link's index in [`Flowchart::edges`].
     edge_index: usize,
     /// The reach of the link's label at the entry, if it has one.
-    reach: Reach,
+    reach: Option<Reach>,
 }
 
 /// The cells each subgraph frame with members grows by across the flow on both sides
@@ -187,43 +192,26 @@ struct LabelledEntry {
 /// The cells an outer frame's members take, and the cells where links cross its borders
 /// to the frames nested in it, depend on how far those frames grew, which `layered` was
 /// laid out with, so the caller lays the chart out again and calls this until no frame
-/// changes. `None` when every frame already grows by what `layered` measured.
+/// changes. Returns `growth` with each frame grown by what `layered` measured; `None`
+/// when every frame already grows by that.
 pub(in crate::diagram::flowchart) fn grow_frames(
-    chart: &Flowchart,
+    growth: &Growth,
     layered: &Layered,
 ) -> Option<Growth> {
-    let spreads = chart.subgraphs.iter().map(|frame| frame.spread);
-    let changed = !spreads.eq(layered.frame_needs.iter().copied());
-    changed.then(|| Growth::Frames(layered.frame_needs.clone()))
+    let changed = growth.frames != layered.frame_needs;
+    changed.then(|| Growth { boxes: growth.boxes.clone(), frames: layered.frame_needs.clone() })
 }
 
-/// The cells boxes or frames grow by across the flow, which
-/// [`Flowchart::with_growth`] applies.
-#[derive(Debug)]
-pub(in crate::diagram::flowchart) enum Growth {
-    /// [`Node::spread`] of each node, indexed like [`Flowchart::nodes`].
-    Boxes(Vec<usize>),
-    /// [`Subgraph::spread`](crate::diagram::flowchart::parse::Subgraph::spread) of each
-    /// subgraph, indexed like [`Flowchart::subgraphs`].
-    Frames(Vec<usize>),
-}
-
-impl Flowchart {
-    /// The chart with its boxes or frames grown as `growth` says; one missing from
-    /// `growth` keeps its growth.
-    pub(in crate::diagram::flowchart) fn with_growth(mut self, growth: Growth) -> Self {
-        match growth {
-            Growth::Boxes(spreads) => {
-                for (node, spread) in self.nodes.iter_mut().zip(spreads) {
-                    node.spread = spread;
-                }
-            }
-            Growth::Frames(spreads) => {
-                for (frame, spread) in self.subgraphs.iter_mut().zip(spreads) {
-                    frame.spread = spread;
-                }
-            }
-        }
-        self
-    }
+/// The cells each box and each subgraph frame grows by across the flow on both sides, so
+/// that every link end on one of its borders has a cell of its own. The layout measures
+/// it ([`grow_boxes`], [`grow_for_labels`], [`grow_frames`]) and every stage after
+/// parsing draws the chart grown by it.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::diagram::flowchart) struct Growth {
+    /// The cells each box grows by on each side of its label, indexed like
+    /// [`Flowchart::nodes`].
+    pub boxes: Vec<usize>,
+    /// The cells each frame grows by on each side of its members, indexed like
+    /// [`Flowchart::subgraphs`].
+    pub frames: Vec<usize>,
 }

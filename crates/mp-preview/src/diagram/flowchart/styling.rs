@@ -135,13 +135,26 @@ fn is_heavy(value: &str) -> Option<bool> {
     Some(pixels >= 3.0)
 }
 
-/// Whether the `stroke-dasharray` `value` dashes lines: anything but empty, `none` or
-/// dashes of no length. Upstream draws the dash and gap lengths the value lists; the
-/// box-drawing glyphs have one dashed form for each line, so every pattern draws as it.
+/// Whether the `stroke-dasharray` `value` dashes lines: when it lists both a dash and a
+/// gap of some length. SVG repeats a list of odd length once to make it even and then
+/// reads its entries as dash, gap, dash, gap, …, so `5` dashes while `5 0` (no gap)
+/// draws solid, as do empty, `none` and all-zero lists. A list whose dashes are all zero
+/// (`0 5`) draws nothing upstream; a line that cannot be seen would lose the drawing's
+/// structure, so it draws solid instead. Upstream draws the lengths the value lists; the
+/// box-drawing glyphs have one dashed form for each line, so every dashed pattern draws
+/// as it.
 fn is_dashed(value: &str) -> bool {
-    let none = value.is_empty() || value.eq_ignore_ascii_case("none");
-    let zero = |length: &str| length.trim_end_matches("px").parse::<f64>() == Ok(0.0);
-    !(none || value.split([' ', ',']).filter(|length| !length.is_empty()).all(zero))
+    if value.eq_ignore_ascii_case("none") {
+        return false;
+    }
+    let non_zero = |length: &str| length.trim_end_matches("px").parse::<f64>() != Ok(0.0);
+    let lengths: Vec<bool> =
+        value.split([' ', ',']).filter(|length| !length.is_empty()).map(non_zero).collect();
+    let repeated = if lengths.len() % 2 == 1 { 2 * lengths.len() } else { lengths.len() };
+    let any_from = |first: usize| {
+        lengths.iter().cycle().take(repeated).skip(first).step_by(2).any(|&non_zero| non_zero)
+    };
+    any_from(0) && any_from(1)
 }
 
 /// Whether the `font-weight` `value` is bold: `bold`, `bolder` or a weight from 700,
@@ -425,13 +438,8 @@ mod tests {
     }
 
     #[test]
-    fn styling_parse_non_zero_stroke_dasharray_is_dotted() {
-        let dotted = |value: &str| Styling::parse(&format!("stroke-dasharray:{value}")).dotted;
-
-        assert_eq!(dotted("5 5"), Some(true));
-        assert_eq!(dotted("5"), Some(true));
-        assert_eq!(dotted("none"), Some(false));
-        assert_eq!(dotted("0 0"), Some(false));
+    fn styling_parse_all_zero_or_none_stroke_dasharray_sets_a_solid_line() {
+        assert_eq!(Styling::parse("stroke-dasharray:0 0").dotted, Some(false));
         assert_eq!(
             Styling::parse("stroke-dasharray:5")
                 .then(Styling::parse("stroke-dasharray:none"))

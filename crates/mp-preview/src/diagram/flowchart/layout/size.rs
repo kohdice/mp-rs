@@ -3,8 +3,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::diagram::flowchart::chart::{Body, Node};
 use crate::diagram::flowchart::outline::outline;
-use crate::diagram::flowchart::parse::{Body, Node};
 use crate::style::Line;
 
 /// Cells from a frame's top-left corner to the blank before its title when nothing is

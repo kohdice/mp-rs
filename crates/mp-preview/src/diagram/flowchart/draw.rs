@@ -10,11 +10,11 @@ use crate::style::{Line, Span, Style};
 use crate::theme::Rgb;
 use crate::theme::solarized::DARK_PALETTE;
 
+use super::chart::{Body, Direction, Edge, Marker, Node, Stroke};
 use super::label::{Label, Run, row_width};
 use super::layout::{Axis, box_width, label_reach};
 use super::outline::{EndsOn, MarkAt, Outline, Row, outline};
-use super::parse::{Body, Direction, Edge, Marker, Node, Stroke};
-use super::route::Scene;
+use super::route::{Cell, Scene};
 use super::styling::Styling;
 
 const LINE: Style = plain_style(DARK_PALETTE.muted);
@@ -32,7 +32,8 @@ const fn plain_style(fg: Rgb) -> Style {
     }
 }
 
-/// Maps `(main, cross)` scene cells to `(row, col)` screen cells for `direction`.
+/// Maps scene [`Cell`]s to the `(row, col)` screen cells [`Canvas`] draws at, for
+/// `direction`.
 struct Frame {
     direction: Direction,
     /// Cells the scene spans along the flow, mirrored for `RL` and `BT`.
@@ -40,7 +41,7 @@ struct Frame {
 }
 
 impl Frame {
-    fn cell(&self, main: usize, cross: usize) -> (usize, usize) {
+    fn cell(&self, Cell { main, cross }: Cell) -> (usize, usize) {
         let main = if self.direction.points_backward() {
             self.main_extent.saturating_sub(main + 1)
         } else {
@@ -60,7 +61,7 @@ impl Frame {
         } else {
             main
         };
-        self.cell(near_end, cross)
+        self.cell(Cell { main: near_end, cross })
     }
 }
 
@@ -88,11 +89,13 @@ pub(super) fn draw(scene: &Scene<'_>, direction: Direction) -> Vec<Line> {
     for placed in &scene.boxes {
         let (top, left) =
             frame.top_left(placed.main, placed.cross, axis.box_main_size(placed.node));
-        draw_box(&mut canvas, top, left, placed.node, axis);
+        draw_box(&mut canvas, (top, left), placed.node, placed.spread, axis);
     }
     for placed in &scene.frames {
-        let (row_a, col_a) = frame.cell(*placed.main.start(), *placed.cross.start());
-        let (row_b, col_b) = frame.cell(*placed.main.end(), *placed.cross.end());
+        let (row_a, col_a) =
+            frame.cell(Cell { main: *placed.main.start(), cross: *placed.cross.start() });
+        let (row_b, col_b) =
+            frame.cell(Cell { main: *placed.main.end(), cross: *placed.cross.end() });
         draw_subgraph_frame(
             &mut canvas,
             (row_a.min(row_b), col_a.min(col_b)),
@@ -103,8 +106,7 @@ pub(super) fn draw(scene: &Scene<'_>, direction: Direction) -> Vec<Line> {
         );
     }
     for link in &scene.links {
-        let points: Vec<_> =
-            link.points.iter().map(|&(main, cross)| frame.cell(main, cross)).collect();
+        let points: Vec<_> = link.points.iter().map(|&cell| frame.cell(cell)).collect();
         let style = Style { fg: link.edge.styling.stroke.rgb().or(LINE.fg), ..LINE };
         canvas.line(&points, link_glyphs(link.edge), style);
         if let (Some(head), Some((row, col, heading))) =
@@ -154,8 +156,10 @@ fn draw_label<'a>(
     for (row, runs) in (top..).zip(label.rows()) {
         let row_width = row_width(runs);
         let offset = match align {
-            RowAlign::Centred => (width - row_width) / 2,
-            RowAlign::OnLine => label_reach(width).0 - label_reach(row_width).0,
+            RowAlign::Centred => width.saturating_sub(row_width) / 2,
+            RowAlign::OnLine => {
+                label_reach(width).before.saturating_sub(label_reach(row_width).before)
+            }
         };
         draw_runs(canvas, (row, left + offset), runs, text);
     }
@@ -263,9 +267,7 @@ fn draw_subgraph_frame<'a>(
 /// so that its content stays in the middle: the cells added continue the frame's borders
 /// and are blank inside it. Every cell becomes text, which `Canvas::line` never
 /// overwrites, so no link is drawn through the subgraph. The title stays by the
-/// top-left corner: links entering the box keep clear of it, which `spread` may widen
-/// the box for, whereas a frame drawn within the enclosing chart moves its title clear
-/// of the links instead.
+/// top-left corner (see the [`unit`](super::unit) module).
 fn draw_drawing<'a>(
     canvas: &mut Canvas<'a>,
     (top, left): (usize, usize),
@@ -330,23 +332,29 @@ fn draw_drawing<'a>(
     }
 }
 
-/// Draws `node`'s box with its top-left cell at `(top, left)`, grown by its spread on
+/// Draws `node`'s box with its top-left cell at `(top, left)`, grown by `spread` cells on
 /// both sides of the label across the flow of `axis`: extra rows of sides above and
 /// below the label rows in a horizontal layout, extra columns of border either side of
 /// the label in a vertical one. A hidden node draws nothing, and a drawing is drawn as
 /// [`draw_drawing`] draws it.
-fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node, axis: Axis) {
+fn draw_box<'a>(
+    canvas: &mut Canvas<'a>,
+    (top, left): (usize, usize),
+    node: &'a Node,
+    spread: usize,
+    axis: Axis,
+) {
     let (label, shape) = match &node.body {
         Body::Box { label, shape } => (label, *shape),
         Body::Hidden => return,
         Body::Drawing { lines, .. } => {
-            draw_drawing(canvas, (top, left), lines, node.spread, axis);
+            draw_drawing(canvas, (top, left), lines, spread, axis);
             return;
         }
     };
     let (extra_rows, extra_cols) = match axis {
-        Axis::Horizontal => (node.spread, 0),
-        Axis::Vertical => (0, node.spread),
+        Axis::Horizontal => (spread, 0),
+        Axis::Vertical => (0, spread),
     };
     let width = box_width(node) + 2 * extra_cols;
     let outline = outline(shape);
@@ -364,9 +372,7 @@ fn draw_box<'a>(canvas: &mut Canvas<'a>, top: usize, left: usize, node: &'a Node
     for (row, outline_row) in (top..).zip(outline.above).chain((below_top..).zip(outline.below)) {
         draw_row(canvas, row, left, width, *outline_row, Pen { interior: None, ..pen });
     }
-    // The middle rows: the label rows and the rows the box grew by around them. Those
-    // that do not carry the label row's own side glyphs continue its sides.
-    let middle = first_label_row - extra_rows..below_top;
+    let middle = top + outline.label_row()..below_top;
     let continued = Row {
         ends: outline.continued.unwrap_or(outline.label.ends.map(plain_side)),
         mark: None,
@@ -438,12 +444,11 @@ fn draw_row(
     }
 }
 
-/// Draws `glyphs` from `(row, col)` one character at a time in `pen`'s border style, and
-/// their blanks only when `pen` paints the interior.
+/// Draws `glyphs` from `(row, col)` one grapheme cluster at a time in `pen`'s border
+/// style, and their blanks only when `pen` paints the interior.
 fn put_glyphs(canvas: &mut Canvas<'_>, row: usize, mut col: usize, glyphs: &'static str, pen: Pen) {
-    for (at, c) in glyphs.char_indices() {
-        // The range comes from `char_indices`, so it lies on char boundaries.
-        let glyph = &glyphs[at..at + c.len_utf8()];
+    for glyph in glyphs.graphemes(true) {
+        let Some(c) = glyph.chars().next() else { continue };
         match (c, pen.interior) {
             (' ', Some(interior)) => canvas.put(row, col, glyph, interior),
             (' ', None) => {}

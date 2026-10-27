@@ -1,11 +1,54 @@
 //! Splitting flowchart source into statements: comment lines, `;` and line breaks,
 //! and the directives and accessibility statements passed over.
 
+use std::borrow::Cow;
+use std::iter::Peekable;
+use std::str::CharIndices;
+
 use crate::diagram::flowchart::label::is_entity_name_char;
 
 use super::link::{Link, link, link_start, opens_text};
 use super::shape_data::shape_data_end;
 use super::tokens::starts_string;
+
+/// `source` with the double-quoted attribute values of its HTML tags single-quoted, as
+/// upstream's `cleanupText` in `packages/mermaid/src/preprocess.ts` rewrites every
+/// `="([^"]*)"` inside a tag `<(\w+)([^>]*)>` to `='$1'` before anything else reads the
+/// source, since a `"` there would end or start a string. Only quotes change, so every
+/// byte index and line of `source` stays where it was.
+pub(in crate::diagram::flowchart) fn with_single_quoted_attributes(source: &str) -> Cow<'_, str> {
+    let mut quotes = Vec::new();
+    let mut from = 0;
+    while let Some(open) = source.get(from..).and_then(|rest| rest.find('<')).map(|at| from + at) {
+        from = open + 1;
+        let after_open = source.get(from..).unwrap_or_default();
+        let tag = after_open
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(after_open.len());
+        let Some(close) = after_open.find('>').filter(|_| tag > 0) else { continue };
+        let attributes_at = from + tag;
+        let attributes = after_open.get(tag..close).unwrap_or_default();
+        let mut at = 0;
+        while let Some(equals) = attributes.get(at..).and_then(|rest| rest.find("=\"")) {
+            let value = at + equals + 2;
+            let Some(length) = attributes.get(value..).and_then(|rest| rest.find('"')) else {
+                break;
+            };
+            quotes.extend([attributes_at + value - 1, attributes_at + value + length]);
+            at = value + length + 1;
+        }
+        from += close + 1;
+    }
+    if quotes.is_empty() {
+        return Cow::Borrowed(source);
+    }
+    Cow::Owned(
+        source
+            .char_indices()
+            .map(|(at, c)| if quotes.binary_search(&at).is_ok() { '\'' } else { c })
+            .collect(),
+    )
+}
 
 /// `source` without its comment lines, plus the 0-based source line of each remaining
 /// line (and one past the end), so that errors name lines as written. A comment line is
@@ -43,80 +86,124 @@ pub(super) fn without_comment_lines(source: &str) -> (String, Vec<usize>) {
 }
 
 /// Splits `source` into statements, each with the 0-based line it starts on, for error
-/// reports: at each line break and `;`, and drops the text [`passed_over`] names,
-/// ignoring line breaks, `;` and that text inside a double-quoted string (see
-/// [`starts_string`]), so that it may span lines as `flow.jison`'s `string` lexer state
-/// lets it, inside a label from its `[`, `(`, `{`, `|` or `>` to its closer, which
-/// upstream reads in its `text` and `trapText` lexer states, inside `@{ … }` shape data
-/// up to its closing brace (see [`shape_data_end`]), which upstream's `shapeData` lexer
-/// state reads across lines, and inside the text of a `-- text -->` link, from its `--`,
-/// `==` or `-.` to its closing link or the end of `source`, which upstream reads in its
-/// exclusive `edgeText` lexer states, where a `"` starts a string anywhere. The `;`
-/// closing an entity code such as `#quot;` splits nothing: upstream's `encodeEntities` in
-/// `packages/mermaid/src/utils.ts` replaces every `#\w+;` in the source before parsing
-/// it. Statements are slices of `source`, untrimmed, and may be empty.
+/// reports: at each line break and `;` outside a double-quoted string, a label, `@{ … }`
+/// shape data and the text of a `-- text -->` link, which upstream's lexer reads in
+/// states where both are text. Directives and accessibility statements are dropped.
+/// The `;` closing an entity code such as `#quot;` splits nothing: upstream's
+/// `encodeEntities` in `packages/mermaid/src/utils.ts` replaces every `#\w+;` in the
+/// source before parsing it. Statements are slices of `source`, untrimmed, and may be
+/// empty.
 ///
 /// `source` comes without its comment lines (see [`without_comment_lines`]). A `%%` after
 /// a directive on the same line, with only blanks between, starts a comment and is
 /// dropped; any other `%%` is text, as `flow.jison`'s `NODE_STRING` holds `%`.
 pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
-    let mut statements: Vec<(usize, &str)> = Vec::new();
-    let mut in_quotes = false;
-    // Whether the scanner is inside the text of a link that does not close on its line:
-    // upstream reads it in the exclusive `edgeText` lexer state, where a `"` starts a
-    // string anywhere and `;`, `@{` and line breaks are text. A link that closes on its
-    // line is passed over whole below.
-    let mut in_link_text = false;
-    // The label lexer states upstream has pushed and not yet popped, innermost last. `[`,
-    // `(` and `{` push `text` everywhere, as their rules are `<*>`, except that `[/` and
-    // `[\` push `trapText`. `|` pushes `text` outside a label and pops it inside one, as
-    // `<text>"|"` comes before `<*>"|"`, but is a character in `trapText`, whose `TEXT`
-    // rule holds it. The `>` opening an asymmetric label pushes `text` outside a label
-    // only. `]`, `)` and `}` pop whichever state is innermost. Upstream's `;` rule has no
-    // state prefix, so inside a label `;` and line breaks are text.
-    let mut labels: Vec<LabelState> = Vec::new();
-    let mut line = 0;
-    let (mut start_line, mut start) = (0, 0);
-    // Where a `%%` comment cut the current statement short.
-    let mut comment: Option<usize> = None;
-    // Whether the line being read holds nothing but blanks so far, which a comment needs.
-    // A directive passed over counts as blank, as upstream removes directives before
-    // comments.
-    let mut line_blank = true;
-    // How many name characters follow the last `#`, while they may still make an entity
-    // code; `None` outside one.
-    let mut entity_name: Option<usize> = None;
-    // Whether the current statement holds nothing but blanks so far: `flow.jison`'s
-    // grammar admits an accessibility statement only as a whole statement.
-    let mut blank = true;
-    // Whether a statement with text, the header, has been split off.
-    let mut after_header = false;
-    // The byte index of the line break ending the line being read, or of the source's
-    // end, found once per line for the `-- text -->` check.
-    let mut line_end = 0;
+    let mut statements = Vec::new();
+    let mut labels = Vec::new();
     let mut chars = source.char_indices().peekable();
+    let mut scan = Scan::START;
     while let Some((index, c)) = chars.next() {
+        let (next, statement) = scan.step(source, (index, c), &mut chars, &mut labels);
+        statements.extend(statement);
+        scan = next;
+    }
+    let end = scan.comment.unwrap_or(source.len());
+    statements.push((scan.start_line, source.get(scan.start..end).unwrap_or_default()));
+    statements
+}
+
+/// What [`split_statements`] knows about the source read so far, besides the label lexer
+/// states it has entered.
+#[derive(Clone, Copy)]
+struct Scan {
+    /// Whether the scanner is inside a double-quoted string (see [`starts_string`]).
+    in_quotes: bool,
+    /// Whether the scanner is inside the text of a link that does not close on its line:
+    /// upstream reads it in the exclusive `edgeText` lexer state, where a `"` starts a
+    /// string anywhere and `;`, `@{` and line breaks are text. A link that closes on its
+    /// line is passed over whole.
+    in_link_text: bool,
+    /// The 0-based line of the character being read.
+    line: usize,
+    /// The 0-based line and the byte index the current statement starts at.
+    start_line: usize,
+    start: usize,
+    /// Where a `%%` comment cut the current statement short.
+    comment: Option<usize>,
+    /// Whether the line being read holds nothing but blanks so far, which a comment needs.
+    /// A directive passed over counts as blank, as upstream removes directives before
+    /// comments.
+    line_blank: bool,
+    /// How many name characters follow the last `#`, while they may still make an entity
+    /// code; `None` outside one.
+    entity_name: Option<usize>,
+    /// Whether the current statement holds nothing but blanks so far: `flow.jison`'s
+    /// grammar admits an accessibility statement only as a whole statement.
+    blank: bool,
+    /// Whether a statement with text, the header, has been split off.
+    after_header: bool,
+    /// The byte index of the line break ending the line being read, or of the source's
+    /// end, found once per line for the `-- text -->` check.
+    line_end: usize,
+}
+
+impl Scan {
+    const START: Self = Self {
+        in_quotes: false,
+        in_link_text: false,
+        line: 0,
+        start_line: 0,
+        start: 0,
+        comment: None,
+        line_blank: true,
+        entity_name: None,
+        blank: true,
+        after_header: false,
+        line_end: 0,
+    };
+
+    /// The scan after the character `c` at byte `index` of `source`, and the statement it
+    /// ends, if any. Text read whole from `c` on (a directive, an accessibility statement,
+    /// shape data, a link) is taken from `chars`.
+    ///
+    /// `labels` holds the label lexer states upstream has pushed and not yet popped,
+    /// innermost last. `[`, `(` and `{` push `text` everywhere, as their rules are `<*>`,
+    /// except that `[/` and `[\` push `trapText`. `|` pushes `text` outside a label and
+    /// pops it inside one, as `<text>"|"` comes before `<*>"|"`, but is a character in
+    /// `trapText`, whose `TEXT` rule holds it. The `>` opening an asymmetric label pushes
+    /// `text` outside a label only. `]`, `)` and `}` pop whichever state is innermost.
+    /// Upstream's `;` rule has no state prefix, so inside a label `;` and line breaks are
+    /// text.
+    fn step<'a>(
+        self,
+        source: &'a str,
+        (index, c): (usize, char),
+        chars: &mut Peekable<CharIndices<'a>>,
+        labels: &mut Vec<LabelState>,
+    ) -> (Self, Option<(usize, &'a str)>) {
+        let mut next = self;
+        let mut statement = None;
         let mut ends_statement = false;
         // Whether a statement starts right after the text this character begins: after
         // text passed over, the next statement starts on the same line, so that point is
         // the start of a statement.
         let mut restarts = false;
+        let outside_text = !self.in_quotes && !self.in_link_text;
         match c {
-            '\n' => ends_statement = !in_quotes && !in_link_text && labels.is_empty(),
-            _ if comment.is_some() => {}
-            '"' if in_quotes => in_quotes = false,
-            '"' => in_quotes = in_link_text || starts_string(source, index),
-            '[' if !in_quotes
-                && !in_link_text
-                && chars.peek().is_some_and(|&(_, next)| matches!(next, '/' | '\\')) =>
+            '\n' => ends_statement = outside_text && labels.is_empty(),
+            _ if self.comment.is_some() => {}
+            '"' if self.in_quotes => next.in_quotes = false,
+            '"' => next.in_quotes = self.in_link_text || starts_string(source, index),
+            '[' if outside_text
+                && chars.peek().is_some_and(|&(_, after)| matches!(after, '/' | '\\')) =>
             {
                 labels.push(LabelState::Trap);
             }
-            '[' | '(' | '{' if !in_quotes && !in_link_text => labels.push(LabelState::Text),
-            ']' | ')' | '}' if !in_quotes && !in_link_text => {
+            '[' | '(' | '{' if outside_text => labels.push(LabelState::Text),
+            ']' | ')' | '}' if outside_text => {
                 labels.pop();
             }
-            '|' if !in_quotes && !in_link_text => match labels.last() {
+            '|' if outside_text => match labels.last() {
                 Some(LabelState::Text) => {
                     labels.pop();
                 }
@@ -125,57 +212,50 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
             },
             // The `>` closing an arrow belongs to its `LINK` token, and the header's `>`
             // is a direction, read in upstream's `dir` lexer state.
-            '>' if !in_quotes
-                && !in_link_text
+            '>' if outside_text
                 && labels.is_empty()
-                && after_header
-                && !source.get(..index).is_some_and(|before| {
-                    ["--", "==", ".-"].iter().any(|end| before.ends_with(end))
+                && self.after_header
+                && source.get(..index).is_none_or(|before| {
+                    !["--", "==", ".-"].iter().any(|end| before.ends_with(end))
                 }) =>
             {
                 labels.push(LabelState::Text);
             }
             ';' => {
-                ends_statement = !in_quotes
-                    && !in_link_text
+                ends_statement = outside_text
                     && labels.is_empty()
-                    && !entity_name.is_some_and(|length| length > 0);
+                    && self.entity_name.is_none_or(|length| length == 0);
             }
-            '%' | 'a' if !in_quotes && !in_link_text => {
+            '%' | 'a' if outside_text => {
                 let rest = source.get(index..).unwrap_or_default();
-                match passed_over(rest, after_header, blank) {
+                match passed_over(rest, self.after_header, self.blank) {
                     Some(length) => {
-                        let before = source.get(start..index).unwrap_or_default();
-                        after_header |= !before.trim().is_empty();
-                        statements.push((start_line, before));
-                        while let Some(&(at, skipped)) = chars.peek()
-                            && at < index + length
-                        {
-                            line += usize::from(skipped == '\n');
-                            chars.next();
-                        }
-                        start = index + length;
-                        start_line = line;
+                        let before = source.get(self.start..index).unwrap_or_default();
+                        next.after_header |= !before.trim().is_empty();
+                        statement = Some((self.start_line, before));
+                        next.line += skip_to(chars, index + length);
+                        next.start = index + length;
+                        next.start_line = next.line;
                         restarts = true;
                     }
-                    None if c == '%' && line_blank && starts_comment(rest) => {
-                        comment = Some(index);
+                    None if c == '%' && self.line_blank && starts_comment(rest) => {
+                        next.comment = Some(index);
                     }
                     None => {}
                 }
             }
-            '-' | '=' if !in_quotes && labels.is_empty() => {
+            '-' | '=' if !self.in_quotes && labels.is_empty() => {
                 // Upstream reads the text of a `-- text -->` link in exclusive lexer
                 // states (`edgeText` and its thick and dotted kin), where `@{`, `;` and
                 // `%%` are text, so a link closing on its line is passed over whole, and
                 // one that does not puts the scanner in its text until the link closes.
-                if line_end <= index {
-                    line_end = source
+                if self.line_end <= index {
+                    next.line_end = source
                         .get(index..)
                         .and_then(|rest| rest.find('\n'))
                         .map_or(source.len(), |at| index + at);
                 }
-                let line_rest = source.get(index..line_end).unwrap_or_default();
+                let line_rest = source.get(index..next.line_end).unwrap_or_default();
                 match link(line_rest) {
                     Some((Link { label: Some(_), .. }, after)) => {
                         let end = index + line_rest.len() - after.len();
@@ -185,17 +265,16 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
                     // upstream's lexer takes the run as one `LINK` token. A lone `-` is
                     // link text and leaves the state as it is.
                     _ => {
-                        while chars.next_if(|&(_, next)| next == c).is_some() {}
+                        while chars.next_if(|&(_, after)| after == c).is_some() {}
                         if let Some((_, stroke, after_base)) = link_start(line_rest) {
-                            in_link_text = opens_text(stroke, after_base);
+                            next.in_link_text = opens_text(stroke, after_base);
                         }
                     }
                 }
             }
-            '@' if !in_quotes
-                && !in_link_text
+            '@' if outside_text
                 && labels.is_empty()
-                && chars.peek().is_some_and(|&(_, next)| next == '{') =>
+                && chars.peek().is_some_and(|&(_, after)| after == '{') =>
             {
                 // Unclosed shape data runs to the end of the source, for the statement to
                 // report it.
@@ -204,40 +283,43 @@ pub(super) fn split_statements(source: &str) -> Vec<(usize, &str)> {
                     .get(data..)
                     .and_then(shape_data_end)
                     .map_or(source.len(), |end| data + end);
-                while let Some(&(at, skipped)) = chars.peek()
-                    && at < end
-                {
-                    line += usize::from(skipped == '\n');
-                    chars.next();
-                }
+                next.line += skip_to(chars, end);
             }
             _ => {}
         }
         if ends_statement {
-            in_link_text = false;
-            let end = comment.take().unwrap_or(index);
-            let text = source.get(start..end).unwrap_or_default();
-            after_header |= !text.trim().is_empty();
-            statements.push((start_line, text));
-            start = index + c.len_utf8();
-            start_line = line + usize::from(c == '\n');
+            next.in_link_text = false;
+            let end = next.comment.take().unwrap_or(index);
+            let text = source.get(self.start..end).unwrap_or_default();
+            next.after_header |= !text.trim().is_empty();
+            statement = Some((self.start_line, text));
+            next.start = index + c.len_utf8();
+            next.start_line = next.line + usize::from(c == '\n');
         }
-        blank = ends_statement || restarts || (blank && c.is_whitespace());
-        line_blank = match c {
+        next.blank = ends_statement || restarts || (self.blank && c.is_whitespace());
+        next.line_blank = match c {
             '\n' => true,
-            '%' if restarts => line_blank,
-            _ => line_blank && c.is_whitespace(),
+            '%' if restarts => self.line_blank,
+            _ => self.line_blank && c.is_whitespace(),
         };
-        line += usize::from(c == '\n');
-        entity_name = match c {
+        next.line += usize::from(c == '\n');
+        next.entity_name = match c {
             '#' => Some(0),
-            _ if is_entity_name_char(c) => entity_name.map(|length| length + 1),
+            _ if is_entity_name_char(c) => self.entity_name.map(|length| length + 1),
             _ => None,
         };
+        (next, statement)
     }
-    let end = comment.unwrap_or(source.len());
-    statements.push((start_line, source.get(start..end).unwrap_or_default()));
-    statements
+}
+
+/// Takes the characters before byte `end` from `chars`, returning how many line breaks
+/// they hold.
+fn skip_to(chars: &mut Peekable<CharIndices<'_>>, end: usize) -> usize {
+    let mut breaks = 0;
+    while let Some((_, skipped)) = chars.next_if(|&(at, _)| at < end) {
+        breaks += usize::from(skipped == '\n');
+    }
+    breaks
 }
 
 /// A label lexer state of upstream's `flow.jison` that [`split_statements`] tracks.
@@ -269,15 +351,32 @@ fn passed_over(rest: &str, after_header: bool, blank: bool) -> Option<usize> {
         .or_else(|| if after_header && blank { accessibility_end(rest) } else { None })
 }
 
-/// The byte length of the directive `text` starts with: `%%{` and a keyword
-/// (`init: …`), up to and including its `}%%` or the end of `text`. `None` when `text`
-/// starts with none; `%%{` without a keyword is neither a directive nor a comment, as
-/// `directiveRegex` in `packages/mermaid/src/diagram-api/regexes.ts` needs one.
+/// The byte length of the directive `text` starts with, as `directiveRegex` in
+/// `packages/mermaid/src/diagram-api/regexes.ts` matches it: `%%{`, a keyword with an
+/// optional `:` (`init: …`), then an argument, and the `}%%` closing it if one follows.
+/// The argument is a single word when one follows the keyword, and else everything up to
+/// the next `}%%` or the end of `text`; so `%%{init: theme dark}%%` is only `%%{init:
+/// theme `, and leaves `dark}%%` as text. `None` when `text` starts with none; `%%{`
+/// without a keyword is neither a directive nor a comment, as the regex needs one.
 fn directive_end(text: &str) -> Option<usize> {
-    let after_open = text.strip_prefix("%%{")?;
-    let keyword =
-        after_open.trim_start().starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
-    keyword.then(|| text.find("}%%").map_or(text.len(), |at| at + "}%%".len()))
+    let word_length = |text: &str| {
+        text.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(text.len())
+    };
+    let after_open = text.strip_prefix("%%{")?.trim_start();
+    let keyword = word_length(after_open);
+    if keyword == 0 {
+        return None;
+    }
+    let after_keyword = after_open.get(keyword..).unwrap_or_default().trim_start();
+    let argument = after_keyword.strip_prefix(':').map_or(after_keyword, str::trim_start);
+    let after_argument = match word_length(argument) {
+        0 => argument.get(argument.find("}%%").unwrap_or(argument.len())..),
+        word => argument.get(word..),
+    }
+    .unwrap_or_default()
+    .trim_start();
+    let rest = after_argument.strip_prefix("}%%").unwrap_or(after_argument);
+    Some(text.len() - rest.len())
 }
 
 /// The length of `source`, a diagram's source after its frontmatter, that upstream

@@ -1,6 +1,7 @@
 //! The frontmatter block a diagram source may start with, and the title it gives.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use crate::diagram::Failure;
 use crate::diagram::flowchart::label::shown_text;
@@ -11,11 +12,11 @@ use super::syntax_error;
 /// A diagram's source split at its frontmatter.
 pub(in crate::diagram::flowchart) struct FrontMatter<'a> {
     /// The `title` the frontmatter gives, which upstream draws above the diagram.
-    pub title: Option<String>,
+    pub(in crate::diagram::flowchart) title: Option<String>,
     /// The source after the frontmatter.
-    pub body: &'a str,
+    pub(in crate::diagram::flowchart) body: &'a str,
     /// The 1-based line of `source` that `body` starts on.
-    pub first_line: usize,
+    pub(in crate::diagram::flowchart) first_line: usize,
 }
 
 /// Splits off the frontmatter `source` starts with and reads its top-level `title`,
@@ -41,7 +42,9 @@ pub(in crate::diagram::flowchart) struct FrontMatter<'a> {
 /// - `missed comma between flow collection entries` for text left after an item's value
 ///   in a flow collection;
 /// - `unexpected end of the stream within …` for a quoted scalar or flow collection
-///   that nothing closes.
+///   that nothing closes;
+/// - `nesting too deep` for block sequences or flow collections nested deeper than
+///   [`MAX_NESTING_DEPTH`], on the line of the first one too deep.
 ///
 /// `source` uses `\n` line endings: the Markdown layer (`sanitize_block_body`)
 /// normalises CR before any diagram source reaches the parser.
@@ -81,7 +84,7 @@ fn is_fence(line: &str) -> bool {
 }
 
 /// YAML's blanks: spaces and tabs only, as js-yaml reads a no-break space as content.
-const BLANKS: [char; 2] = [' ', '\t'];
+pub(super) const BLANKS: [char; 2] = [' ', '\t'];
 
 /// The characters that separate the items of a flow collection: [`BLANKS`] and line
 /// breaks, which a flow collection may span.
@@ -89,7 +92,18 @@ const FLOW_BLANKS: [char; 3] = [' ', '\t', '\n'];
 
 /// The message js-yaml's `readDocument` throws for text left after the document's root
 /// node.
-const END_EXPECTED: &str = "end of the stream or a document separator is expected";
+pub(super) const END_EXPECTED: &str = "end of the stream or a document separator is expected";
+
+/// How deep block sequences, and flow collections, may each nest in a frontmatter block.
+/// Their readers keep stacks of their own, but the nodes they build nest as deep, and
+/// writing and dropping a node recurse once per level. js-yaml recurses too, but where
+/// its stack overflow is a `RangeError` upstream catches, a Rust one aborts the process,
+/// so a deeper block is a syntax error instead. Each kind counts on its own, so a block
+/// sequence holding flow collections nests up to twice as deep.
+const MAX_NESTING_DEPTH: usize = 1000;
+
+/// The error for a block nested deeper than [`MAX_NESTING_DEPTH`].
+const NESTING_TOO_DEEP: &str = "nesting too deep";
 
 /// Reads the title the frontmatter `block` gives. `block` holds the block's lines
 /// without its indent, and its first line is line `first_line` of the source.
@@ -99,17 +113,13 @@ const END_EXPECTED: &str = "end of the stream or a document separator is expecte
 /// Upstream keeps it only `if (parsed.title)`. `None` when no key is `title` or its value
 /// is falsy. A block that is one value and no mapping gives a title only as a flow
 /// mapping (see [`Yaml::start`]).
-///
-/// Its errors, listed at [`front_matter`], come from [`Yaml::start`], from this loop
-/// (`duplicated mapping key` and the tab), from [`Yaml::not_a_key`], from
-/// [`Yaml::node`] and from [`Yaml::closed_value`].
 fn title(block: &str, first_line: usize) -> Result<Option<String>, Failure> {
     let yaml = Yaml::new(block, first_line);
     let (first_key, key, after_key) = match yaml.start()? {
         Start::Mapping { at, key, after_key } => (at, key, after_key),
         Start::Value(title) => return Ok(title),
     };
-    let mut keys: Vec<Cow<'_, str>> = Vec::new();
+    let mut keys: HashSet<Cow<'_, str>> = HashSet::new();
     let mut title = None;
     let mut found = Some((key, after_key));
     let mut at = first_key;
@@ -143,7 +153,7 @@ fn title(block: &str, first_line: usize) -> Result<Option<String>, Failure> {
             // in it runs to its close across lines, so the keys resume after that.
             yaml.passed_over_end(at, after_key, end, 0)?
         };
-        keys.push(key);
+        keys.insert(key);
     }
     Ok(title)
 }
@@ -196,21 +206,31 @@ enum Node {
 
 impl Node {
     /// What JavaScript's `String` writes for the value js-yaml loads the node as, except
-    /// that a bare scalar js-yaml reads as a number or a boolean is written as it stands.
-    /// A null item of a sequence is written as nothing, as `Array.prototype.join` writes
-    /// it.
+    /// that a bare scalar js-yaml reads as a number or a boolean is written as it stands
+    /// (a deviation stated in `docs/mermaid.md`). A null item of a sequence is written as
+    /// nothing, as `Array.prototype.join` writes it.
     fn js_string(&self) -> String {
-        // A known deviation: scalars stay as written, where js-yaml's `JSON_SCHEMA` reads
-        // `1.0`, `0x10` and `True` as the number 1, the number 16 and the boolean true,
-        // which upstream draws as `1`, `16` and `true`. Only the falsy check reads numbers
-        // and booleans.
+        let mut written = String::new();
+        self.write_js_string(&mut written);
+        written
+    }
+
+    /// Appends [`Node::js_string`] to `written`.
+    // One plain call per level of nesting: an iterator adapter chain would add several
+    // frames per level, and nodes nest up to twice `MAX_NESTING_DEPTH` levels deep.
+    fn write_js_string(&self, written: &mut String) {
         match self {
-            Self::Null => String::new(),
-            Self::Plain(text) | Self::Text(text) => text.clone(),
+            Self::Null => {}
+            Self::Plain(text) | Self::Text(text) => written.push_str(text),
             Self::Sequence(items) => {
-                items.iter().map(Self::js_string).collect::<Vec<_>>().join(",")
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        written.push(',');
+                    }
+                    item.write_js_string(written);
+                }
             }
-            Self::Mapping => "[object Object]".to_owned(),
+            Self::Mapping => written.push_str("[object Object]"),
         }
     }
 
@@ -258,7 +278,7 @@ const UNCLOSED_COLLECTION: &str = "unexpected end of the stream within a flow co
 /// The message js-yaml's `readDoubleQuotedScalar` or `readSingleQuotedScalar` throws at
 /// the stream's end for a scalar opened by `quote` that nothing closes. A quote inside
 /// a flow collection reports the quote, as its reader throws first.
-fn unclosed_quote(quote: char) -> &'static str {
+pub(super) fn unclosed_quote(quote: char) -> &'static str {
     if quote == '"' {
         "unexpected end of the stream within a double quoted scalar"
     } else {
@@ -272,6 +292,14 @@ struct Yaml<'a> {
     lines: Vec<&'a str>,
     /// The byte index in `block` where each line starts.
     starts: Vec<usize>,
+    /// The indentation of each line holding more than blanks or a comment, and `None`
+    /// for any other.
+    indents: Vec<Option<usize>>,
+    /// For each line, and the end of the block after the last, the index of the first
+    /// line from it that holds more than blanks or a comment, or else the number of
+    /// lines. Readers search the same lines once per nesting level, so what each line
+    /// holds is worked out once and runs of blank or comment lines are jumped over.
+    next_content: Vec<usize>,
     /// The line of the source that the block's first line is.
     first_line: usize,
 }
@@ -285,6 +313,44 @@ struct Closed<'a> {
     line: usize,
 }
 
+/// Where a block sequence stands: its first entry's `-` is at `column` of line `at`, it
+/// stands at `place`, nested under a node at `parent`, and its entries are on lines
+/// before `end` whose `-` is at the same column.
+#[derive(Clone, Copy)]
+struct SequenceAt {
+    at: usize,
+    column: usize,
+    end: usize,
+    place: Place,
+    parent: usize,
+}
+
+/// How a node starts, as [`Yaml::node_start`] reads it.
+enum NodeStart {
+    /// A node read whole, and the index of the first line after it.
+    Read(Node, usize),
+    /// A block sequence, which [`Yaml::sequence`] reads.
+    Sequence(SequenceAt),
+}
+
+/// A block sequence that [`Yaml::sequence`] is reading.
+struct OpenSequence {
+    /// Where it stands, its end found again as its entries are read.
+    at: SequenceAt,
+    /// The entries read so far.
+    items: Vec<Node>,
+    /// The line of the entry being read.
+    entry: usize,
+    /// The index of the first line after the entry being read, as its indentation says.
+    entry_end: usize,
+}
+
+impl OpenSequence {
+    fn new(at: SequenceAt) -> Self {
+        Self { at, items: Vec::new(), entry: at.at, entry_end: at.end }
+    }
+}
+
 impl<'a> Yaml<'a> {
     fn new(block: &'a str, first_line: usize) -> Self {
         let lines: Vec<&str> = block.split('\n').collect();
@@ -296,11 +362,31 @@ impl<'a> Yaml<'a> {
                 Some(this)
             })
             .collect();
-        Self { block, lines, starts, first_line }
+        let indents = lines
+            .iter()
+            .map(|line| (!is_blank_or_comment(line)).then(|| indent_of(line)))
+            .collect::<Vec<_>>();
+        let mut next_content = vec![lines.len(); lines.len() + 1];
+        for index in (0..lines.len()).rev() {
+            next_content[index] =
+                if indents[index].is_some() { index } else { next_content[index + 1] };
+        }
+        Self { block, lines, starts, indents, next_content, first_line }
     }
 
     fn line(&self, index: usize) -> &'a str {
         self.lines.get(index).copied().unwrap_or_default()
+    }
+
+    /// The indentation of line `index`, when it holds more than blanks or a comment.
+    fn indent(&self, index: usize) -> Option<usize> {
+        self.indents.get(index).copied().flatten()
+    }
+
+    /// The index of the first line from `from` before `end` that holds more than blanks
+    /// or a comment.
+    fn first_content(&self, from: usize, end: usize) -> Option<usize> {
+        self.next_content.get(from).copied().filter(|&index| index < end.min(self.lines.len()))
     }
 
     /// The index of the line holding byte index `offset` of the block.
@@ -323,25 +409,33 @@ impl<'a> Yaml<'a> {
 
     /// The syntax error for `error`, from a flow collection whose text starts at byte
     /// `start` of the block: an unclosed one on the line after the last, where js-yaml
-    /// stops, and a missed comma on the line of the text left in its item.
+    /// stops, a missed comma on the line of the text left in its item, and nesting too
+    /// deep on the line of the first bracket too deep.
     fn flow_error(&self, start: usize, error: FlowError) -> Failure {
         match error {
             FlowError::Unclosed(message) => self.error_at_end(message),
             FlowError::MissedComma { breaks } => {
                 self.error(self.line_of(start) + breaks, MISSED_COMMA)
             }
+            FlowError::TooDeep { breaks } => {
+                self.error(self.line_of(start) + breaks, NESTING_TOO_DEEP)
+            }
         }
     }
 
     /// The index of the first line from `from` that holds more than blanks or a comment,
     /// is indented no deeper than `indent`, and does not `continue` the block before it.
+    /// `continues` is asked of the line's text after its indentation.
     fn block_end(&self, from: usize, indent: usize, continues: impl Fn(&str) -> bool) -> usize {
-        (from..self.lines.len())
-            .find(|&index| {
-                let line = self.line(index);
-                !is_blank_or_comment(line) && indent_of(line) <= indent && !continues(line)
+        std::iter::successors(self.first_content(from, self.lines.len()), |&index| {
+            self.first_content(index + 1, self.lines.len())
+        })
+        .find(|&index| {
+            self.indent(index).is_some_and(|own| {
+                own <= indent && !continues(self.line(index).get(own..).unwrap_or_default())
             })
-            .unwrap_or(self.lines.len())
+        })
+        .unwrap_or(self.lines.len())
     }
 
     /// The index of the first line after line `at` indented no deeper than `indent` (see
@@ -354,7 +448,7 @@ impl<'a> Yaml<'a> {
     /// its key's own indentation `column`: the first line indented no deeper than
     /// `column` that is not an entry (see [`Yaml::block_end`]).
     fn compact_sequence_end(&self, from: usize, column: usize) -> usize {
-        self.block_end(from, column, |line| is_sequence_entry(line.trim_start_matches(' ')))
+        self.block_end(from, column, is_sequence_entry)
     }
 
     /// Reads how the block starts: its first top-level key, or else the one value it is.
@@ -390,7 +484,13 @@ impl<'a> Yaml<'a> {
         }
         if is_sequence_entry(line) {
             let end = self.compact_sequence_end(at, 0);
-            let (_, next) = self.sequence(at, 0, end, Place::UnderKey, 0)?;
+            let (_, next) = self.sequence(SequenceAt {
+                at,
+                column: 0,
+                end,
+                place: Place::UnderKey,
+                parent: 0,
+            })?;
             self.end_expected_from(next)?;
             return Ok(Start::Value(None));
         }
@@ -423,7 +523,7 @@ impl<'a> Yaml<'a> {
     /// line from `from` that holds more than blanks or a comment, as js-yaml's
     /// `readDocument` throws for text left after the document's root node.
     fn end_expected_from(&self, from: usize) -> Result<(), Failure> {
-        match (from..self.lines.len()).find(|&index| !is_blank_or_comment(self.line(index))) {
+        match self.first_content(from, self.lines.len()) {
             Some(index) => Err(self.error(index, END_EXPECTED)),
             None => Ok(()),
         }
@@ -455,8 +555,9 @@ impl<'a> Yaml<'a> {
                 return Err(self.error(self.line_of(item_start), "duplicated mapping key"));
             }
             let before = text.get(..text.len() - value.trim_start_matches(FLOW_BLANKS).len());
-            let node = flow_value(value)
-                .map_err(|e| self.flow_error(item_start, e.after(before.unwrap_or_default())))?;
+            let node = flow_value(value).map_err(|e| {
+                self.flow_error(item_start, e.after(breaks_in(before.unwrap_or_default())))
+            })?;
             title = Some(node.title());
         }
         Ok(title.flatten())
@@ -509,8 +610,26 @@ impl<'a> Yaml<'a> {
     }
 
     /// Reads the node that starts with `text`, a suffix of line `at`, standing at
-    /// `place`. Lines `at + 1..end` continue it and are nested deeper than `parent`.
-    /// Returns the node and the index of the first line after it.
+    /// `place`, as [`Yaml::node_start`] and [`Yaml::sequence`] read it. Lines
+    /// `at + 1..end` continue it and are nested deeper than `parent`. Returns the node
+    /// and the index of the first line after it.
+    fn node(
+        &self,
+        at: usize,
+        text: &'a str,
+        end: usize,
+        parent: usize,
+        place: Place,
+    ) -> Result<(Node, usize), Failure> {
+        match self.node_start(at, text, end, parent, place)? {
+            NodeStart::Read(node, next) => Ok((node, next)),
+            NodeStart::Sequence(sequence) => self.sequence(sequence),
+        }
+    }
+
+    /// Reads the node that starts with `text`, a suffix of line `at`, standing at
+    /// `place`, unless it is a block sequence, which is only located. Lines `at + 1..end`
+    /// continue it and are nested deeper than `parent`.
     ///
     /// When `text` holds nothing but a comment, the node starts on the next line that
     /// holds more, as YAML passes over comments. Under a key, a block sequence at the
@@ -524,50 +643,61 @@ impl<'a> Yaml<'a> {
     /// Syntax errors: on a key's line, a mapping or sequence entry, as js-yaml throws `bad
     /// indentation of a mapping entry` for the text it leaves there; after a quoted scalar
     /// or flow collection, anything but a comment on the line it closes on, or a line
-    /// holding more before the node's end; what [`Yaml::sequence`],
-    /// [`Yaml::block_scalar`] and [`Yaml::plain`] reject; and what [`Yaml::closed_value`]
-    /// and [`Yaml::passed_over_end`] return for a quoted scalar or flow collection.
-    fn node(
+    /// holding more before the node's end; what [`Yaml::block_scalar`] and
+    /// [`Yaml::plain`] reject; and what [`Yaml::closed_value`] and
+    /// [`Yaml::passed_over_end`] return for a quoted scalar or flow collection.
+    fn node_start(
         &self,
         at: usize,
         text: &'a str,
         end: usize,
         parent: usize,
         place: Place,
-    ) -> Result<(Node, usize), Failure> {
+    ) -> Result<NodeStart, Failure> {
         let text = trim_blanks(text);
+        // An entry is told apart before the comment is cut off, which scans the rest of the
+        // line: entries nested on one line would each scan it again.
+        if is_sequence_entry(text) {
+            if place == Place::KeyLine {
+                return Err(self.error(at, place.bad_indentation()));
+            }
+            let column = self.line(at).len() - text.len();
+            return Ok(NodeStart::Sequence(SequenceAt { at, column, end, place, parent }));
+        }
         let (content, commented) = uncommented(text);
         if content.is_empty() {
             let own_line = if place == Place::KeyLine { Place::UnderKey } else { place };
-            if let Some(start) = (at + 1..end).find(|&index| !is_blank_or_comment(self.line(index)))
-            {
-                return self.node(start, self.line(start), end, parent, own_line);
+            if let Some(start) = self.first_content(at + 1, end) {
+                return self.node_start(start, self.line(start), end, parent, own_line);
             }
             let next = self.line(end);
             if place == Place::KeyLine
                 && indent_of(next) == parent
                 && next.get(parent..).is_some_and(is_sequence_entry)
             {
-                let sequence_end = self.compact_sequence_end(end, parent);
-                return self.sequence(end, parent, sequence_end, Place::UnderKey, parent);
+                let end_of_sequence = self.compact_sequence_end(end, parent);
+                return Ok(NodeStart::Sequence(SequenceAt {
+                    at: end,
+                    column: parent,
+                    end: end_of_sequence,
+                    place: Place::UnderKey,
+                    parent,
+                }));
             }
-            return Ok((Node::Null, end));
-        }
-        if is_sequence_entry(text) {
-            if place == Place::KeyLine {
-                return Err(self.error(at, place.bad_indentation()));
-            }
-            let column = self.line(at).len() - text.len();
-            return self.sequence(at, column, end, place, parent);
+            return Ok(NodeStart::Read(Node::Null, end));
         }
         if let Some(value) = entry_value(text) {
             if place == Place::KeyLine {
                 return Err(self.error(at, place.bad_indentation()));
             }
-            return Ok((Node::Mapping, self.passed_over_end(at, value, end, parent)?));
+            return Ok(NodeStart::Read(
+                Node::Mapping,
+                self.passed_over_end(at, value, end, parent)?,
+            ));
         }
         if is_block_scalar_header(text) {
-            return Ok((Node::Text(self.block_scalar(at, text, end, parent, place)?), end));
+            let text = self.block_scalar(at, text, end, parent, place)?;
+            return Ok(NodeStart::Read(Node::Text(text), end));
         }
         if let Some(closed) = self.closed_value(at, text)? {
             let end = end.max(self.nested_end(closed.line, parent));
@@ -575,55 +705,93 @@ impl<'a> Yaml<'a> {
                 return Err(self.error(closed.line, place.bad_indentation()));
             }
             self.check_lines(closed.line + 1, end, place)?;
-            return Ok((closed.value, (closed.line + 1).max(end)));
+            return Ok(NodeStart::Read(closed.value, (closed.line + 1).max(end)));
         }
-        Ok((self.plain(at, content, commented, end, place)?, end))
+        Ok(NodeStart::Read(self.plain(at, content, commented, end, place)?, end))
     }
 
-    /// Reads the block sequence standing at `place` whose first entry's `-` is at
-    /// `column` of line `at`, nested under a node at `parent`. Its entries are on lines
-    /// before `end` whose `-` is at the same column. Returns the sequence and the index of
-    /// the first line after it.
+    /// Reads the block sequence `first` locates, with the sequences nested in its
+    /// entries. Returns the sequence and the index of the first line after it.
     ///
-    /// When an entry closes past `end`, the end is found again from there: as
-    /// [`Yaml::compact_sequence_end`] says for a sequence at its parent's own indentation,
-    /// which only a compact sequence under a key is, and as [`Yaml::nested_end`] says for
-    /// any other.
+    /// The sequences being read are kept on a stack of their own rather than read by
+    /// recursion, so that nesting costs no call stack.
     ///
-    /// Syntax error: a line holding more than blanks or a comment after its last entry,
-    /// before `end`, with the message for `place`, as js-yaml throws one for a line that
-    /// does not fit after the sequence.
-    fn sequence(
-        &self,
-        at: usize,
-        column: usize,
-        mut end: usize,
-        place: Place,
-        parent: usize,
-    ) -> Result<(Node, usize), Failure> {
-        let mut items = Vec::new();
-        let mut entry = Some(at);
-        let mut after = end;
-        while let Some(start) = entry {
-            let entry_end = self.nested_end(start, column).min(end);
-            let after_dash = self.line(start).get(column + 1..).unwrap_or_default();
-            let (item, next) = self.node(start, after_dash, entry_end, column, Place::Entry)?;
-            items.push(item);
-            after = entry_end.max(next);
-            if after > end {
-                end = if column == parent {
-                    self.compact_sequence_end(after, column)
-                } else {
-                    self.nested_end(after.saturating_sub(1), parent)
-                };
+    /// Syntax errors: [`NESTING_TOO_DEEP`] on the line of the first entry of a sequence
+    /// nested deeper than [`MAX_NESTING_DEPTH`]; what [`Yaml::node_start`] rejects in an
+    /// entry; and what [`Yaml::next_entry`] rejects after a sequence's last entry.
+    fn sequence(&self, first: SequenceAt) -> Result<(Node, usize), Failure> {
+        let mut outer: Vec<OpenSequence> = Vec::new();
+        let mut open = OpenSequence::new(first);
+        loop {
+            let SequenceAt { column, end, .. } = open.at;
+            open.entry_end = self.nested_end(open.entry, column).min(end);
+            let after_dash = self.line(open.entry).get(column + 1..).unwrap_or_default();
+            let mut read = match self.node_start(
+                open.entry,
+                after_dash,
+                open.entry_end,
+                column,
+                Place::Entry,
+            )? {
+                NodeStart::Read(node, next) => (node, next),
+                NodeStart::Sequence(inner) => {
+                    if outer.len() + 1 >= MAX_NESTING_DEPTH {
+                        return Err(self.error(inner.at, NESTING_TOO_DEEP));
+                    }
+                    outer.push(std::mem::replace(&mut open, OpenSequence::new(inner)));
+                    continue;
+                }
+            };
+            while let Some(whole) = self.next_entry(&mut open, read)? {
+                match outer.pop() {
+                    Some(parent) => {
+                        open = parent;
+                        read = whole;
+                    }
+                    None => return Ok(whole),
+                }
             }
-            let line = self.line(after);
-            entry =
-                (after < end && indent_of(line) == column && is_sequence_entry(trim_blanks(line)))
-                    .then_some(after);
         }
-        self.check_lines(after, end, place)?;
-        Ok((Node::Sequence(items), after.max(end)))
+    }
+
+    /// Adds `read`, the node of the entry `open` is reading and the index of the first
+    /// line after it, to the sequence. Returns `None` when another entry follows, which
+    /// `open` then reads, and else the whole sequence and the index of the first line
+    /// after it.
+    ///
+    /// When an entry closes past the sequence's end, the end is found again from there:
+    /// as [`Yaml::compact_sequence_end`] says for a sequence at its parent's own
+    /// indentation, which only a compact sequence under a key is, and as
+    /// [`Yaml::nested_end`] says for any other.
+    ///
+    /// Syntax error: a line holding more than blanks or a comment after the last entry,
+    /// before the end, with the message for the sequence's place, as js-yaml throws one
+    /// for a line that does not fit after the sequence.
+    fn next_entry(
+        &self,
+        open: &mut OpenSequence,
+        (item, next): (Node, usize),
+    ) -> Result<Option<(Node, usize)>, Failure> {
+        let at = &mut open.at;
+        open.items.push(item);
+        let after = open.entry_end.max(next);
+        if after > at.end {
+            at.end = if at.column == at.parent {
+                self.compact_sequence_end(after, at.column)
+            } else {
+                self.nested_end(after.saturating_sub(1), at.parent)
+            };
+        }
+        let line = self.line(after);
+        if after < at.end
+            && self.indent(after) == Some(at.column)
+            && line.get(at.column..).map(trim_blanks).is_some_and(is_sequence_entry)
+        {
+            open.entry = after;
+            return Ok(None);
+        }
+        self.check_lines(after, at.end, at.place)?;
+        Ok(Some((Node::Sequence(std::mem::take(&mut open.items)), after.max(at.end))))
     }
 
     /// Reads the text of the block scalar standing at `place` whose header `header` ends
@@ -747,7 +915,7 @@ impl<'a> Yaml<'a> {
     /// Errors with the message for `place` at the first line from `from` before `end`
     /// that holds more than blanks or a comment: nothing may follow the node before it.
     fn check_lines(&self, from: usize, end: usize, place: Place) -> Result<(), Failure> {
-        match (from..end).find(|&index| !is_blank_or_comment(self.line(index))) {
+        match self.first_content(from, end) {
             Some(index) => Err(self.error(index, place.bad_indentation())),
             None => Ok(()),
         }
@@ -780,7 +948,12 @@ impl<'a> Yaml<'a> {
                 if is_block_scalar_header(text) {
                     index = self.nested_end(index, indent_of(self.line(index))) - 1;
                 } else if let Some(line) = self.closed_value(index, text)?.map(|c| c.line) {
-                    end = end.max(self.nested_end(line, parent));
+                    // `end` is past the last line or on one indented no deeper than
+                    // `parent`, so a node closing before it cannot extend it; scanning
+                    // anyway would walk to `end` once per line.
+                    if line >= end {
+                        end = self.nested_end(line, parent);
+                    }
                     index = line;
                 }
             }
@@ -832,82 +1005,179 @@ enum FlowError {
     /// `breaks` counts the line breaks from the start of the text read to that text,
     /// whose line js-yaml throws on: a count holds where comments are left out.
     MissedComma { breaks: usize },
+    /// The collections nest deeper than [`MAX_NESTING_DEPTH`]: [`NESTING_TOO_DEEP`] on the
+    /// line of the first bracket too deep, `breaks` line breaks after the start of the
+    /// text read.
+    TooDeep { breaks: usize },
 }
 
 impl FlowError {
-    /// The error for text that `before` comes before: a missed comma moves down by the
-    /// line breaks in `before`.
-    fn after(self, before: &str) -> Self {
+    /// The error for text that `more` line breaks come before: an error on a line moves
+    /// down by them.
+    fn after(self, more: usize) -> Self {
         match self {
-            Self::MissedComma { breaks } => {
-                Self::MissedComma { breaks: breaks + before.matches('\n').count() }
-            }
+            Self::MissedComma { breaks } => Self::MissedComma { breaks: breaks + more },
+            Self::TooDeep { breaks } => Self::TooDeep { breaks: breaks + more },
             unclosed @ Self::Unclosed(_) => unclosed,
         }
     }
 }
 
-/// The node of the flow collection `text` starts with, and its byte length up to and
-/// including the closing bracket. Each item is read by [`flow_value`].
-///
-/// Errors: what [`flow_items`] throws for a collection nothing closes, and what
-/// [`flow_value`] throws for an item, counted from the start of `text`.
-fn flow_node(text: &str) -> Result<(Node, usize), FlowError> {
-    let (items, length) = flow_items(text)?;
-    let mut nodes = Vec::with_capacity(items.len());
-    for item in &items {
-        let before = text.get(..item.at).unwrap_or_default();
-        nodes.push(flow_value(&item.text).map_err(|error| error.after(before))?);
+/// The number of line breaks in `text`.
+fn breaks_in(text: &str) -> usize {
+    text.matches('\n').count()
+}
+
+/// A flow collection that [`flow_node`] is reading.
+struct OpenFlow {
+    /// Whether it is a mapping, which upstream keeps nothing of but its being one.
+    mapping: bool,
+    items: Vec<FlowItem>,
+    /// Its byte length up to and including the closing bracket.
+    length: usize,
+    /// The nodes of the items read so far.
+    nodes: Vec<Node>,
+    /// The index of the item being read.
+    next: usize,
+    /// When the item being read is a pair whose value is a nested collection, the byte
+    /// index of the value in the item without its blanks.
+    pair_at: Option<usize>,
+    /// The line breaks from the start of the outermost collection's text to its own.
+    breaks: usize,
+}
+
+impl OpenFlow {
+    /// The collection `text` starts with, `breaks` line breaks after the start of the
+    /// outermost collection's text.
+    ///
+    /// Error: what [`flow_items`] throws, counted from the outermost collection's text.
+    fn new(text: &str, breaks: usize) -> Result<Self, FlowError> {
+        let (items, length) = flow_items(text).map_err(|error| error.after(breaks))?;
+        let mapping = text.starts_with('{');
+        Ok(Self { mapping, items, length, nodes: Vec::new(), next: 0, pair_at: None, breaks })
     }
-    let node = if text.starts_with('{') { Node::Mapping } else { Node::Sequence(nodes) };
-    Ok((node, length))
+
+    /// The node the collection is, once its items are read, and its length.
+    fn into_node(self) -> (Node, usize) {
+        let node = if self.mapping { Node::Mapping } else { Node::Sequence(self.nodes) };
+        (node, self.length)
+    }
+}
+
+/// The node of the flow collection `text` starts with, and its byte length up to and
+/// including the closing bracket. Each item is read as [`flow_value`] reads one.
+///
+/// The collections being read are kept on a stack of their own rather than read by
+/// recursion, so that nesting costs no call stack.
+///
+/// Errors: what [`flow_items`] throws for a collection nothing closes or nested too
+/// deep, what [`flow_pair`] and [`flow_scalar`] reject in an item, and text after a
+/// nested collection in its item, counted from the start of `text`.
+fn flow_node(text: &str) -> Result<(Node, usize), FlowError> {
+    let mut outer: Vec<OpenFlow> = Vec::new();
+    let mut open = OpenFlow::new(text, 0)?;
+    loop {
+        if let Some(item) = open.items.get(open.next) {
+            let item_breaks = open.breaks + item.breaks;
+            let item = item.text.trim_matches(FLOW_BLANKS);
+            let pair = flow_pair(item).map_err(|error| error.after(item_breaks))?;
+            let (value, value_at) = pair.unwrap_or((item, 0));
+            let value_breaks = item_breaks + breaks_in(item.get(..value_at).unwrap_or_default());
+            if value.starts_with(['[', '{']) {
+                let inner = OpenFlow::new(value, value_breaks)?;
+                open.pair_at = pair.map(|(_, at)| at);
+                outer.push(std::mem::replace(&mut open, inner));
+            } else {
+                let node = flow_scalar(value).map_err(|error| error.after(value_breaks))?;
+                open.nodes.push(if pair.is_some() { Node::Mapping } else { node });
+                open.next += 1;
+            }
+            continue;
+        }
+        let Some(parent) = outer.pop() else { return Ok(open.into_node()) };
+        let read = std::mem::replace(&mut open, parent);
+        let item = open.items.get(open.next).map_or("", |item| item.text.trim_matches(FLOW_BLANKS));
+        let value = item.get(open.pair_at.unwrap_or(0)..).unwrap_or_default();
+        nothing_after(value, read.length).map_err(|error| error.after(read.breaks))?;
+        let (node, _) = read.into_node();
+        open.nodes.push(if open.pair_at.is_some() { Node::Mapping } else { node });
+        open.next += 1;
+    }
 }
 
 /// The node of `item`, an item of a flow collection or the value of a flow mapping's
-/// pair: a flow collection, a single-pair mapping when it holds a mapping entry, or else
-/// a scalar.
+/// pair: a flow collection (see [`flow_node`]), a single-pair mapping when it holds a
+/// mapping entry (see [`flow_pair`]), or else a scalar (see [`flow_scalar`]).
 ///
 /// Error: [`FlowError::MissedComma`], counted from the item's first character other
-/// than a blank or line break, for text after a nested collection or a quoted scalar,
-/// or after the value of a pair, where a bare scalar stops at a `:` before a blank as
-/// js-yaml's `readPlainScalar` does, and for what a nested collection's items hold.
+/// than a blank or line break, for text after a nested collection, for what
+/// [`flow_pair`] and [`flow_scalar`] reject, and for what a nested collection's items
+/// hold.
 fn flow_value(item: &str) -> Result<Node, FlowError> {
     let item = item.trim_matches(FLOW_BLANKS);
-    // The error for text left at byte `at` of `item`.
-    let missed_comma = |at: usize| FlowError::MissedComma {
-        breaks: item.get(..at).unwrap_or_default().matches('\n').count(),
+    let pair = flow_pair(item)?;
+    let (value, value_at) = pair.unwrap_or((item, 0));
+    let node = if value.starts_with(['[', '{']) {
+        flow_node(value).and_then(|(node, length)| nothing_after(value, length).map(|()| node))
+    } else {
+        flow_scalar(value)
     };
-    // The byte index in `item` of the first character of `rest`, a suffix of `item`,
-    // other than a blank or line break.
-    let start_of = |rest: &str| item.len() - rest.trim_start_matches(FLOW_BLANKS).len();
-    if item.starts_with(['[', '{']) {
-        let (node, length) = flow_node(item)?;
-        let rest = item.get(length..).unwrap_or_default();
-        if !rest.trim_matches(FLOW_BLANKS).is_empty() {
-            return Err(missed_comma(start_of(rest)));
-        }
-        return Ok(node);
+    let node =
+        node.map_err(|error| error.after(breaks_in(item.get(..value_at).unwrap_or_default())))?;
+    Ok(if pair.is_some() { Node::Mapping } else { node })
+}
+
+/// The value of the pair `item` is, when it holds a mapping entry, and the byte index of
+/// the value in `item`.
+///
+/// Error: [`FlowError::MissedComma`] for text after the value, where a bare scalar stops
+/// at a `:` before a blank as js-yaml's `readPlainScalar` does.
+fn flow_pair(item: &str) -> Result<Option<(&str, usize)>, FlowError> {
+    let Some(colon) = mapping_colon(item) else { return Ok(None) };
+    let raw = item.get(colon + 1..).unwrap_or_default();
+    let value = raw.trim_matches(FLOW_BLANKS);
+    let value_at = start_of(item, raw);
+    match mapping_colon(value) {
+        Some(inner) => Err(missed_comma(item, value_at + inner)),
+        None => Ok(Some((value, value_at))),
     }
-    if let Some(colon) = mapping_colon(item) {
-        let raw = item.get(colon + 1..).unwrap_or_default();
-        let value = raw.trim_matches(FLOW_BLANKS);
-        let value_at = start_of(raw);
-        if let Some(inner) = mapping_colon(value) {
-            return Err(missed_comma(value_at + inner));
-        }
-        let before = item.get(..value_at).unwrap_or_default();
-        flow_value(value).map_err(|error| error.after(before))?;
-        return Ok(Node::Mapping);
+}
+
+/// Error: [`FlowError::MissedComma`] when `text` holds more than blanks and line breaks
+/// after its first `length` bytes.
+fn nothing_after(text: &str, length: usize) -> Result<(), FlowError> {
+    let rest = text.get(length..).unwrap_or_default();
+    if rest.trim_matches(FLOW_BLANKS).is_empty() {
+        Ok(())
+    } else {
+        Err(missed_comma(text, start_of(text, rest)))
     }
+}
+
+/// The scalar `item` is, which holds no flow collection or mapping entry.
+///
+/// Error: [`FlowError::MissedComma`] for text after a quoted scalar.
+fn flow_scalar(item: &str) -> Result<Node, FlowError> {
     if item.starts_with(['"', '\''])
         && let Some((quoted, rest)) = scalar(item)
     {
         if !rest.trim_matches(FLOW_BLANKS).is_empty() {
-            return Err(missed_comma(start_of(rest)));
+            return Err(missed_comma(item, start_of(item, rest)));
         }
         return Ok(Node::Text(quoted.text().into_owned()));
     }
     Ok(if is_null(item) { Node::Null } else { Node::Plain(item.to_owned()) })
+}
+
+/// The error for text left at byte `at` of `item`.
+fn missed_comma(item: &str, at: usize) -> FlowError {
+    FlowError::MissedComma { breaks: item.get(..at).unwrap_or_default().matches('\n').count() }
+}
+
+/// The byte index in `item` of the first character of `rest`, a suffix of `item`, other
+/// than a blank or line break.
+fn start_of(item: &str, rest: &str) -> usize {
+    item.len() - rest.trim_start_matches(FLOW_BLANKS).len()
 }
 
 /// An item of a flow collection, as [`flow_items`] splits it off.
@@ -917,6 +1187,8 @@ struct FlowItem {
     /// The byte index in the collection's text of the item's first character other than
     /// a blank or line break.
     at: usize,
+    /// The line breaks in the collection's text before `at`.
+    breaks: usize,
 }
 
 /// The items of the flow collection `text` starts with, split at its top-level commas,
@@ -928,13 +1200,20 @@ struct FlowItem {
 /// or `,` comes right before it, as js-yaml's `readFlowCollection` passes over comments
 /// after an opening bracket and between items.
 ///
-/// Error: when nothing closes the collection, [`FlowError::Unclosed`] with the message
-/// js-yaml throws for what it ends inside: a quoted item (see [`unclosed_quote`]) or
-/// the collection ([`UNCLOSED_COLLECTION`]).
+/// Errors: [`FlowError::TooDeep`] at the first bracket nested deeper than
+/// [`MAX_NESTING_DEPTH`]; and, when nothing closes the collection, [`FlowError::Unclosed`]
+/// with the message js-yaml throws for what it ends inside: a quoted item (see
+/// [`unclosed_quote`]) or the collection ([`UNCLOSED_COLLECTION`]).
 fn flow_items(text: &str) -> Result<(Vec<FlowItem>, usize), FlowError> {
     let mut items = Vec::new();
-    let mut item = FlowItem { text: String::new(), at: 0 };
+    let mut item = FlowItem { text: String::new(), at: 0, breaks: 0 };
     let mut depth = 0_usize;
+    // Whether `item` holds only blanks so far: tracked here, as trimming the item at every
+    // character takes time quadratic in a run of blanks.
+    let mut only_blanks = true;
+    // A byte index in `text` and the line breaks before it, so that each item's are
+    // counted from the last item's.
+    let mut counted = (0, 0);
     let mut quote: Option<char> = None;
     // Whether only blanks have come since the item or a `:` started: a quote starts a
     // quoted scalar only there, and is a character of a bare one anywhere else.
@@ -972,12 +1251,16 @@ fn flow_items(text: &str) -> Result<(Vec<FlowItem>, usize), FlowError> {
             }
             '[' | '{' => {
                 depth += 1;
+                if depth > MAX_NESTING_DEPTH {
+                    let breaks = text.get(..at).unwrap_or_default().matches('\n').count();
+                    return Err(FlowError::TooDeep { breaks });
+                }
                 depth == 1
             }
             ']' | '}' => {
                 depth = depth.checked_sub(1).ok_or(FlowError::Unclosed(UNCLOSED_COLLECTION))?;
                 if depth == 0 {
-                    if !item.text.trim_matches(FLOW_BLANKS).is_empty() {
+                    if !only_blanks {
                         items.push(item);
                     }
                     return Ok((items, at + 1));
@@ -985,15 +1268,19 @@ fn flow_items(text: &str) -> Result<(Vec<FlowItem>, usize), FlowError> {
                 false
             }
             ',' if depth == 1 => {
-                let next = FlowItem { text: String::new(), at: 0 };
+                let next = FlowItem { text: String::new(), at: 0, breaks: 0 };
                 items.push(std::mem::replace(&mut item, next));
+                only_blanks = true;
                 true
             }
             _ => false,
         };
         if !separates {
-            if item.text.trim_matches(FLOW_BLANKS).is_empty() && !FLOW_BLANKS.contains(&c) {
+            if only_blanks && !FLOW_BLANKS.contains(&c) {
+                only_blanks = false;
                 item.at = at;
+                counted = (at, counted.1 + breaks_in(text.get(counted.0..at).unwrap_or_default()));
+                item.breaks = counted.1;
             }
             item.text.push(c);
         }
@@ -1016,7 +1303,7 @@ fn is_block_scalar_header(value: &str) -> bool {
 /// `text` before its comment, a `#` at its start or after a blank (YAML 1.2 §6.6), without
 /// the blanks at its end, and whether a comment ends it. A `#` right after other text, as
 /// in `Hello#tag`, is part of the text.
-fn uncommented(text: &str) -> (&str, bool) {
+pub(super) fn uncommented(text: &str) -> (&str, bool) {
     let comment = text
         .match_indices('#')
         .find(|&(at, _)| at == 0 || text.get(..at).is_some_and(|b| b.ends_with(BLANKS)));
@@ -1025,13 +1312,13 @@ fn uncommented(text: &str) -> (&str, bool) {
 }
 
 /// Whether `line` holds nothing but blanks or a comment.
-fn is_blank_or_comment(line: &str) -> bool {
+pub(super) fn is_blank_or_comment(line: &str) -> bool {
     let text = trim_blanks(line);
     text.is_empty() || text.starts_with('#')
 }
 
 /// The number of spaces `line` starts with: YAML indents with spaces only.
-fn indent_of(line: &str) -> usize {
+pub(super) fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
@@ -1051,7 +1338,7 @@ fn is_sequence_entry(text: &str) -> bool {
 /// a quoted key, so callers ask it before reading a quoted scalar. `None` for a flow
 /// collection: a `:` inside `[…]` or `{…}` belongs to the collection and makes no block
 /// mapping entry.
-fn mapping_colon(text: &str) -> Option<usize> {
+pub(super) fn mapping_colon(text: &str) -> Option<usize> {
     if text.starts_with(['[', '{']) {
         return None;
     }

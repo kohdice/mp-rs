@@ -1,7 +1,7 @@
 //! Collapsed subgraphs drawn as one box, as upstream's collapsible subgraphs are
 //! (<https://mermaid.js.org/syntax/flowchart.html>, "Collapsible subgraphs").
 
-use super::parse::{
+use super::chart::{
     Body, Edge, End, Flowchart, Node, Shape, Subgraph, compact_index, remap_members,
 };
 
@@ -19,7 +19,7 @@ pub(super) fn collapse(chart: Flowchart) -> Option<Flowchart> {
     }
     let enclosing: Vec<Vec<usize>> =
         (0..chart.subgraphs.len()).map(|subgraph| chart.enclosing(subgraph).collect()).collect();
-    let Flowchart { direction, nodes, edges, subgraphs } = chart;
+    let Flowchart { direction, spelled_br, nodes, edges, subgraphs } = chart;
     let placed = collapse_nodes(nodes, &subgraphs, &outermost)?;
     // The index each subgraph keeps among those no collapsed subgraph holds.
     let subgraph_index =
@@ -27,7 +27,7 @@ pub(super) fn collapse(chart: Flowchart) -> Option<Flowchart> {
     let edges = collapse_edges(edges, &placed, &outermost, &subgraph_index)?;
     let subgraphs =
         collapse_subgraphs(&subgraphs, &placed, &outermost, &subgraph_index, &enclosing)?;
-    Some(Flowchart { direction, nodes: placed.nodes, edges, subgraphs })
+    Some(Flowchart { direction, spelled_br, nodes: placed.nodes, edges, subgraphs })
 }
 
 /// The outermost collapsed subgraph each subgraph lies in, itself included, indexed like
@@ -80,7 +80,6 @@ fn collapse_nodes(
         let subgraph = subgraphs.get(subgraph)?;
         Some(Node {
             body: Body::Box { label: subgraph.title.clone(), shape: Shape::Rectangle },
-            spread: 0,
             styling: subgraph.styling,
             array_index: None,
         })

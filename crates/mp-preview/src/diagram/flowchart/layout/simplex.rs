@@ -66,6 +66,8 @@ struct Ranker {
     rank: Vec<i64>,
     /// Each node in the tree, in the order it joined.
     tree_nodes: Vec<usize>,
+    /// The tree's nodes in the order graphlib lists them.
+    listed: Vec<usize>,
     in_tree: Vec<bool>,
     /// Each tree edge, in the order it joined.
     tree_edges: Vec<usize>,
@@ -76,8 +78,10 @@ struct Ranker {
     lim: Vec<usize>,
     /// The tree edge to each node's parent, `None` for the tree's root.
     parent_edge: Vec<Option<usize>>,
-    /// The tree's nodes, each after its parent.
+    /// The nodes the last numbering reached, each after its parent.
     preorder: Vec<usize>,
+    /// Each node on a depth-first search's path, with the next of its edges to follow.
+    path: Vec<(usize, usize)>,
     /// The first node graphlib lists. It starts the tree, and roots it once the tree spans
     /// every node.
     start: usize,
@@ -134,6 +138,7 @@ impl Ranker {
             key,
             rank,
             tree_nodes: vec![start],
+            listed: vec![start],
             in_tree,
             tree_edges: Vec::new(),
             is_tree_edge: vec![false; edge_count],
@@ -142,6 +147,7 @@ impl Ranker {
             lim: vec![0; count + 1],
             parent_edge: vec![None; count + 1],
             preorder: Vec::new(),
+            path: Vec::new(),
             start,
         })
     }
@@ -149,7 +155,10 @@ impl Ranker {
     /// dagre's `networkSimplex` after `longestPath`.
     fn run(&mut self) -> Option<()> {
         self.feasible_tree()?;
-        self.init_tree()?;
+        self.number_below(self.start, 1)?;
+        for at in (0..self.preorder.len()).rev() {
+            self.update_cut(*self.preorder.get(at)?)?;
+        }
         for _ in 0..MAX_EXCHANGES {
             let Some(leaving) = self
                 .tree_edges
@@ -160,25 +169,13 @@ impl Ranker {
                 break;
             };
             let entering = self.enter_edge(leaving)?;
-            self.tree_edges.retain(|&edge| edge != leaving);
-            self.tree_edges.push(entering);
-            *self.is_tree_edge.get_mut(leaving)? = false;
-            *self.is_tree_edge.get_mut(entering)? = true;
-            self.init_tree()?;
-            self.update_ranks()?;
+            self.exchange(leaving, entering)?;
         }
         Some(())
     }
 
     fn slack(&self, edge: &RankEdge) -> Option<i64> {
         Some(self.rank.get(edge.to)? - self.rank.get(edge.from)? - edge.minlen)
-    }
-
-    /// The tree's nodes in the order graphlib lists them.
-    fn listed_tree_nodes(&self) -> Vec<usize> {
-        let mut nodes = self.tree_nodes.clone();
-        nodes.sort_by_key(|&node| self.key.get(node).copied());
-        nodes
     }
 
     /// dagre's `feasibleTree`: grows a tree of tight edges from the first node, shifting
@@ -208,16 +205,18 @@ impl Ranker {
     /// dagre's `tightTree`: from each tree node in turn, a depth-first search adds every
     /// node reached by a tight edge. Returns the tree's size.
     fn tight_tree(&mut self) -> Option<usize> {
-        for start in self.listed_tree_nodes() {
-            // Each node on the search's path, with the next of its edges to follow.
-            let mut path = vec![(start, 0)];
-            while let Some((node, next)) = path.last_mut() {
-                let node = *node;
-                let Some(&index) = self.incident.get(node)?.get(*next) else {
-                    path.pop();
+        let joined = self.tree_nodes.len();
+        // graphlib lists the tree's nodes as they were when the search began.
+        for at in 0..self.listed.len() {
+            self.path.clear();
+            self.path.push((*self.listed.get(at)?, 0));
+            while let Some(last) = self.path.last_mut() {
+                let (node, next) = *last;
+                last.1 += 1;
+                let Some(&index) = self.incident.get(node)?.get(next) else {
+                    self.path.pop();
                     continue;
                 };
-                *next += 1;
                 let edge = self.edges.get(index)?;
                 let other = if edge.from == node { edge.to } else { edge.from };
                 if !*self.in_tree.get(other)? && self.slack(edge)? == 0 {
@@ -225,56 +224,106 @@ impl Ranker {
                     self.tree_nodes.push(other);
                     self.tree_edges.push(index);
                     *self.is_tree_edge.get_mut(index)? = true;
-                    path.push((other, 0));
+                    self.path.push((other, 0));
                 }
             }
         }
+        // A stable sort keeps nodes of equal key in the order they joined, as graphlib
+        // lists them. With the joined nodes sorted first, it merges two sorted runs.
+        let key = &self.key;
+        let sorted = self.listed.len();
+        self.listed.extend_from_slice(self.tree_nodes.get(joined..)?);
+        self.listed.get_mut(sorted..)?.sort_by_key(|&node| key.get(node).copied());
+        self.listed.sort_by_key(|&node| key.get(node).copied());
         Some(self.tree_nodes.len())
     }
 
-    /// dagre's `initLowLimValues` and `initCutValues`, from `start`, the tree's root once
-    /// `feasible_tree` has run. Which neighbor the search visits first changes the numbers
-    /// but not what they say: which nodes lie below an edge, and each tree edge's cut value.
-    fn init_tree(&mut self) -> Option<()> {
-        let mut neighbors = vec![Vec::new(); self.rank.len()];
-        for &index in &self.tree_edges {
-            let edge = self.edges.get(index)?;
-            neighbors.get_mut(edge.from)?.push((edge.to, index));
-            neighbors.get_mut(edge.to)?.push((edge.from, index));
+    /// dagre's `exchangeEdges`: replaces `leaving` with `entering` in the tree, then renews
+    /// the numbers, cut values and ranks. dagre renews them over the whole tree, but only
+    /// the subtree of the deepest node above both edges changes shape, so only it is
+    /// numbered again; it keeps its size, so its numbers keep their range. Only the tree
+    /// edges on the cycle `entering` closes split the nodes differently, so only their cut
+    /// values are computed again.
+    fn exchange(&mut self, leaving: usize, entering: usize) -> Option<()> {
+        let edge = self.edges.get(leaving)?;
+        // `leaving` cuts `child`'s subtree off `parent`.
+        let (child, parent) = if self.lim.get(edge.from)? < self.lim.get(edge.to)? {
+            (edge.from, edge.to)
+        } else {
+            (edge.to, edge.from)
+        };
+        let edge = self.edges.get(entering)?;
+        let outside = if self.is_below(edge.from, child)? { edge.to } else { edge.from };
+        let mut top = parent;
+        while !self.is_below(outside, top)? {
+            top = self.tree_parent(top)?;
         }
-        let root = self.start;
-        let mut visited = vec![false; self.rank.len()];
-        let mut next_lim = 1;
-        let mut postorder = Vec::new();
+        self.tree_edges.retain(|&edge| edge != leaving);
+        self.tree_edges.push(entering);
+        *self.is_tree_edge.get_mut(leaving)? = false;
+        *self.is_tree_edge.get_mut(entering)? = true;
+        self.number_below(top, *self.low.get(top)?)?;
+        // The cycle runs from `child` up the new tree through `entering` to `top`, and from
+        // `parent` up to `top`. Each node's other tree edges below it keep their cut values.
+        for mut node in [child, parent] {
+            while node != top {
+                self.update_cut(node)?;
+                node = self.tree_parent(node)?;
+            }
+        }
+        self.update_ranks()
+    }
+
+    /// Whether `node` lies in the subtree of `top`, dagre's `isDescendant`.
+    fn is_below(&self, node: usize, top: usize) -> Option<bool> {
+        let at = *self.lim.get(node)?;
+        Some(*self.low.get(top)? <= at && at <= *self.lim.get(top)?)
+    }
+
+    /// The node above `node` in the tree, `None` for the tree's root.
+    fn tree_parent(&self, node: usize) -> Option<usize> {
+        let edge = self.edges.get((*self.parent_edge.get(node)?)?)?;
+        Some(if edge.from == node { edge.to } else { edge.from })
+    }
+
+    /// dagre's `dfsAssignLowLim` over the subtree of `top`, numbered from `first`, in a tree
+    /// rooted at `start`, its root once `feasible_tree` has run. Which neighbor the search
+    /// visits first changes the numbers but not what they say: which nodes lie below an
+    /// edge, and so each tree edge's cut value.
+    fn number_below(&mut self, top: usize, first: usize) -> Option<()> {
+        let mut next_lim = first;
         self.preorder.clear();
-        *self.parent_edge.get_mut(root)? = None;
-        *visited.get_mut(root)? = true;
-        *self.low.get_mut(root)? = next_lim;
-        self.preorder.push(root);
-        let mut path = vec![(root, 0)];
-        while let Some((node, next)) = path.last_mut() {
-            let node = *node;
-            let Some(&(child, index)) = neighbors.get(node)?.get(*next) else {
+        self.preorder.push(top);
+        *self.low.get_mut(top)? = next_lim;
+        self.path.clear();
+        self.path.push((top, 0));
+        while let Some(last) = self.path.last_mut() {
+            let (node, next) = *last;
+            last.1 += 1;
+            let Some(&index) = self.incident.get(node)?.get(next) else {
                 *self.lim.get_mut(node)? = next_lim;
                 next_lim += 1;
-                postorder.push(node);
-                path.pop();
+                self.path.pop();
                 continue;
             };
-            *next += 1;
-            if !*visited.get(child)? {
-                *visited.get_mut(child)? = true;
-                *self.low.get_mut(child)? = next_lim;
-                *self.parent_edge.get_mut(child)? = Some(index);
-                self.preorder.push(child);
-                path.push((child, 0));
+            if !*self.is_tree_edge.get(index)? || *self.parent_edge.get(node)? == Some(index) {
+                continue;
             }
+            let edge = self.edges.get(index)?;
+            let below = if edge.from == node { edge.to } else { edge.from };
+            *self.low.get_mut(below)? = next_lim;
+            *self.parent_edge.get_mut(below)? = Some(index);
+            self.preorder.push(below);
+            self.path.push((below, 0));
         }
-        for child in postorder {
-            if let Some(index) = *self.parent_edge.get(child)? {
-                let cut = self.cut_value(child, index)?;
-                *self.cut.get_mut(index)? = cut;
-            }
+        Some(())
+    }
+
+    /// dagre's `assignCutValue` for the tree edge from `child` to its parent, if any.
+    fn update_cut(&mut self, child: usize) -> Option<()> {
+        if let Some(index) = *self.parent_edge.get(child)? {
+            let cut = self.cut_value(child, index)?;
+            *self.cut.get_mut(index)? = cut;
         }
         Some(())
     }
@@ -326,7 +375,8 @@ impl Ranker {
         least.map(|(_, index)| index)
     }
 
-    /// dagre's `updateRanks`: each node at its tree edge's `minlen` from its parent.
+    /// dagre's `updateRanks`: each node at its tree edge's `minlen` from its parent. Only
+    /// the nodes below the last numbering's top move, as every tree edge was tight before.
     fn update_ranks(&mut self) -> Option<()> {
         for &node in self.preorder.get(1..)? {
             let edge = self.edges.get((*self.parent_edge.get(node)?)?)?;

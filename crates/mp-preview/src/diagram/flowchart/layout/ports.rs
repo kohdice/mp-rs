@@ -44,7 +44,7 @@ pub(in crate::diagram::flowchart) fn self_loop_label_at(
     label: &Label,
 ) -> Option<(usize, isize)> {
     let centre = signed(leg + SELF_LOOP_SPAN / 2)?;
-    let (before, _) = label_cross_reach(axis, label);
+    let Reach { before, .. } = label_cross_reach(axis, label);
     let along = match axis {
         Axis::Vertical => SELF_LOOP_CELLS,
         Axis::Horizontal => SELF_LOOP_CELLS + 1,
@@ -64,7 +64,7 @@ pub(in crate::diagram::flowchart) fn self_loop_label_at(
 pub(in crate::diagram::flowchart) fn port_cells<P: Ord>(
     axis: Axis,
     others: &[P],
-    reach: &[Reach],
+    reach: &[Option<Reach>],
     cells: &RangeInclusive<usize>,
     port: usize,
 ) -> Option<Vec<usize>> {
@@ -76,7 +76,7 @@ pub(in crate::diagram::flowchart) fn port_cells<P: Ord>(
 /// The reach of each end listed in the ends' order along the border, that is `others`
 /// sorted, ties keeping their order (the order [`scatter_by_order`] ranks by); `reach` is
 /// indexed like `others`, and an end missing from it has `None`.
-pub(super) fn reach_in_order<P: Ord>(others: &[P], reach: &[Reach]) -> Vec<Reach> {
+pub(super) fn reach_in_order<P: Ord>(others: &[P], reach: &[Option<Reach>]) -> Vec<Option<Reach>> {
     let mut order: Vec<usize> = (0..others.len()).collect();
     order.sort_by_key(|&end| others.get(end));
     order.iter().map(|&end| reach.get(end).copied().flatten()).collect()
@@ -84,8 +84,8 @@ pub(super) fn reach_in_order<P: Ord>(others: &[P], reach: &[Reach]) -> Vec<Reach
 
 /// Whether a link end at `cell` whose label has `reach` lies as far from each of
 /// `crossings` as two neighbouring ends must ([`pair_gap`]).
-fn clear_of(axis: Axis, cell: isize, reach: Reach, crossings: &[Crossing]) -> bool {
-    let apart = |distance: isize, before: Reach, after: Reach| {
+fn clear_of(axis: Axis, cell: isize, reach: Option<Reach>, crossings: &[Crossing]) -> bool {
+    let apart = |distance: isize, before: Option<Reach>, after: Option<Reach>| {
         usize::try_from(distance).is_ok_and(|distance| distance >= pair_gap(axis, before, after))
     };
     crossings.iter().all(|&(at, crossing)| {
@@ -97,69 +97,126 @@ fn clear_of(axis: Axis, cell: isize, reach: Reach, crossings: &[Crossing]) -> bo
     })
 }
 
-/// The cells, in order along a border, of link ends whose labels have the reach in
-/// `ordered`, packed from `first`: each end at the first cell clear of `crossings`
-/// ([`clear_of`]) from `first`, or from its gap in `gaps` after the end before it.
-/// `None` when an end would lie past `last`.
+/// Whether none of `crossings` lies between the legs of a self loop at `first` and
+/// `second`, where it would cut the loop's run; with a horizontal flow's spacing of one
+/// cell, a crossing there is clear of both legs.
+fn loop_uncut(first: isize, second: isize, crossings: &[Crossing]) -> bool {
+    !crossings.iter().any(|&(at, _)| first < at && at < second)
+}
+
+/// The ends on a frame's border along the flow, in order: the frame's own link ends,
+/// then the legs of its self loops, two to a loop, as [`exit_cells`] lists a box's.
+struct BorderEnds {
+    /// The reach of each end's label.
+    reach: Vec<Option<Reach>>,
+    /// The distance between each pair of neighbouring ends (see [`exit_ends`]).
+    gaps: Vec<usize>,
+    /// How many ends come before the loops' legs.
+    links: usize,
+}
+
+impl BorderEnds {
+    /// The link ends whose labels have the reach in `ordered`, followed by a self loop
+    /// for each of `loop_labels`.
+    fn new(axis: Axis, ordered: &[Option<Reach>], loop_labels: &[Option<&Label>]) -> Self {
+        let (reach, gaps) = exit_ends(axis, ordered, loop_labels);
+        Self { reach, gaps, links: ordered.len() }
+    }
+
+    /// Whether the end at `index` is a loop's first leg; its second follows it.
+    fn first_leg(&self, index: usize) -> bool {
+        index.checked_sub(self.links).is_some_and(|leg| leg % 2 == 0)
+    }
+}
+
+/// The cells, in order along a border, of `ends`, packed from `first`: each end at the
+/// first cell clear of `crossings` ([`clear_of`]) from `first`, or from its gap after the
+/// end before it; a loop's legs move together, [`SELF_LOOP_SPAN`] apart, with no
+/// crossing between them ([`loop_uncut`]). `None` when an end would lie past `last`.
 fn packed_ports(
     axis: Axis,
-    ordered: &[Reach],
-    gaps: &[usize],
+    ends: &BorderEnds,
     crossings: &[Crossing],
     first: isize,
     last: isize,
 ) -> Option<Vec<isize>> {
-    let mut cells: Vec<isize> = Vec::with_capacity(ordered.len());
-    for (index, &reach) in ordered.iter().enumerate() {
+    let span = signed(SELF_LOOP_SPAN)?;
+    let mut cells: Vec<isize> = Vec::with_capacity(ends.reach.len());
+    while cells.len() < ends.reach.len() {
+        let index = cells.len();
         let mut cell = match index.checked_sub(1) {
-            Some(before) => cells.get(before)? + signed(*gaps.get(before)?)?,
+            Some(before) => cells.get(before)? + signed(*ends.gaps.get(before)?)?,
             None => first,
         };
-        while cell <= last && !clear_of(axis, cell, reach, crossings) {
-            cell += 1;
+        let reach = *ends.reach.get(index)?;
+        if ends.first_leg(index) {
+            let second = *ends.reach.get(index + 1)?;
+            let fits = |cell: isize| {
+                clear_of(axis, cell, reach, crossings)
+                    && clear_of(axis, cell + span, second, crossings)
+                    && loop_uncut(cell, cell + span, crossings)
+            };
+            while cell + span <= last && !fits(cell) {
+                cell += 1;
+            }
+            if cell + span > last {
+                return None;
+            }
+            cells.extend([cell, cell + span]);
+        } else {
+            while cell <= last && !clear_of(axis, cell, reach, crossings) {
+                cell += 1;
+            }
+            if cell > last {
+                return None;
+            }
+            cells.push(cell);
         }
-        if cell > last {
-            return None;
-        }
-        cells.push(cell);
     }
     Some(cells)
 }
 
-/// The cells a box would give link ends whose labels have the reach in `ordered`, `gaps`
-/// apart about `middle` (see [`symmetric_offsets`]), when they all lie within
-/// `low..=high` clear of `crossings`.
+/// The cells a box would give `ends`, spread about `middle` (see [`symmetric_offsets`]),
+/// when they all lie within `low..=high` clear of `crossings`, none between a loop's
+/// legs.
 fn box_spread(
     axis: Axis,
-    ordered: &[Reach],
-    gaps: &[usize],
+    ends: &BorderEnds,
     crossings: &[Crossing],
     (low, high): (isize, isize),
     middle: isize,
 ) -> Option<Vec<isize>> {
-    let cells: Vec<isize> =
-        symmetric_offsets(ordered.len(), gaps)?.into_iter().map(|offset| middle + offset).collect();
-    let fits = cells.iter().zip(ordered).all(|(&cell, &reach)| {
+    let cells: Vec<isize> = symmetric_offsets(ends.reach.len(), &ends.gaps)?
+        .into_iter()
+        .map(|offset| middle + offset)
+        .collect();
+    let ends_fit = cells.iter().zip(&ends.reach).all(|(&cell, &reach)| {
         (low..=high).contains(&cell) && clear_of(axis, cell, reach, crossings)
     });
-    fits.then_some(cells)
+    let loops_fit = cells.get(ends.links..)?.chunks(2).all(|legs| match *legs {
+        [first, second] => loop_uncut(first, second, crossings),
+        _ => false,
+    });
+    (ends_fit && loops_fit).then_some(cells)
 }
 
 /// The cells, in order along a border running from `low` to `high`, of a frame's own link
-/// ends whose labels have the reach in `ordered`, clear of the `crossings` of links
-/// passing the border into the frame. They are spread about `middle` as on a box where
-/// that fits ([`box_spread`]); otherwise they take the packing ([`packed_ports`]) whose
-/// farthest end lies nearest `middle`, ties going to the one with the fewest crossings
-/// between its ends, so the frame's own links stay together. `None` when nothing fits.
+/// ends whose labels have the reach in `ordered`, followed by the legs of a self loop for
+/// each of `loop_labels` (see [`BorderEnds`]), clear of the `crossings` of links passing
+/// the border into the frame. They are spread about `middle` as on a box where that fits
+/// ([`box_spread`]); otherwise they take the packing ([`packed_ports`]) whose farthest
+/// end lies nearest `middle`, ties going to the one with the fewest crossings between its
+/// ends, so the frame's own links stay together. `None` when nothing fits.
 pub(super) fn frame_ports(
     axis: Axis,
-    ordered: &[Reach],
+    ordered: &[Option<Reach>],
+    loop_labels: &[Option<&Label>],
     crossings: &[Crossing],
     (low, high): (isize, isize),
     middle: isize,
 ) -> Option<Vec<isize>> {
-    let gaps = end_gaps(axis, ordered);
-    if let Some(cells) = box_spread(axis, ordered, &gaps, crossings, (low, high), middle) {
+    let ends = BorderEnds::new(axis, ordered, loop_labels);
+    if let Some(cells) = box_spread(axis, &ends, crossings, (low, high), middle) {
         return Some(cells);
     }
     if crossings.is_empty() {
@@ -168,7 +225,7 @@ pub(super) fn frame_ports(
     let mut best: Option<((isize, usize, isize), Vec<isize>)> = None;
     for first in low..=high {
         // Packing from a later cell puts no end before the one from an earlier cell.
-        let Some(cells) = packed_ports(axis, ordered, &gaps, crossings, first, high) else {
+        let Some(cells) = packed_ports(axis, &ends, crossings, first, high) else {
             break;
         };
         let distance = |cell: &isize| (cell - middle).abs();
@@ -195,29 +252,31 @@ pub(super) fn frame_ports(
 
 /// The fewest cells a frame grows by on each side of its members' cells `low..=high` for
 /// [`frame_ports`] to place its own link ends, whose labels have the reach in `ordered`,
-/// about `middle` clear of `crossings`. Growing never makes them fit less well, so the
-/// count is found by halving an interval between a count that does not fit and one that
-/// does. The top of the interval — past the members' cells and the crossings, room for
-/// every gap and one more step on either side — is taken to fit and is never tested.
+/// and the legs of a self loop for each of `loop_labels`, about `middle` clear of
+/// `crossings`. Growing never makes them fit less well, so the count is found by halving
+/// an interval between a count that does not fit and one that does. The top of the
+/// interval — past the members' cells and the crossings, room for every gap and one more
+/// step on either side — is taken to fit and is never tested.
 pub(super) fn frame_growth(
     axis: Axis,
-    ordered: &[Reach],
+    ordered: &[Option<Reach>],
+    loop_labels: &[Option<&Label>],
     crossings: &[Crossing],
     (low, high): (isize, isize),
     middle: isize,
 ) -> Option<usize> {
-    let gaps = end_gaps(axis, ordered);
+    let ends = BorderEnds::new(axis, ordered, loop_labels);
     let fits = |grown: isize| {
         let (low, high) = (low - grown, high + grown);
-        box_spread(axis, ordered, &gaps, crossings, (low, high), middle).is_some()
-            || (!crossings.is_empty()
-                && packed_ports(axis, ordered, &gaps, crossings, low, high).is_some())
+        box_spread(axis, &ends, crossings, (low, high), middle).is_some()
+            || (!crossings.is_empty() && packed_ports(axis, &ends, crossings, low, high).is_some())
     };
-    let widest = |reach: Reach| reach.map_or(0, |(before, after)| before.max(after));
-    let reach = crossings.iter().map(|&(_, reach)| reach).chain(ordered.iter().copied());
+    let widest =
+        |reach: Option<Reach>| reach.map_or(0, |Reach { before, after }| before.max(after));
+    let reach = crossings.iter().map(|&(_, reach)| reach).chain(ends.reach.iter().copied());
     let step = signed(axis.entry_spacing().max(2 * reach.map(widest).max().unwrap_or(0) + 2))?;
     let outside = crossings.iter().map(|&(at, _)| (low - at).max(at - high)).max().unwrap_or(0);
-    let total = gaps.iter().try_fold(0, |total: isize, &gap| Some(total + signed(gap)?))?;
+    let total = ends.gaps.iter().try_fold(0, |total: isize, &gap| Some(total + signed(gap)?))?;
     let (mut short, mut enough) = (-1, (high - low) + total + outside.max(0) + 2 * step);
     while enough - short > 1 {
         let grown = short + (enough - short) / 2;
@@ -285,7 +344,14 @@ pub(in crate::diagram::flowchart) fn exit_cells(
 
 /// The distances between neighbouring ends on a box's far border along the flow, in the
 /// order [`exit_cells`] lists them: `targets` links to other slots, then a self loop of
-/// two legs for each of `loop_labels`. The legs of one loop are [`SELF_LOOP_SPAN`]
+/// two legs for each of `loop_labels` (see [`exit_ends`]).
+pub(super) fn exit_gaps(axis: Axis, targets: usize, loop_labels: &[Option<&Label>]) -> Vec<usize> {
+    exit_ends(axis, &vec![None; targets], loop_labels).1
+}
+
+/// The reach of each end leaving a border along the flow, and the distances between
+/// neighbouring ends: link ends whose labels have the reach in `ordered`, then a self loop
+/// of two legs for each of `loop_labels`. The legs of one loop are [`SELF_LOOP_SPAN`]
 /// apart; any other neighbours are [`end_gaps`] apart, as the ends of labelled links
 /// entering a box are. In a vertical layout a loop's label lies across the flow, centred
 /// on the cell between the legs, so each leg carries the label's reach measured from it;
@@ -293,23 +359,28 @@ pub(in crate::diagram::flowchart) fn exit_cells(
 /// horizontal one the label's middle row is the row between the legs, and a leg whose
 /// row the label reaches carries the rows reaching on past it, so that the end next to
 /// the leg keeps a blank row from the label too.
-pub(super) fn exit_gaps(axis: Axis, targets: usize, loop_labels: &[Option<&Label>]) -> Vec<usize> {
-    let mut ordered: Vec<Reach> = vec![None; targets];
+fn exit_ends(
+    axis: Axis,
+    ordered: &[Option<Reach>],
+    loop_labels: &[Option<&Label>],
+) -> (Vec<Option<Reach>>, Vec<usize>) {
+    let mut ordered = ordered.to_vec();
+    let links = ordered.len();
     let half = SELF_LOOP_SPAN / 2;
     for label in loop_labels {
         let legs = match (axis, label) {
             (Axis::Vertical, Some(label)) => {
-                let (before, after) = label_cross_reach(axis, label);
+                let Reach { before, after } = label_cross_reach(axis, label);
                 [
-                    Some((before.saturating_sub(half), after + half)),
-                    Some((before + half, after.saturating_sub(half))),
+                    Some(Reach { before: before.saturating_sub(half), after: after + half }),
+                    Some(Reach { before: before + half, after: after.saturating_sub(half) }),
                 ]
             }
             (Axis::Horizontal, Some(label)) => {
-                let (before, after) = label_cross_reach(axis, label);
+                let Reach { before, after } = label_cross_reach(axis, label);
                 [
-                    (before >= half).then(|| (before - half, 0)),
-                    (after >= half).then(|| (0, after - half)),
+                    (before >= half).then(|| Reach { before: before - half, after: 0 }),
+                    (after >= half).then(|| Reach { before: 0, after: after - half }),
                 ]
             }
             (_, None) => [None, None],
@@ -318,11 +389,11 @@ pub(super) fn exit_gaps(axis: Axis, targets: usize, loop_labels: &[Option<&Label
     }
     let mut gaps = end_gaps(axis, &ordered);
     for index in 0..loop_labels.len() {
-        if let Some(gap) = gaps.get_mut(targets + 2 * index) {
+        if let Some(gap) = gaps.get_mut(links + 2 * index) {
             *gap = SELF_LOOP_SPAN;
         }
     }
-    gaps
+    (ordered, gaps)
 }
 
 /// The cell of each of `count` link ends in their order along a border: spread
@@ -343,7 +414,7 @@ fn ranked_ports(
 
 /// The distance between each pair of neighbouring ends, listed in order along the
 /// border with the reach of each end's label (see [`pair_gap`]).
-pub(super) fn end_gaps(axis: Axis, ordered: &[Reach]) -> Vec<usize> {
+pub(super) fn end_gaps(axis: Axis, ordered: &[Option<Reach>]) -> Vec<usize> {
     ordered
         .windows(2)
         .map(|pair| match *pair {
@@ -356,13 +427,13 @@ pub(super) fn end_gaps(axis: Axis, ordered: &[Reach]) -> Vec<usize> {
 /// The distance between two neighbouring ends along a border, the first with the reach
 /// `before` and the second with `after`: [`Axis::entry_spacing`], or, where either end has
 /// a label, enough for one blank cell between a label and the label or line next to it.
-fn pair_gap(axis: Axis, before: Reach, after: Reach) -> usize {
+fn pair_gap(axis: Axis, before: Option<Reach>, after: Option<Reach>) -> usize {
     let spacing = axis.entry_spacing();
     match (before, after) {
         (None, None) => spacing,
         _ => {
-            let after_first = before.map_or(0, |(_, after)| after);
-            let before_second = after.map_or(0, |(before, _)| before);
+            let after_first = before.map_or(0, |reach| reach.after);
+            let before_second = after.map_or(0, |reach| reach.before);
             spacing.max(after_first + before_second + 2)
         }
     }

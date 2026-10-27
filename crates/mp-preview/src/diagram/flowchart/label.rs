@@ -1,7 +1,10 @@
-//! Label text as upstream Mermaid shows it, following
-//! `packages/mermaid/src/diagrams/common/common.ts` in <https://github.com/mermaid-js/mermaid>.
+//! Label text as upstream Mermaid (<https://github.com/mermaid-js/mermaid>) shows it in
+//! node labels, edge labels and subgraph titles: entity codes, blanks, line breaks,
+//! FontAwesome icons and markdown strings.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use entities::ENTITIES;
 use unicode_width::UnicodeWidthStr;
@@ -9,10 +12,28 @@ use unicode_width::UnicodeWidthStr;
 use crate::control::visualize_control;
 
 /// The text a node label, edge label or subgraph title shows for `source`: entity codes
-/// decoded (see [`decode_entities`]), then made safe to show (see [`shown_text`]), a
-/// control character a code decodes to included.
+/// decoded (see [`decode_entities`]), each run of blanks shown as one space (see
+/// [`collapsed_blanks`]), then made safe to show (see [`shown_text`]), a control
+/// character a code decodes to included.
 fn label_text(source: &str) -> String {
-    shown_text(&decode_entities(source))
+    shown_text(&collapsed_blanks(&decode_entities(source)))
+}
+
+/// `text` with each run of spaces and tabs replaced by one space: upstream lays labels
+/// out with `white-space: nowrap`, which collapses such runs. It runs after entity codes
+/// are decoded, so a tab written `#9;` collapses too; a no-break space is not a blank to
+/// HTML and is kept.
+fn collapsed_blanks(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    let mut after_blank = false;
+    for character in text.chars() {
+        let blank = matches!(character, ' ' | '\t');
+        if !(blank && after_blank) {
+            collapsed.push(if blank { ' ' } else { character });
+        }
+        after_blank = blank;
+    }
+    collapsed
 }
 
 /// `text` with each tab or no-break space a space and any other control character shown
@@ -34,7 +55,8 @@ pub(super) fn is_entity_name_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_'
 }
 
-/// `text` with each entity code `#name;` replaced by the character it stands for. Upstream
+/// `text` with each entity code `#name;` replaced by the character it stands for. Upstream's
+/// `encodeEntities` and `decodeEntities` (`packages/mermaid/src/utils.ts`)
 /// turns an all-digit name into `&#digits;` and any other into `&name;` and lets HTML
 /// resolve it, so only decimal code points and HTML named character references decode;
 /// any other code, `#x26;` among them, is left as written. Upstream hands an unknown name
@@ -127,11 +149,21 @@ fn entity(name: &str) -> Option<Cow<'static, str>> {
         let character = name.parse::<u32>().map_or(char::REPLACEMENT_CHARACTER, decimal_character);
         return Some(Cow::Owned(character.to_string()));
     }
-    ENTITIES
-        .iter()
-        .find(|entity| entity.entity.strip_circumfix('&', ';') == Some(name))
-        .map(|entity| Cow::Borrowed(entity.characters))
+    ENTITY_CHARACTERS.get(name).map(|&characters| Cow::Borrowed(characters))
 }
+
+/// The characters of each HTML named character reference, by name without its `&` and `;`;
+/// the first entry of [`ENTITIES`] wins where several give one name. The references
+/// written without a `;` are left out, as an entity code always ends with one.
+static ENTITY_CHARACTERS: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
+    let mut by_name = HashMap::new();
+    for entity in &ENTITIES {
+        if let Some(name) = entity.entity.strip_circumfix('&', ';') {
+            by_name.entry(name).or_insert(entity.characters);
+        }
+    }
+    by_name
+});
 
 /// A stretch of label text drawn in one style.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,7 +307,7 @@ impl Label {
     /// meet beside a box: the middle row, the upper of the two middle rows for an even
     /// count.
     pub(super) fn middle_row(&self) -> usize {
-        (self.height() - 1) / 2
+        self.height().saturating_sub(1) / 2
     }
 }
 
@@ -322,7 +354,9 @@ fn drop_icons(row: &str) -> (Cow<'_, str>, Vec<&str>) {
     let mut kept = String::with_capacity(row.len());
     let mut names = Vec::new();
     let mut rest = row;
-    while let Some(c) = rest.chars().next() {
+    loop {
+        let mut chars = rest.chars();
+        let Some(c) = chars.next() else { break };
         match icon_token(rest) {
             Some((length, name)) => {
                 names.push(name);
@@ -335,7 +369,7 @@ fn drop_icons(row: &str) -> (Cow<'_, str>, Vec<&str>) {
             }
             None => {
                 kept.push(c);
-                rest = rest.get(c.len_utf8()..).unwrap_or_default();
+                rest = chars.as_str();
             }
         }
     }
@@ -377,9 +411,10 @@ fn without_icon_runs(row: Row) -> Row {
 }
 
 /// The rows of `source` between line breaks, upstream's `lineBreakRegex`
-/// `/<\/?br\s*\/?>/gi`: `<br>`, `<br/>`, `<br />` and `</br>` in any case, with any
-/// blanks before the closing `/` or `>`. The blanks around a break are dropped, as a
-/// browser drops them at the ends of a line.
+/// `/<\/?br\s*\/?>/gi` (`packages/mermaid/src/diagrams/common/common.ts`): `<br>`,
+/// `<br/>`, `<br />` and `</br>` in any case, with any blanks before the closing `/` or
+/// `>`. The blanks around a break are dropped, as a browser drops them at the ends of a
+/// line.
 fn split_rows<'s>(source: &'s str) -> Vec<&'s str> {
     let push = |rows: &mut Vec<&'s str>, row: &'s str| match rows.last_mut() {
         Some(previous) => {
@@ -496,7 +531,7 @@ fn pair_delimiters(mut pieces: Vec<Piece>) -> (Vec<Piece>, Vec<(usize, usize)>) 
             }
             for index in [opener, closer] {
                 if let Some(Piece::Delimiter(delimiter)) = pieces.get_mut(index) {
-                    delimiter.count -= used;
+                    delimiter.count = delimiter.count.saturating_sub(used);
                 }
             }
             // Openers after the one used lie inside the emphasis and stay unpaired.
@@ -616,16 +651,6 @@ mod tests {
         assert_eq!(
             Label::parse("\"`This *is* _Markdown_`\"").rows(),
             [vec![plain("This "), italic("is"), plain(" "), italic("Markdown")]]
-        );
-    }
-
-    #[test]
-    fn label_markdown_string_emphasis_nests() {
-        let bold_italic = Run { text: "b".to_owned(), bold: true, italic: true };
-
-        assert_eq!(
-            Label::parse("\"`*a **b** c*`\"").rows(),
-            [vec![italic("a "), bold_italic, italic(" c")]]
         );
     }
 

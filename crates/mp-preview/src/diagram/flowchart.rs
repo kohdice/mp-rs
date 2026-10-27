@@ -2,6 +2,7 @@
 //! collapsed, drop the links between a subgraph and what lies inside it, lay out in
 //! layers, route the links, then draw.
 
+mod chart;
 mod collapse;
 mod draw;
 mod label;
@@ -45,15 +46,14 @@ fn signed(value: usize) -> Option<isize> {
     isize::try_from(value).ok()
 }
 
-/// Parses `source`, collapses its collapsed subgraphs, drops the links between a
-/// subgraph and what lies inside it (see [`own_frame::drop_own_frame_links`]), draws each
-/// subgraph laid out in a direction of its own as one box (see [`unit::embed_units`])
-/// and the chart around them as [`render_chart`] does, under the frontmatter's title
-/// when it gives one, at the default spacing and then tighter ones until the drawing
-/// fits; unsupported when none does. A source longer than [`MAX_TEXT_SIZE`] is drawn as
-/// [`TEXT_SIZE_EXCEEDED`]. A syntax error comes from parsing.
+/// Draws `source` under the frontmatter's title when it gives one, at the default
+/// spacing and then tighter ones until the drawing fits in `width`; unsupported when none
+/// does. A source longer than [`MAX_TEXT_SIZE`] is drawn as [`TEXT_SIZE_EXCEEDED`]. A
+/// syntax error comes from parsing.
 pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Failure> {
-    let front = parse::front_matter(source)?;
+    // Upstream's `cleanupText` rewrites the whole text before the frontmatter is read.
+    let source = parse::with_single_quoted_attributes(source);
+    let front = parse::front_matter(&source)?;
     // A string has at least as many bytes as UTF-16 units, and `text_size` only removes
     // text, so a body no longer in bytes than the limit is not measured.
     let too_long = front.body.len() > MAX_TEXT_SIZE && parse::text_size(front.body) > MAX_TEXT_SIZE;
@@ -64,8 +64,9 @@ pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Fa
     let chart = own_frame::drop_own_frame_links(chart)?;
     // A unit's drawing tightens along with the chart around it, so each step draws the
     // units again rather than embedding drawings made at the default spacing.
+    let draw_unit = |chart, level| render_chart(chart, None, None, level);
     for level in 0..layout::LEVELS {
-        let Some(embedded) = unit::embed_units(chart.clone(), 0, None, level)? else {
+        let Some(embedded) = unit::embed_units(chart.clone(), 0, None, level, &draw_unit)? else {
             continue;
         };
         if let Some(drawing) = render_chart(embedded, width, front.title.as_deref(), level)? {
@@ -82,28 +83,47 @@ pub(super) fn render(source: &str, width: Option<usize>) -> Result<Vec<Line>, Fa
 /// cells that cannot shrink, so [`render`] tries the next step instead and otherwise
 /// falls back. A `title` is drawn above the drawing and counts toward both bounds.
 fn render_chart(
-    chart: parse::Flowchart,
+    chart: chart::Flowchart,
     width: Option<usize>,
     title: Option<&str>,
     level: usize,
 ) -> Result<Option<Vec<Line>>, Failure> {
     let title_width = title.map(UnicodeWidthStr::width);
-    let growth = layout::grow_boxes(&chart).ok_or(Failure::Unsupported)?;
-    let mut chart = chart.with_growth(growth);
     if chart.nodes.is_empty() {
         return Err(Failure::Unsupported);
     }
-    let axis = chart.direction.axis();
+    let direction = chart.direction;
+    let axis = direction.axis();
     let spacing = axis.spacing(level);
+    let ranked = layout::Ranked::new(chart).ok_or(Failure::Unsupported)?;
+    let chart = ranked.chart();
+    let mut growth = layout::grow_boxes(&ranked).ok_or(Failure::Unsupported)?;
+    let lay_out = |growth: &layout::Growth| {
+        layout::lay_out(&ranked, growth, spacing.sibling_gap).ok_or(Failure::Unsupported)
+    };
+    // A layout of the chart as it now grows, kept for the next step to start from.
+    let mut current = None;
     // How far apart labelled links must enter a box depends on the order they arrive
-    // in, which only a layout tells.
+    // in, which only a layout tells, and grown boxes keep that order unless a layer is
+    // reordered where a stray moves out of a frame (see `grow_for_labels`). The rounds
+    // allow the first growth, one more for each frame and a layout confirming the last;
+    // as for the frames below, the bound is a safety valve, and boxes still growing at
+    // it fall back.
     if chart.edges.iter().any(|edge| edge.label.is_some()) {
-        let layered =
-            layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?;
-        let growth = layout::grow_for_labels(&chart, &layered).ok_or(Failure::Unsupported)?;
-        chart = chart.with_growth(growth);
+        let mut settled = None;
+        for _ in 0..chart.subgraphs.len() + 2 {
+            let layered = lay_out(&growth)?;
+            let grown =
+                layout::grow_for_labels(chart, &growth, &layered).ok_or(Failure::Unsupported)?;
+            if grown == growth {
+                settled = Some(layered);
+                break;
+            }
+            growth = grown;
+        }
+        current = Some(settled.ok_or(Failure::Unsupported)?);
     }
-    let ends_at_frame = |end: parse::End| matches!(end, parse::End::Subgraph(_));
+    let ends_at_frame = |end: chart::End| matches!(end, chart::End::Subgraph(_));
     let frame_ends =
         chart.edges.iter().any(|edge| ends_at_frame(edge.from) || ends_at_frame(edge.to));
     // How many cells the links meeting a frame need depends on the cells its members
@@ -118,10 +138,12 @@ fn render_chart(
         // fall back rather than share border cells.
         let mut settled = None;
         for _ in 0..=chart.subgraphs.len() {
-            let layered =
-                layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?;
-            match layout::grow_frames(&chart, &layered) {
-                Some(growth) => chart = chart.with_growth(growth),
+            let layered = match current.take() {
+                Some(layered) => layered,
+                None => lay_out(&growth)?,
+            };
+            match layout::grow_frames(&growth, &layered) {
+                Some(grown) => growth = grown,
                 None => {
                     settled = Some(layered);
                     break;
@@ -130,10 +152,14 @@ fn render_chart(
         }
         settled.ok_or(Failure::Unsupported)?
     } else {
-        layout::lay_out(&chart, axis, spacing.sibling_gap).ok_or(Failure::Unsupported)?
+        match current {
+            Some(layered) => layered,
+            None => lay_out(&growth)?,
+        }
     };
     let routed =
-        route::route(&chart, &layered, axis, spacing.layer_gap).ok_or(Failure::Unsupported)?;
+        route::route(chart, &growth, &layered, ranked.memberships(), axis, spacing.layer_gap)
+            .ok_or(Failure::Unsupported)?;
     // Labels only add cells, so a scene already too large is not worth placing them on.
     if !fits(routed.extent_without_labels(axis), axis, width, title_width) {
         return Ok(None);
@@ -142,7 +168,7 @@ fn render_chart(
     if !fits(scene.extent(axis), axis, width, title_width) {
         return Ok(None);
     }
-    let drawing = draw::draw(&scene, chart.direction);
+    let drawing = draw::draw(&scene, direction);
     Ok(Some(match title {
         Some(title) => draw::titled(drawing, title),
         None => drawing,

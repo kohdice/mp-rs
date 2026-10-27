@@ -1,6 +1,6 @@
 //! Link tokens: their strokes, markers, lengths, text and edge ids.
 
-use super::{Marker, Stroke};
+use crate::diagram::flowchart::chart::{Marker, Stroke};
 
 /// The most layers a link spans, however many line characters it has: upstream's
 /// `addSingleLink` lowers a longer link's `length` to 10.
@@ -125,16 +125,22 @@ pub(super) fn opens_text(stroke: Stroke, after_base: &str) -> bool {
     }
 }
 
-/// Splits an edge id and the `@` after it off the start of `text`, for Mermaid's
-/// `LINK_ID` token `[^\s\"]+\@(?=[^\{\"])`, which stands before a link. The id ends at
-/// the first `@`: the token's greedy match may take the last one, which would swallow an
-/// `@` inside a following label, and that `@` stays label text here.
+/// Splits an edge id, the `@` after it and the blanks after that off the start of
+/// `text`, for Mermaid's `LINK_ID` token `[^\s\"\[\]\(\)\{\}\|]+\@(?=[^\{\"])`, which
+/// stands before a link whose `LINK` token starts with `\s*`. The match is greedy, so
+/// the id runs to the last `@` of its run of characters that a character other than `{`
+/// or `"` follows, and may hold `@` itself (`e1@x@-->` has the id `e1@x`).
 pub(super) fn edge_id(text: &str) -> Option<(&str, &str)> {
-    let token = text.split(|c: char| c.is_whitespace() || c == '"').next()?;
-    let at = token.find('@')?;
-    let (id, after_at) = (token.get(..at)?, text.get(at + 1..)?);
-    let next = after_at.chars().next()?;
-    (!id.is_empty() && next != '{' && next != '"').then_some((id, after_at))
+    let run = text
+        .find(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '[' | ']' | '(' | ')' | '{' | '}' | '|')
+        })
+        .unwrap_or(text.len());
+    text.get(..run)?.match_indices('@').rev().find_map(|(at, _)| {
+        let (id, after_at) = (text.get(..at)?, text.get(at + 1..)?);
+        let next = after_at.chars().next()?;
+        (!id.is_empty() && next != '{' && next != '"').then_some((id, after_at.trim_start()))
+    })
 }
 
 /// The byte index of the first `close` in `text`, searching after the double-quoted

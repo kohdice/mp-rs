@@ -2,8 +2,8 @@
 
 use unicode_width::UnicodeWidthStr;
 
+use super::chart::Shape;
 use super::label::Label;
-use super::parse::Shape;
 
 /// One row of a box: the blank cells before and after it, the glyphs at its two ends,
 /// and the glyph repeated between them — on the label row, a blank, which leaves the

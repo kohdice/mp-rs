@@ -27,10 +27,17 @@ Markdown text ──> markdown ──> model ──> layout ──> ansi ──>
    `Vec<Block>`; the comrak arena is dropped before returning.
 2. `layout` turns one `Block` into lines of styled spans, applying the width limit, list
    markers, quote bars, table borders, and syntax highlighting. A fenced block whose info
-   string's first word, cut before its first `,`, is `mermaid` is first handed from
+   string's first word, cut before its first `,`, is `mermaid` (compared
+   case-sensitively, so `Mermaid` stays a code block; GitHub's documentation shows only
+   the lowercase identifier and says nothing about case) is first handed from
    `layout/code.rs` to `diagram` (`crates/mp-preview/src/diagram.rs`), a crate-level
-   module of pure calculations (parse, layer, route, draw onto a character canvas); when
-   the diagram cannot be drawn, the block is laid out as an ordinary code block.
+   module of pure calculations: parse the source into the chart data model
+   (`diagram/flowchart/chart.rs`) that the later stages read, then layer, route, and
+   draw onto a character canvas. A subgraph laid out in a direction of its own is drawn
+   as a diagram of its own and embedded as one box (`diagram/flowchart/unit.rs`); the
+   function that draws it is passed in by `diagram/flowchart.rs`, so `unit` depends on
+   the data model only, never on the module that calls it. When the diagram cannot be
+   drawn, the block is laid out as an ordinary code block.
 3. `ansi` encodes those lines as text, emitting escape sequences only in `ColorMode::Ansi`.
 4. `preview` writes each encoded block to the caller's writer before laying out the next one.
 
